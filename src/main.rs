@@ -42,6 +42,8 @@ enum Command {
     /// Show the current stack and its PR status.
     #[command(visible_aliases = ["ls", "list"])]
     Status,
+    /// Split the current branch's commits into a stack of branches.
+    Split,
     /// Describe what the current branch/PR is about (becomes the PR body).
     Describe {
         /// Description text (opens $EDITOR if omitted).
@@ -141,6 +143,7 @@ fn main() {
         Command::Init { trunk } => commands::init(trunk),
         Command::Create { name } => commands::create(&name),
         Command::Status => commands::status(),
+        Command::Split => commands::split(),
         Command::Describe { message } => commands::describe(message),
         Command::Track { parent } => commands::track(parent),
         Command::Untrack => commands::untrack(),

@@ -286,6 +286,65 @@ fn sync_no_push_leaves_remote_untouched() {
     assert_ne!(ls_remote(dir, "a"), git_out(dir, &["rev-parse", "a"]));
 }
 
+/// True if `rev:path` exists in the repo.
+fn exists_at(dir: &Path, rev: &str, path: &str) -> bool {
+    StdCommand::new("git")
+        .args(["cat-file", "-e", &format!("{rev}:{path}")])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn split_divides_a_branch_into_a_stack() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "feature"]).assert().success();
+    commit(dir, "c1.txt");
+    commit(dir, "c2.txt");
+    commit(dir, "c3.txt");
+
+    // Editor assigns commit 1 -> api, 2 -> service, 3 -> ui.
+    let editor =
+        "sed -i '' -e '1s/^feature /api /' -e '2s/^feature /service /' -e '3s/^feature /ui /'";
+    stack(dir)
+        .env("GIT_EDITOR", editor)
+        .arg("split")
+        .assert()
+        .success();
+
+    // Three tracked branches with the right parent chain.
+    assert_eq!(git_out(dir, &["config", "branch.api.stackParent"]), "main");
+    assert_eq!(
+        git_out(dir, &["config", "branch.service.stackParent"]),
+        "api"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.ui.stackParent"]),
+        "service"
+    );
+
+    // Each branch contains exactly its own slice of history.
+    assert!(exists_at(dir, "api", "c1.txt"));
+    assert!(
+        !exists_at(dir, "api", "c2.txt"),
+        "api should not include c2"
+    );
+    assert!(exists_at(dir, "service", "c2.txt"));
+    assert!(
+        !exists_at(dir, "service", "c3.txt"),
+        "service should not include c3"
+    );
+    for f in ["c1.txt", "c2.txt", "c3.txt"] {
+        assert!(exists_at(dir, "ui", f), "ui should include {f}");
+    }
+
+    // Ends up checked out on the top of the new stack.
+    assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "ui");
+}
+
 #[test]
 fn describe_stores_and_clears_description() {
     let tmp = new_repo();

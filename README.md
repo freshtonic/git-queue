@@ -67,6 +67,7 @@ git stack submit               # refresh the PRs
 |---|---|
 | `git stack init [--trunk <b>]` | Record the trunk branch for this repo. |
 | `git stack create <name>` | Create `<name>` on top of the current branch and track it. |
+| `git stack split` | Split the current branch's commits into a stack (editor assigns commits to branches). |
 | `git stack track [--parent <b>]` | Adopt the current branch into a stack (parent defaults to trunk). |
 | `git stack untrack` | Forget the current branch's stack metadata. |
 | `git stack describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |

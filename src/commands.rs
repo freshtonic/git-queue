@@ -45,6 +45,168 @@ pub fn create(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// `git stack split` — split the current branch's commits into a stack of
+/// branches. Opens a `rebase -i`-style editor where each commit is prefixed
+/// with the branch it should belong to; consecutive commits sharing a name
+/// become one branch, and the groups stack in order (file order = merge order).
+pub fn split() -> Result<()> {
+    git::ensure_repo()?;
+    if !git::worktree_clean() {
+        bail!("working tree has uncommitted changes; commit or stash them before splitting");
+    }
+    let stack = Stack::load()?;
+    let branch = git::current_branch()?;
+    let base = if stack.is_tracked(&branch) {
+        stack.parent_of(&branch).unwrap().to_string()
+    } else {
+        stack.trunk.clone()
+    };
+
+    let commits = git::commits_between(&base, &branch)?;
+    if commits.len() < 2 {
+        bail!("`{branch}` has fewer than 2 commits beyond `{base}`; nothing to split");
+    }
+
+    let assignments = edit_split_plan(&branch, &commits)?;
+    let segments = parse_segments(&assignments, &commits)?;
+    if segments.len() < 2 {
+        println!("All commits stayed in one branch — nothing split.");
+        return Ok(());
+    }
+
+    // Names must be free (unless it's the original branch we're reusing).
+    for (name, _) in &segments {
+        if name != &branch && git::branch_exists(name) {
+            bail!("branch `{name}` already exists; pick a different name");
+        }
+    }
+
+    // Detach so we can move/create refs freely, then place a branch at each
+    // group boundary and wire up the parent pointers bottom-up.
+    git::detach_head()?;
+    let mut parent = base.clone();
+    for (name, tip_sha) in &segments {
+        if git::branch_exists(name) {
+            git::force_ref(name, tip_sha)?;
+        } else {
+            git::create_branch(name, tip_sha)?;
+        }
+        meta::set_parent(name, &parent)?;
+        meta::set_parent_sha(name, &git::rev_parse(&parent)?)?;
+        parent = name.clone();
+    }
+
+    let top = segments.last().unwrap().0.clone();
+    git::checkout(&top)?;
+
+    // If the original branch wasn't reused as a segment, it still points at the
+    // old tip; leave it but tell the user.
+    let reused = segments.iter().any(|(n, _)| n == &branch);
+    println!("Split `{branch}` into {} stacked branches:", segments.len());
+    let mut p = base.clone();
+    for (name, _) in &segments {
+        println!("  {p} ← {name}");
+        p = name.clone();
+    }
+    if !reused {
+        println!("note: `{branch}` still points at the old tip; delete it if you don't need it.");
+    }
+    println!("Now on `{top}`. Run `git stack submit` to open the PRs.");
+    Ok(())
+}
+
+/// Open an editor to assign each commit to a branch. Returns `(branch, sha)`
+/// pairs in commit order.
+fn edit_split_plan(branch: &str, commits: &[(String, String)]) -> Result<Vec<(String, String)>> {
+    let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
+    let path = dir.join("STACK_SPLIT");
+    let mut body = String::new();
+    for (sha, subject) in commits {
+        body.push_str(&format!(
+            "{branch} {} {subject}\n",
+            &sha[..sha.len().min(12)]
+        ));
+    }
+    let template = format!(
+        "{body}\n\
+         # Split `{branch}` into a stack. The first token on each line is the branch\n\
+         # that commit belongs to — edit it. Consecutive commits with the SAME branch\n\
+         # become one PR; groups stack top-to-bottom in this file (top = merges first).\n\
+         # Do not reorder or delete commit lines. Lines starting with '#' are ignored.\n"
+    );
+    std::fs::write(&path, template)?;
+
+    let editor = git::out(&["var", "GIT_EDITOR"])?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh")
+        .arg(&path)
+        .status()
+        .context("failed to launch editor")?;
+    if !status.success() {
+        bail!("editor exited with an error; split cancelled");
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let _ = std::fs::remove_file(&path);
+
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let name = it.next().unwrap().to_string();
+        let sha = it.next().unwrap_or("").to_string();
+        out.push((name, sha));
+    }
+    Ok(out)
+}
+
+/// Validate the edited plan against the original commit order and collapse it
+/// into contiguous `(branch, tip_full_sha)` segments in merge order.
+fn parse_segments(
+    assignments: &[(String, String)],
+    commits: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    if assignments.len() != commits.len() {
+        bail!(
+            "expected {} commit lines but found {}; do not add or remove lines",
+            commits.len(),
+            assignments.len()
+        );
+    }
+    let mut segments: Vec<(String, String)> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (i, (name, short)) in assignments.iter().enumerate() {
+        let (full_sha, _) = &commits[i];
+        // Guard against reordering: the short sha must match this position.
+        if !short.is_empty() && !full_sha.starts_with(short.as_str()) {
+            bail!("commit lines were reordered; that isn't supported yet — keep them in order");
+        }
+        if name.is_empty() {
+            bail!(
+                "commit {} has no branch name",
+                &full_sha[..12.min(full_sha.len())]
+            );
+        }
+        match segments.last_mut() {
+            Some((last_name, tip)) if last_name == name => {
+                *tip = full_sha.clone(); // extend current group
+            }
+            _ => {
+                if seen.contains(name) {
+                    bail!("branch `{name}` appears in non-adjacent groups; commits for one branch must be contiguous");
+                }
+                seen.push(name.clone());
+                segments.push((name.clone(), full_sha.clone()));
+            }
+        }
+    }
+    Ok(segments)
+}
+
 /// `git stack track [--parent <branch>]` — adopt the current branch.
 pub fn track(parent: Option<String>) -> Result<()> {
     git::ensure_repo()?;

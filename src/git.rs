@@ -115,6 +115,35 @@ pub fn ahead_count(base: &str, branch: &str) -> Result<usize> {
     Ok(s.parse().unwrap_or(0))
 }
 
+/// Commits in `base..tip`, oldest first, as `(full_sha, subject)` pairs.
+pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
+    let raw = out(&[
+        "log",
+        "--reverse",
+        "--format=%H%x09%s",
+        &format!("{base}..{tip}"),
+    ])?;
+    Ok(raw
+        .lines()
+        .filter_map(|l| {
+            let (sha, subject) = l.split_once('\t')?;
+            Some((sha.to_string(), subject.to_string()))
+        })
+        .collect())
+}
+
+/// True if the work tree and index are clean.
+pub fn worktree_clean() -> bool {
+    out(&["status", "--porcelain"])
+        .map(|s| s.is_empty())
+        .unwrap_or(false)
+}
+
+/// Detach HEAD at its current commit (so no branch ref is "checked out").
+pub fn detach_head() -> Result<()> {
+    run(&["checkout", "-q", "--detach"])
+}
+
 /// True if a rebase (merge or apply backend) is currently in progress.
 pub fn rebase_in_progress() -> bool {
     let dir = match out(&["rev-parse", "--git-dir"]) {
