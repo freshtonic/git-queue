@@ -16,6 +16,8 @@ pub struct Pr {
     /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null
     #[serde(rename = "reviewDecision", default)]
     pub review_decision: Option<String>,
+    #[serde(rename = "isDraft", default)]
+    pub is_draft: bool,
 }
 
 fn gh(args: &[&str]) -> Result<String> {
@@ -56,7 +58,7 @@ pub fn find(branch: &str) -> Result<Option<Pr>> {
         "--limit",
         "1",
         "--json",
-        "number,title,url,state,baseRefName,reviewDecision",
+        "number,title,url,state,baseRefName,reviewDecision,isDraft",
     ])?;
     let mut prs: Vec<Pr> = serde_json::from_str(&json).context("parsing gh pr list output")?;
     Ok(prs.pop())
@@ -84,11 +86,28 @@ pub fn close(number: u64) -> Result<()> {
     Ok(())
 }
 
+/// Reopen a closed PR. Fails if it can't be reopened (e.g. its base was deleted).
+pub fn reopen(number: u64) -> Result<()> {
+    gh(&["pr", "reopen", &number.to_string()])?;
+    Ok(())
+}
+
 /// Update an existing PR's base, title and body.
 pub fn edit(number: u64, base: &str, title: &str, body: &str) -> Result<()> {
     let num = number.to_string();
     gh(&[
         "pr", "edit", &num, "--base", base, "--title", title, "--body", body,
     ])?;
+    Ok(())
+}
+
+/// Mark a PR as draft (blocks its merge button) or ready.
+pub fn set_draft(number: u64, draft: bool) -> Result<()> {
+    let num = number.to_string();
+    if draft {
+        gh(&["pr", "ready", "--undo", &num])?;
+    } else {
+        gh(&["pr", "ready", &num])?;
+    }
     Ok(())
 }

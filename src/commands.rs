@@ -5,6 +5,74 @@ use crate::stack::Stack;
 use crate::{gh, git, meta, restack};
 use anyhow::{bail, Context, Result};
 
+/// Enforce merge order with draft state: the bottom-most open PR is marked
+/// ready; every open PR above it is marked draft (GitHub disables the merge
+/// button on draft PRs, regardless of base branch, without blocking pushes).
+/// Merged/closed PRs are skipped. Only toggles when a PR's state is wrong.
+fn apply_draft_gate(prs: &[Option<PrRef>]) -> Result<()> {
+    let mut bottom_done = false;
+    for pr in prs.iter().flatten() {
+        if pr.state != "OPEN" {
+            continue; // merged/closed PRs are never gated
+        }
+        if !bottom_done {
+            if pr.is_draft {
+                gh::set_draft(pr.number, false)?; // the bottom PR is mergeable
+            }
+            bottom_done = true;
+        } else if !pr.is_draft {
+            gh::set_draft(pr.number, true)?; // block the ones above it
+        }
+    }
+    Ok(())
+}
+
+/// `git stack doctor` — report-only diagnostics for merge-order enforcement.
+pub fn doctor() -> Result<()> {
+    git::ensure_repo()?;
+    println!("git stack doctor — merge-order enforcement\n");
+
+    match meta::gate().as_deref() {
+        Some("draft") => {
+            println!("  \u{2713} gate: enabled (draft mode)");
+            println!("    Non-bottom PRs are kept as drafts so they can't be merged out of order;");
+            println!("    `git stack submit` readies the bottom PR and drafts the ones above it.");
+        }
+        Some(other) => {
+            println!("  ! gate: unknown mode `{other}` \u{2014} run `git stack protect` to (re)enable draft mode");
+        }
+        None => {
+            println!("  \u{2717} gate: not enabled \u{2014} run `git stack protect` to turn it on");
+        }
+    }
+
+    if gh::ready() {
+        println!("  \u{2713} GitHub CLI: authenticated");
+    } else {
+        println!("  ! GitHub CLI: not authenticated (`gh auth login`) \u{2014} needed for `submit` to set draft state");
+    }
+
+    println!("\nNote: draft is a soft gate \u{2014} a reviewer can mark a PR ready and merge it deliberately.");
+    Ok(())
+}
+
+/// `git stack protect` — enable draft-based merge-order enforcement.
+///
+/// Draft is the one GitHub mechanism that composes with base-chaining: a draft
+/// PR's merge button is disabled regardless of base branch, and (unlike branch
+/// rules / rulesets) draft status does not block pushing to the branch.
+pub fn protect() -> Result<()> {
+    git::ensure_repo()?;
+    meta::set_gate("draft")?;
+    println!("Enabled draft-based merge-order enforcement for this repository.\n");
+    println!("`git stack submit` now keeps the bottom (mergeable) PR ready and marks every PR");
+    println!("above it as a draft, so they can't be merged out of order. As PRs land, `git stack");
+    println!("sync` + `git stack submit` readies the new bottom PR.\n");
+    println!("No GitHub setup or admin rights needed. It is a soft gate: a reviewer can mark a PR");
+    println!("ready and merge it deliberately. Run `git stack submit` now to apply it.");
+    Ok(())
+}
+
 /// `git stack init [--trunk <branch>]`
 pub fn init(trunk: Option<String>) -> Result<()> {
     git::ensure_repo()?;
@@ -390,6 +458,12 @@ pub fn sync(no_push: bool) -> Result<()> {
         }
     }
 
+    // Heal branches orphaned by a merged-and-deleted parent. `--delete-branch`
+    // (and manual branch deletion) removes the branch's git config, including
+    // our `stackParent`, leaving its children pointing at a branch that no
+    // longer exists. Reparent those onto trunk.
+    stack = heal_dangling_parents(stack)?;
+
     // Prune branches whose PRs have merged: reparent their children onto the
     // nearest surviving ancestor (trunk, once the bottom lands) and drop them
     // from the stack. The restack below then rebases the survivors onto trunk.
@@ -430,6 +504,33 @@ pub fn sync(no_push: bool) -> Result<()> {
         println!("Stack is in sync with `{}`.", stack.trunk);
     }
     Ok(())
+}
+
+/// Reparent tracked branches whose parent is gone (not trunk, not tracked, and
+/// no such branch exists) onto trunk. Returns the reloaded stack if anything
+/// changed.
+fn heal_dangling_parents(stack: Stack) -> Result<Stack> {
+    let mut changed = false;
+    for b in stack.topo_order() {
+        let parent = match stack.parent_of(&b) {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        if parent == stack.trunk || stack.is_tracked(&parent) || git::branch_exists(&parent) {
+            continue;
+        }
+        meta::set_parent(&b, &stack.trunk)?;
+        eprintln!(
+            "note: `{b}`'s parent `{parent}` is gone (merged?); reparented onto `{}`.",
+            stack.trunk
+        );
+        changed = true;
+    }
+    if changed {
+        Stack::load()
+    } else {
+        Ok(stack)
+    }
 }
 
 /// Reparent the children of any MERGED-PR branch onto their nearest surviving
@@ -543,14 +644,12 @@ pub fn submit(draft: bool) -> Result<()> {
         .iter()
         .map(|b| gh::find(b))
         .collect::<Result<_>>()?;
+    // Only MERGED PRs are "frozen" (left untouched). A CLOSED PR in the active
+    // line is revived below — GitHub closes a stacked PR when its base branch is
+    // deleted (e.g. `--delete-branch` on the PR below), and we must not skip it.
     let frozen: Vec<bool> = existing
         .iter()
-        .map(|p| {
-            matches!(
-                p.as_ref().map(|pr| pr.state.as_str()),
-                Some("MERGED") | Some("CLOSED")
-            )
-        })
+        .map(|p| p.as_ref().map(|pr| pr.state.as_str()) == Some("MERGED"))
         .collect();
 
     // Guard: don't open an empty PR (already-landed branches are skipped).
@@ -579,7 +678,13 @@ pub fn submit(draft: bool) -> Result<()> {
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
         let number = match &existing[i] {
-            Some(pr) => pr.number,
+            Some(pr) if pr.state == "OPEN" => pr.number,
+            // CLOSED (base branch was deleted): reopen it, or open a fresh PR if
+            // it can't be reopened (its old base is gone).
+            Some(pr) => match gh::reopen(pr.number) {
+                Ok(()) => pr.number,
+                Err(_) => gh::create(b, &base, &title, "Opening…", draft)?,
+            },
             None => gh::create(b, &base, &title, "Opening…", draft)?,
         };
         meta::set_pr(b, number)?;
@@ -623,11 +728,20 @@ pub fn submit(draft: bool) -> Result<()> {
         gh::edit(number, &base_of(i), &title, &body)?;
     }
 
+    // Enforce merge order with draft state, if enabled.
+    let gated = meta::gate().as_deref() == Some("draft");
+    if gated {
+        apply_draft_gate(&prs)?;
+    }
+
     println!("\nSubmitted {total} PR(s):");
     for (i, b) in branches.iter().enumerate() {
         if let Some(p) = &prs[i] {
             println!("  [{}/{}] {}  {}", i + 1, total, b, p.url);
         }
+    }
+    if gated {
+        println!("Merge gate active: the bottom PR is ready; the rest are drafts.");
     }
     Ok(())
 }
@@ -638,6 +752,7 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
         url: pr.url.clone(),
         state: pr.state.clone(),
         review: pr.review_decision.clone(),
+        is_draft: pr.is_draft,
     }
 }
 
@@ -885,6 +1000,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             url: String::new(),
             state: "?".to_string(),
             review: None,
+            is_draft: false,
         });
         entries.push(Entry {
             branch: b.clone(),

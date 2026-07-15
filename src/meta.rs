@@ -30,6 +30,16 @@ pub fn remote() -> String {
     config_get("stack.remote").unwrap_or_else(|| "origin".to_string())
 }
 
+/// Merge-order gate mode: `Some("label")` once `git stack protect` has enabled
+/// the merge-blocked label enforcement; `None` means no gating.
+pub fn gate() -> Option<String> {
+    config_get("stack.gate")
+}
+
+pub fn set_gate(mode: &str) -> Result<()> {
+    config_set("stack.gate", mode)
+}
+
 /// Configured trunk, or a best-effort detection of `main`/`master`.
 pub fn trunk() -> Result<String> {
     if let Some(t) = config_get("stack.trunk") {

@@ -20,6 +20,7 @@ pub struct PrRef {
     pub state: String, // OPEN | CLOSED | MERGED
     /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | None
     pub review: Option<String>,
+    pub is_draft: bool,
 }
 
 /// Emoji for a PR's review decision.
@@ -228,6 +229,7 @@ mod tests {
                 url: url.to_string(),
                 state: state.to_string(),
                 review: review.map(|s| s.to_string()),
+                is_draft: false,
             }),
             conflicted: false,
         }
