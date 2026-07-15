@@ -5,8 +5,13 @@
 //! stays tiny.
 
 use anyhow::{anyhow, bail, Context, Result};
+use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+
+/// Env var set on child git processes while git-stack is restacking, so our
+/// own hooks can detect the reentry and skip (avoiding infinite recursion).
+pub const GUARD_ENV: &str = "GIT_STACK_IN_RESTACK";
 
 /// Run `git <args>` and capture trimmed stdout. Errors if git exits non-zero.
 pub fn out(args: &[&str]) -> Result<String> {
@@ -90,6 +95,10 @@ pub fn checkout(branch: &str) -> Result<()> {
     run(&["checkout", branch])
 }
 
+pub fn checkout_quiet(branch: &str) -> Result<()> {
+    run(&["checkout", "-q", branch])
+}
+
 /// Create `name` at `start_point` without checking it out.
 pub fn create_branch(name: &str, start_point: &str) -> Result<()> {
     run(&["branch", name, start_point])
@@ -132,6 +141,179 @@ pub fn push(remote: &str, branch: &str) -> Result<()> {
 /// Move a branch ref to `sha` without checking it out.
 pub fn force_ref(branch: &str, sha: &str) -> Result<()> {
     run(&["update-ref", &format!("refs/heads/{branch}"), sha])
+}
+
+/// True if there are staged changes in the index.
+pub fn staged_changes() -> bool {
+    // `git diff --cached --quiet` exits 1 when there is something staged.
+    !ok(&["diff", "--cached", "--quiet"])
+}
+
+/// True if the tree at `rev` contains textual conflict markers.
+pub fn has_conflict_markers(rev: &str) -> bool {
+    ok(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])
+}
+
+/// Make a normal commit on the current branch.
+pub fn commit(message: Option<&str>) -> Result<()> {
+    // Suppress our own hooks during the internal commit; git-stack does the
+    // restack itself right after.
+    let mut cmd = Command::new("git");
+    cmd.env(GUARD_ENV, "1");
+    match message {
+        Some(m) => cmd.args(["commit", "-m", m]),
+        None => cmd.args(["commit"]),
+    };
+    let status = cmd.status().context("failed to spawn `git commit`")?;
+    if !status.success() {
+        bail!("`git commit` failed");
+    }
+    Ok(())
+}
+
+/// `git history fixup <commit>` — fold staged changes into `commit`, atomically
+/// updating every descendant branch. Returns `true` if it aborted because the
+/// rewrite would conflict with a descendant (git history is atomic and cannot
+/// persist markers). Any other failure is an error.
+pub fn history_fixup(commit: &str) -> Result<bool> {
+    let out = Command::new("git")
+        .args(["history", "fixup", commit])
+        .env(GUARD_ENV, "1")
+        .output()
+        .context("failed to spawn `git history fixup`")?;
+    if out.status.success() {
+        return Ok(false);
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("conflict") {
+        return Ok(true);
+    }
+    bail!("`git history fixup` failed:\n{}", err.trim());
+}
+
+/// `git history reword <commit>` — rewrite a commit message (opens the editor),
+/// atomically updating descendants. Returns `true` on conflict abort.
+pub fn history_reword(commit: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .args(["history", "reword", commit])
+        .env(GUARD_ENV, "1")
+        .status()
+        .context("failed to spawn `git history reword`")?;
+    // reword can only conflict via replay of descendants; a non-zero exit with
+    // an unchanged repo means it aborted. Treat non-zero as conflict abort.
+    Ok(!status.success())
+}
+
+/// Outcome of a `git replay` restack attempt.
+pub enum Replayed {
+    Applied,
+    /// Replay could not apply cleanly (typically a conflict); message is stderr.
+    Failed(String),
+}
+
+/// Restack every branch contained in `ranges` onto `onto` in one operation via
+/// `git replay --contained`, applying the emitted ref updates atomically with
+/// `git update-ref --stdin`. No worktree is touched.
+pub fn replay_restack(onto: &str, ranges: &[String]) -> Result<Replayed> {
+    let mut args: Vec<String> = vec![
+        "replay".into(),
+        "--onto".into(),
+        onto.into(),
+        "--contained".into(),
+    ];
+    args.extend(ranges.iter().cloned());
+    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let out = Command::new("git")
+        .args(&argrefs)
+        .env(GUARD_ENV, "1")
+        .output()
+        .context("failed to spawn `git replay`")?;
+    if !out.status.success() {
+        return Ok(Replayed::Failed(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
+    }
+    if out.stdout.iter().all(|b| b.is_ascii_whitespace()) {
+        return Ok(Replayed::Applied); // nothing to update
+    }
+
+    let mut child = Command::new("git")
+        .args(["update-ref", "--stdin"])
+        .env(GUARD_ENV, "1")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("failed to spawn `git update-ref --stdin`")?;
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(&out.stdout)
+        .context("writing replay plan to update-ref")?;
+    if !child.wait()?.success() {
+        bail!("failed to apply replay ref updates");
+    }
+    Ok(Replayed::Applied)
+}
+
+/// Fallback restack of a single branch that NEVER leaves an interactive
+/// conflict state: on conflict it stages the marker-filled files, commits them,
+/// and continues, so it always finishes. `--update-refs` moves any intermediate
+/// branch refs in the rebased range. Detect persisted markers afterwards with
+/// [`has_conflict_markers`].
+pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
+    // Silence git's rebase chatter (conflict hints etc.) — it would contradict
+    // the "it succeeded" outcome. Our loud banner is the user-facing signal.
+    let quiet = |c: &mut Command| {
+        c.stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("GIT_EDITOR", "true")
+            .env("GIT_SEQUENCE_EDITOR", "true")
+            .env(GUARD_ENV, "1");
+    };
+
+    let mut initial = Command::new("git");
+    initial.args([
+        "-c",
+        "core.editor=true",
+        "rebase",
+        "--update-refs",
+        "--onto",
+        onto,
+        upstream,
+        branch,
+    ]);
+    quiet(&mut initial);
+    let _ = initial.status().context("failed to spawn `git rebase`")?;
+
+    let mut guard = 0;
+    while rebase_in_progress() {
+        guard += 1;
+        if guard > 5000 {
+            let _ = Command::new("git")
+                .args(["rebase", "--abort"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            bail!("restack of `{branch}` did not converge; aborted the rebase");
+        }
+        // Stage the conflict markers as the "resolution".
+        let mut add = Command::new("git");
+        add.args(["add", "-A"]);
+        quiet(&mut add);
+        let _ = add.status();
+
+        let sub: &[&str] = if staged_changes() {
+            &["rebase", "--continue"]
+        } else {
+            &["rebase", "--skip"]
+        };
+        let mut step = Command::new("git");
+        step.args(sub);
+        quiet(&mut step);
+        let _ = step.status();
+    }
+    Ok(())
 }
 
 /// The remote-tracking ref for the trunk, e.g. `origin/main`, if it exists.

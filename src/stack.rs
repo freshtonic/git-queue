@@ -98,6 +98,38 @@ impl Stack {
         Ok(Line { branches, fork_at })
     }
 
+    /// All descendants of `branch` (children, grandchildren, ...), topologically
+    /// ordered (parents before children). Excludes `branch` itself.
+    pub fn descendants_topo(&self, branch: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut frontier = self.children(branch);
+        while let Some(b) = frontier.pop() {
+            out.push(b.clone());
+            frontier.extend(self.children(&b));
+        }
+        out.sort_by_key(|b| (self.depth(b), b.clone()));
+        out.dedup();
+        out
+    }
+
+    /// Leaf branches at or under `branch` (no tracked children). If `branch`
+    /// itself has no children, returns just `[branch]`.
+    pub fn leaves_under(&self, branch: &str) -> Vec<String> {
+        let mut leaves = Vec::new();
+        let mut frontier = vec![branch.to_string()];
+        while let Some(b) = frontier.pop() {
+            let kids = self.children(&b);
+            if kids.is_empty() {
+                leaves.push(b);
+            } else {
+                frontier.extend(kids);
+            }
+        }
+        leaves.sort();
+        leaves.dedup();
+        leaves
+    }
+
     /// Depth of `branch` below trunk (trunk's direct children are depth 1).
     fn depth(&self, branch: &str) -> usize {
         self.downstack(branch)

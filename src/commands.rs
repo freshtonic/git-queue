@@ -2,7 +2,7 @@
 
 use crate::render::{self, Entry, PrRef};
 use crate::stack::Stack;
-use crate::{gh, git, meta};
+use crate::{gh, git, meta, restack};
 use anyhow::{bail, Result};
 
 /// `git stack init [--trunk <branch>]`
@@ -278,6 +278,7 @@ pub fn submit(draft: bool) -> Result<()> {
         .map(|(i, b)| Entry {
             branch: b.clone(),
             pr: prs[i].clone(),
+            conflicted: meta::conflicted(b),
         })
         .collect();
 
@@ -307,6 +308,204 @@ pub fn submit(draft: bool) -> Result<()> {
     Ok(())
 }
 
+/// `git stack commit [-m <msg>]` — make a NEW commit on the current branch,
+/// then restack all descendants onto the new tip (`git replay`, with a
+/// marker-persisting fallback on conflict).
+pub fn commit(message: Option<String>) -> Result<()> {
+    git::ensure_repo()?;
+    // Suppress our own hooks for the internal git calls; we restack explicitly.
+    std::env::set_var(git::GUARD_ENV, "1");
+    let stack = Stack::load()?;
+    let current = git::current_branch()?;
+
+    git::commit(message.as_deref())?;
+
+    if !stack.is_tracked(&current) {
+        return Ok(()); // not a stack branch; just a normal commit
+    }
+    let report = restack::propagate(&stack, &current)?;
+    finish_restack(&report, &current);
+    Ok(())
+}
+
+/// `git stack amend` — fold STAGED changes into the current branch's tip commit
+/// via `git history fixup`, atomically updating every descendant.
+pub fn amend() -> Result<()> {
+    git::ensure_repo()?;
+    std::env::set_var(git::GUARD_ENV, "1");
+    let current = git::current_branch()?;
+    if !git::staged_changes() {
+        bail!("nothing staged — `git add` the changes you want to fold into `{current}` first");
+    }
+    if git::history_fixup("HEAD")? {
+        bail!(
+            "amend aborted: folding these changes into `{current}` would conflict with a descendant.\n\
+             Nothing was changed. Either resolve on the descendant first, or use `git stack commit` to add a separate commit."
+        );
+    }
+    refresh_descendant_anchors(&current)?;
+    println!("Amended the tip commit of `{current}` and updated all descendants.");
+    Ok(())
+}
+
+/// `git stack reword [<commit>]` — rewrite a commit message via
+/// `git history reword`, atomically updating descendants. Defaults to HEAD.
+pub fn reword(commit: Option<String>) -> Result<()> {
+    git::ensure_repo()?;
+    std::env::set_var(git::GUARD_ENV, "1");
+    let current = git::current_branch()?;
+    let target = commit.unwrap_or_else(|| "HEAD".to_string());
+    if git::history_reword(&target)? {
+        bail!("reword aborted (rewriting `{target}` would conflict with a descendant); nothing changed");
+    }
+    refresh_descendant_anchors(&current)?;
+    println!("Reworded `{target}` and updated descendants of `{current}`.");
+    Ok(())
+}
+
+/// `git stack restack` — restack descendants of the current branch onto its
+/// current tip. `--auto` (used by hooks) stays quiet when there's nothing to do
+/// and on non-stack branches.
+pub fn restack(auto: bool) -> Result<()> {
+    git::ensure_repo()?;
+    std::env::set_var(git::GUARD_ENV, "1");
+    let stack = Stack::load()?;
+    let current = git::current_branch()?;
+    if !stack.is_tracked(&current) && current != stack.trunk {
+        if auto {
+            return Ok(());
+        }
+        bail!("`{current}` is not part of a stack");
+    }
+    let report = restack::propagate(&stack, &current)?;
+    if auto && report.is_empty() && report.conflicted.is_empty() {
+        return Ok(());
+    }
+    finish_restack(&report, &current);
+    Ok(())
+}
+
+/// Report the outcome of a restack (loud warning if markers were persisted).
+fn finish_restack(report: &restack::Report, branch: &str) {
+    if !report.conflicted.is_empty() {
+        restack::warn_conflicts(&report.conflicted);
+    } else if !report.is_empty() {
+        println!(
+            "Restacked {} descendant branch(es) of `{branch}`.",
+            report.restacked.len()
+        );
+    }
+}
+
+/// After git-history rewrote `branch`'s history, its descendants' stored parent
+/// anchors are stale; refresh them to the new parent tips.
+fn refresh_descendant_anchors(branch: &str) -> Result<()> {
+    let stack = Stack::load()?;
+    for b in stack.descendants_topo(branch) {
+        if let Some(parent) = stack.parent_of(&b) {
+            let ptip = git::rev_parse(parent)?;
+            meta::set_parent_sha(&b, &ptip)?;
+        }
+        // A clean history rewrite leaves no markers.
+        meta::set_conflicted(&b, false)?;
+    }
+    Ok(())
+}
+
+const HOOK_BEGIN: &str = "# >>> git-stack >>>";
+const HOOK_END: &str = "# <<< git-stack <<<";
+
+fn hook_snippet(only_amend: bool) -> String {
+    let gate = if only_amend {
+        "[ \"$1\" = \"amend\" ] || exit 0\n"
+    } else {
+        ""
+    };
+    format!(
+        "{HOOK_BEGIN}\n\
+         [ -n \"$GIT_STACK_IN_RESTACK\" ] && exit 0\n\
+         {gate}command -v git-stack >/dev/null 2>&1 && git-stack restack --auto || true\n\
+         {HOOK_END}\n"
+    )
+}
+
+/// `git stack hooks install` — make plain `git commit`/amend auto-restack.
+pub fn hooks_install() -> Result<()> {
+    git::ensure_repo()?;
+    let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
+    std::fs::create_dir_all(&dir)?;
+    install_hook(&dir.join("post-commit"), &hook_snippet(false))?;
+    install_hook(&dir.join("post-rewrite"), &hook_snippet(true))?;
+    println!("Installed git-stack hooks. Plain `git commit` and `git commit --amend` on a");
+    println!("stack branch will now auto-restack descendants.");
+    Ok(())
+}
+
+/// `git stack hooks uninstall` — remove the git-stack hook blocks.
+pub fn hooks_uninstall() -> Result<()> {
+    git::ensure_repo()?;
+    let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
+    for name in ["post-commit", "post-rewrite"] {
+        remove_hook(&dir.join(name))?;
+    }
+    println!("Removed git-stack hooks.");
+    Ok(())
+}
+
+fn install_hook(path: &std::path::Path, snippet: &str) -> Result<()> {
+    let contents = std::fs::read_to_string(path).unwrap_or_default();
+    if contents.contains(HOOK_BEGIN) {
+        return Ok(()); // already installed
+    }
+    let new = if contents.trim().is_empty() {
+        format!("#!/bin/sh\n{snippet}")
+    } else {
+        // Append to an existing hook without clobbering it.
+        format!("{}\n{snippet}", contents.trim_end())
+    };
+    std::fs::write(path, new)?;
+    make_executable(path)?;
+    Ok(())
+}
+
+fn remove_hook(path: &std::path::Path) -> Result<()> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let (Some(start), Some(end)) = (contents.find(HOOK_BEGIN), contents.find(HOOK_END)) else {
+        return Ok(());
+    };
+    let after = end + HOOK_END.len();
+    let mut stripped = String::new();
+    stripped.push_str(&contents[..start]);
+    stripped.push_str(contents[after..].trim_start_matches('\n'));
+    // If nothing but a shebang/whitespace remains, remove the hook entirely.
+    if stripped
+        .lines()
+        .all(|l| l.trim().is_empty() || l.starts_with("#!"))
+    {
+        std::fs::remove_file(path)?;
+    } else {
+        std::fs::write(path, stripped)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn make_executable(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_executable(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 /// Assemble render entries (branch + cached PR) for a bottom-first branch list.
 fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
     let mut entries = Vec::with_capacity(branches.len());
@@ -319,6 +518,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
         entries.push(Entry {
             branch: b.clone(),
             pr,
+            conflicted: meta::conflicted(b),
         });
     }
     Ok(entries)

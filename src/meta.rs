@@ -81,10 +81,29 @@ pub fn set_pr(branch: &str, number: u64) -> Result<()> {
     config_set(&pr_key(branch), &number.to_string())
 }
 
+fn conflicted_key(branch: &str) -> String {
+    format!("branch.{branch}.stackConflicted")
+}
+
+/// Whether the last restack persisted conflict markers into this branch.
+pub fn conflicted(branch: &str) -> bool {
+    config_get(&conflicted_key(branch)).as_deref() == Some("true")
+}
+
+pub fn set_conflicted(branch: &str, value: bool) -> Result<()> {
+    if value {
+        config_set(&conflicted_key(branch), "true")
+    } else {
+        config_unset(&conflicted_key(branch));
+        Ok(())
+    }
+}
+
 pub fn untrack(branch: &str) {
     config_unset(&parent_key(branch));
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
+    config_unset(&conflicted_key(branch));
 }
 
 /// All branches that have a `stackParent` recorded.

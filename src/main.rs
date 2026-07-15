@@ -5,6 +5,7 @@ mod gh;
 mod git;
 mod meta;
 mod render;
+mod restack;
 mod stack;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -55,6 +56,30 @@ enum Command {
     /// Check out the parent branch (down the stack).
     #[command(visible_alias = "down")]
     Prev,
+    /// Make a new commit on the current branch and restack its descendants.
+    Commit {
+        /// Commit message (opens the editor if omitted).
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+    /// Fold STAGED changes into the current commit and update all descendants.
+    Amend,
+    /// Rewrite a commit message and update all descendants (defaults to HEAD).
+    Reword {
+        /// Commit to reword.
+        commit: Option<String>,
+    },
+    /// Restack the current branch's descendants onto its tip.
+    Restack {
+        /// Quiet on no-op / non-stack branches (used by hooks).
+        #[arg(long)]
+        auto: bool,
+    },
+    /// Install or remove hooks that auto-restack after plain commits.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
     /// Rebase the whole stack onto the latest trunk.
     Sync,
     /// Push the stack and open/update its numbered PRs.
@@ -71,6 +96,14 @@ enum Command {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum HooksAction {
+    /// Install the auto-restack hooks.
+    Install,
+    /// Remove the auto-restack hooks.
+    Uninstall,
 }
 
 /// Render the man page from the clap definition and either write
@@ -104,6 +137,14 @@ fn main() {
         Command::Prev => commands::prev(),
         Command::Sync => commands::sync(),
         Command::Submit { draft } => commands::submit(draft),
+        Command::Commit { message } => commands::commit(message),
+        Command::Amend => commands::amend(),
+        Command::Reword { commit } => commands::reword(commit),
+        Command::Restack { auto } => commands::restack(auto),
+        Command::Hooks { action } => match action {
+            HooksAction::Install => commands::hooks_install(),
+            HooksAction::Uninstall => commands::hooks_uninstall(),
+        },
         Command::Man { dir } => generate_man(dir),
     };
     if let Err(e) = result {

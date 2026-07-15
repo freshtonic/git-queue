@@ -54,6 +54,166 @@ fn new_repo() -> TempDir {
     tmp
 }
 
+/// Stage `file` with `content` (does not commit).
+fn stage(dir: &Path, file: &str, content: &str) {
+    std::fs::write(dir.join(file), content).unwrap();
+    git(dir, &["add", file]);
+}
+
+fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
+    StdCommand::new("git")
+        .args(["merge-base", "--is-ancestor", a, b])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[test]
+fn commit_on_mid_branch_restacks_descendants() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b.txt");
+
+    // New commit on mid-stack branch `a`.
+    git(dir, &["checkout", "-q", "a"]);
+    stage(dir, "a2.txt", "more");
+    stack(dir)
+        .args(["commit", "-m", "more work on a"])
+        .assert()
+        .success();
+
+    // `b` must have been restacked onto the new `a` tip and still be intact.
+    assert!(is_ancestor(dir, "a", "b"), "b not restacked onto new a");
+    assert_eq!(git_out(dir, &["show", "b:a2.txt"]), "more");
+    assert_eq!(git_out(dir, &["show", "b:b.txt"]), "b.txt");
+    // HEAD restored to `a`.
+    assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "a");
+}
+
+#[test]
+fn commit_restacks_a_fork_in_one_go() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "b1"]).assert().success();
+    commit(dir, "b1.txt");
+    // Fork: second child on `a`.
+    git(dir, &["checkout", "-q", "a"]);
+    stack(dir).args(["create", "b2"]).assert().success();
+    commit(dir, "b2.txt");
+
+    git(dir, &["checkout", "-q", "a"]);
+    stage(dir, "shared.txt", "x");
+    stack(dir)
+        .args(["commit", "-m", "shared change"])
+        .assert()
+        .success();
+
+    for leaf in ["b1", "b2"] {
+        assert!(is_ancestor(dir, "a", leaf), "{leaf} not restacked");
+        assert_eq!(git_out(dir, &["show", &format!("{leaf}:shared.txt")]), "x");
+    }
+}
+
+#[test]
+fn amend_folds_staged_changes_and_updates_descendants() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b.txt");
+
+    git(dir, &["checkout", "-q", "a"]);
+    let commits_before = git_out(dir, &["rev-list", "--count", "main..a"]);
+    stage(dir, "folded.txt", "folded");
+    stack(dir).arg("amend").assert().success();
+
+    // Amend folds — it does NOT add a commit.
+    assert_eq!(
+        git_out(dir, &["rev-list", "--count", "main..a"]),
+        commits_before
+    );
+    assert!(is_ancestor(dir, "a", "b"), "b not updated after amend");
+    assert_eq!(git_out(dir, &["show", "b:folded.txt"]), "folded");
+}
+
+#[test]
+fn conflicting_restack_persists_markers_and_flags_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    stage(dir, "shared.txt", "base\n");
+    git(dir, &["commit", "-q", "-m", "a: add shared"]);
+    stack(dir).args(["create", "b"]).assert().success();
+    stage(dir, "shared.txt", "b-version\n");
+    git(dir, &["commit", "-q", "-m", "b: change shared"]);
+
+    // New commit on `a` that touches the same file -> replaying `b` conflicts.
+    git(dir, &["checkout", "-q", "a"]);
+    stage(dir, "shared.txt", "a-version\n");
+    // Must still SUCCEED (markers are persisted, not left mid-rebase).
+    stack(dir)
+        .args(["commit", "-m", "a: conflicting change"])
+        .assert()
+        .success();
+
+    // `b` now carries conflict markers and is flagged.
+    assert!(
+        git_out(dir, &["show", "b:shared.txt"]).contains("<<<<<<<"),
+        "expected persisted conflict markers on b"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "--local", "branch.b.stackConflicted"]),
+        "true"
+    );
+    // No rebase left in progress.
+    assert!(!dir.join(".git/rebase-merge").exists());
+    assert!(!dir.join(".git/rebase-apply").exists());
+
+    // status surfaces the warning marker.
+    let out = stack(dir).arg("status").output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("⚠"));
+}
+
+#[test]
+fn hooks_autorestack_on_plain_commit() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b.txt");
+    stack(dir).args(["hooks", "install"]).assert().success();
+
+    // Plain `git commit` on `a`, with our binary on PATH for the hook to find.
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-stack")).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    git(dir, &["checkout", "-q", "a"]);
+    stage(dir, "hooked.txt", "hooked");
+    let status = StdCommand::new("git")
+        .args(["commit", "-q", "-m", "plain commit on a"])
+        .current_dir(dir)
+        .env("PATH", path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // The post-commit hook should have auto-restacked `b`.
+    assert!(is_ancestor(dir, "a", "b"), "hook did not restack b");
+    assert_eq!(git_out(dir, &["show", "b:hooked.txt"]), "hooked");
+}
+
 #[test]
 fn init_detects_and_records_trunk() {
     let tmp = new_repo();

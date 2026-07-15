@@ -9,6 +9,8 @@ pub const END: &str = "<!-- git-stack:end -->";
 pub struct Entry {
     pub branch: String,
     pub pr: Option<PrRef>,
+    /// The branch currently holds persisted conflict markers.
+    pub conflicted: bool,
 }
 
 #[derive(Clone)]
@@ -114,7 +116,12 @@ pub fn status_tree(
         } else {
             ""
         };
-        out.push_str(&format!("{node} {}{pr}{here}\n", e.branch));
+        let warn = if e.conflicted {
+            "  ⚠ conflict markers"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{node} {}{pr}{warn}{here}\n", e.branch));
     }
     out.push_str("┴\n");
     out.push_str(&format!("  {trunk} (trunk)\n"));

@@ -71,8 +71,32 @@ git stack submit               # force-push and refresh the PRs
 | `git stack untrack` | Forget the current branch's stack metadata. |
 | `git stack status` (`ls`, `list`) | Show the stack tree with PR numbers/states. |
 | `git stack up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
+| `git stack commit [-m <msg>]` | Make a **new** commit on the current branch, then restack all descendants onto the new tip. |
+| `git stack amend` | Fold **staged** changes into the current commit and update every descendant. |
+| `git stack reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
+| `git stack restack` | Restack the current branch's descendants onto its tip. |
+| `git stack hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
 | `git stack sync` | Fetch and rebase every tracked branch onto the latest trunk. |
 | `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs. |
+
+### Editing a branch in the middle of a stack
+
+When you change a branch that has descendants, git-stack propagates the change
+up the stack automatically — forks included — using two engines depending on
+what you're doing:
+
+| You want to… | Command | Engine | On conflict |
+|---|---|---|---|
+| Add **new** work | `git stack commit` | `git replay --contained` (whole subtree, one atomic ref update) | conflict markers are **persisted** into the committed files so it always finishes, and the affected branches are flagged with a loud warning |
+| **Amend** a commit | `git stack amend` | `git history fixup` (atomic, worktree-free) | **aborts cleanly**, nothing changes, loud warning — `git history` cannot leave markers |
+| **Reword** a message | `git stack reword` | `git history reword` | aborts cleanly |
+
+Branches left holding persisted conflict markers are shown with `⚠ conflict
+markers` in `git stack status`. Search for `<<<<<<<`, resolve, and commit.
+
+Prefer plain `git commit`? Run `git stack hooks install` and a post-commit /
+post-rewrite hook will call `git stack restack` for you (the hooks are guarded
+against recursion and no-op off a stack).
 
 > Note: `git stack --help` and `git stack <cmd> --help` are intercepted by git to
 > open a man page (`man git-stack`). Install via `./install.sh` so that page
