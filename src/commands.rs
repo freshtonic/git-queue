@@ -536,7 +536,7 @@ pub fn submit(draft: bool) -> Result<()> {
         .map(|(i, b)| Entry {
             branch: b.clone(),
             pr: prs[i].clone(),
-            conflicted: meta::conflicted(b),
+            conflicted: git::has_conflict_markers(b),
         })
         .collect();
 
@@ -665,8 +665,6 @@ fn refresh_descendant_anchors(branch: &str) -> Result<()> {
             let ptip = git::rev_parse(parent)?;
             meta::set_parent_sha(&b, &ptip)?;
         }
-        // A clean history rewrite leaves no markers.
-        meta::set_conflicted(&b, false)?;
     }
     Ok(())
 }
@@ -777,7 +775,8 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
         entries.push(Entry {
             branch: b.clone(),
             pr,
-            conflicted: meta::conflicted(b),
+            // Detect markers live so `status` can never go stale.
+            conflicted: git::has_conflict_markers(b),
         });
     }
     Ok(entries)

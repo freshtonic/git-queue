@@ -167,14 +167,10 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
         .assert()
         .success();
 
-    // `b` now carries conflict markers and is flagged.
+    // `b` now carries conflict markers.
     assert!(
         git_out(dir, &["show", "b:shared.txt"]).contains("<<<<<<<"),
         "expected persisted conflict markers on b"
-    );
-    assert_eq!(
-        git_out(dir, &["config", "--local", "branch.b.stackConflicted"]),
-        "true"
     );
     // No rebase left in progress.
     assert!(!dir.join(".git/rebase-merge").exists());
@@ -183,6 +179,47 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
     // status surfaces the warning marker.
     let out = stack(dir).arg("status").output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("⚠"));
+}
+
+#[test]
+fn resolving_markers_clears_the_status_warning() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "db"]).assert().success();
+    stage(dir, "f.txt", "base\n");
+    git(dir, &["commit", "-q", "-m", "db base"]);
+    stack(dir).args(["create", "ui"]).assert().success();
+    stage(dir, "f.txt", "ui-version\n");
+    git(dir, &["commit", "-q", "-m", "ui change"]);
+
+    // Conflicting commit on db -> ui gets persisted markers.
+    git(dir, &["checkout", "-q", "db"]);
+    stage(dir, "f.txt", "db-version\n");
+    stack(dir)
+        .args(["commit", "-m", "db conflicting"])
+        .assert()
+        .success();
+    let flagged = stack(dir).arg("status").output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&flagged.stdout).contains("⚠"),
+        "status should warn while markers exist"
+    );
+
+    // Resolve on ui and amend; status must stop warning (no stale flag).
+    git(dir, &["checkout", "-q", "ui"]);
+    stage(dir, "f.txt", "ui-version\n");
+    stack(dir).arg("amend").assert().success();
+
+    assert!(
+        !git_out(dir, &["show", "ui:f.txt"]).contains("<<<<<<<"),
+        "ui should be clean after resolution"
+    );
+    let cleared = stack(dir).arg("status").output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&cleared.stdout).contains("⚠"),
+        "status must not warn after markers are resolved"
+    );
 }
 
 #[test]

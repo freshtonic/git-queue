@@ -116,7 +116,9 @@ State lives in the repository's own git config (nothing outside git):
 | `branch.<n>.stackParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
 | `branch.<n>.stackPr` | Cached PR number. |
 | `branch.<n>.stackDescription` | PR body text set by `git stack describe`. |
-| `branch.<n>.stackConflicted` | Set when a restack persisted conflict markers. |
+
+(Conflict-marker state is **not** stored — `status` detects `<<<<<<<` in each
+branch's tip live, so it can never report a stale warning.)
 
 Branches form a forest under trunk via parent pointers; a *stack line* is the
 linear chain from trunk to a leaf. `submit` pushes bottom-first (so each PR's

@@ -99,30 +99,13 @@ pub fn set_description(branch: &str, text: &str) -> Result<()> {
     }
 }
 
-fn conflicted_key(branch: &str) -> String {
-    format!("branch.{branch}.stackConflicted")
-}
-
-/// Whether the last restack persisted conflict markers into this branch.
-pub fn conflicted(branch: &str) -> bool {
-    config_get(&conflicted_key(branch)).as_deref() == Some("true")
-}
-
-pub fn set_conflicted(branch: &str, value: bool) -> Result<()> {
-    if value {
-        config_set(&conflicted_key(branch), "true")
-    } else {
-        config_unset(&conflicted_key(branch));
-        Ok(())
-    }
-}
-
 pub fn untrack(branch: &str) {
     config_unset(&parent_key(branch));
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
-    config_unset(&conflicted_key(branch));
     config_unset(&description_key(branch));
+    // Legacy: older versions stored a conflicted flag here; clear it if present.
+    config_unset(&format!("branch.{branch}.stackConflicted"));
 }
 
 /// All branches that have a `stackParent` recorded.

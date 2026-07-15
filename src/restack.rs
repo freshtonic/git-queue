@@ -68,9 +68,7 @@ pub fn propagate(stack: &Stack, changed: &str) -> Result<Report> {
                 let ptip = git::rev_parse(parent)?;
                 meta::set_parent_sha(b, &ptip)?;
             }
-            let has_markers = git::has_conflict_markers(b);
-            meta::set_conflicted(b, has_markers)?;
-            if has_markers {
+            if git::has_conflict_markers(b) {
                 report.conflicted.push(b.clone());
             }
             report.restacked.push(b.clone());
@@ -116,9 +114,7 @@ pub fn restack_forest(stack: &Stack) -> Result<Report> {
             }
         }
         meta::set_parent_sha(&b, &git::rev_parse(&parent)?)?;
-        let has_markers = git::has_conflict_markers(&b);
-        meta::set_conflicted(&b, has_markers)?;
-        if has_markers {
+        if git::has_conflict_markers(&b) {
             report.conflicted.push(b.clone());
         }
         report.restacked.push(b);
