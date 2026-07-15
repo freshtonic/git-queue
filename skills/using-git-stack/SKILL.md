@@ -1,8 +1,8 @@
 ---
 name: Using git-stack
 description: Manage stacks of dependent branches and their numbered pull requests with the `git stack` subcommand
-when_to_use: when work spans several dependent branches that should become separate, reviewable PRs; when editing a branch that has other branches stacked on top of it; when keeping a stack rebased on trunk and its PRs in sync; when a large branch should be split into a reviewable stack
-version: 1.0.0
+when_to_use: when work spans several dependent branches that should become separate, reviewable PRs; when editing a branch that has other branches stacked on top of it; when keeping a stack rebased on trunk and its PRs in sync; when a large branch should be split into a reviewable stack; when PRs must not be merged out of order
+version: 1.1.0
 ---
 
 # Using git-stack
@@ -44,6 +44,9 @@ below own that propagation.
 | Open or refresh the PRs | `git stack submit` | Pushes + numbered, cross-linked PRs |
 | Say what a PR is about | `git stack describe [-m …]` | Sets the PR body |
 | One big branch → a stack | `git stack split` | Editor assigns commits to branches |
+| Abandon a stack's open PRs | `git stack yank` | Closes every open (non-merged) PR in the stack |
+| Stop PRs merging out of order | `git stack protect` | Enables draft-based merge-order enforcement (one-time) |
+| Check enforcement is on | `git stack doctor` | Read-only report of the gate status |
 | Move around the stack | `git stack up` / `down`, `git stack status` | Navigate / view |
 
 ### commit vs amend — the key distinction
@@ -75,6 +78,22 @@ The two engines handle conflicts differently, by design:
 `git commit --amend`) to clean it up. Never `submit` a branch that still has
 markers.
 
+## Enforcing merge order
+
+To stop PRs being merged out of order, run `git stack protect` **once** per repo.
+It enables *draft-based* gating (`stack.gate = draft`) — no GitHub workflow,
+ruleset, or admin rights needed. Then `git stack submit` keeps the **bottom**
+(mergeable) PR ready and marks every PR above it as a **draft**; GitHub disables
+the merge button on drafts. As the bottom PR lands, `git stack sync` +
+`git stack submit` readies the next one.
+
+- `git stack doctor` reports whether the gate is enabled (read-only).
+- It's a **soft** gate: a reviewer can mark a PR "ready" and merge it anyway.
+- Draft — not a "do-not-merge" label + required check — because with
+  base-chaining a non-bottom PR targets an intermediate branch that trunk
+  protection can't gate, and a ruleset that gates it also blocks git-stack's
+  pushes. Draft blocks the merge without blocking pushes.
+
 ## Safety notes
 
 - `git stack sync` pushes with `--force-with-lease`, so it won't clobber commits
@@ -82,6 +101,9 @@ markers.
   `git stack sync` again to pull their work in first.
 - Use `git stack sync --no-push` to restack locally without touching the remote.
 - git-stack never edits the trunk's commits; it only rebases your stack onto it.
+- **Merging tip:** deleting the merged branch is fine — `git stack sync` reparents
+  orphaned children onto trunk and `git stack submit` revives any PR GitHub closed
+  because its base branch was deleted. Run `sync` then `submit` after each merge.
 
 ## Worked example
 

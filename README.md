@@ -101,8 +101,27 @@ git stack submit               # refresh the PRs
 | `git stack restack` | Restack the current branch's descendants onto its tip. |
 | `git stack hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
 | `git stack sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), restack onto the latest trunk, and push back with `--force-with-lease`. |
-| `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs (skips merged/closed PRs). |
+| `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
 | `git stack yank` | Close every open (non-merged) PR in the current stack. |
+| `git stack protect` | Enable draft-based merge-order enforcement for this repo. |
+| `git stack doctor` | Report whether merge-order enforcement is enabled (read-only). |
+
+### Enforcing merge order
+
+Run `git stack protect` once to stop PRs being merged out of order. It sets a
+local flag (`stack.gate = draft`) — no GitHub setup, workflow, ruleset, or admin
+rights required. With it on, `git stack submit` keeps the **bottom** (mergeable)
+PR *ready* and marks every PR above it as a **draft**; GitHub disables the merge
+button on drafts, so only the bottom PR can merge. As PRs land, `git stack sync`
++ `git stack submit` readies the new bottom PR.
+
+`git stack doctor` reports whether the gate is on. It's a *soft* gate — a
+reviewer can mark a PR "ready" and merge it deliberately.
+
+> Why draft, not a "do-not-merge" label + required check? With base-chaining a
+> non-bottom PR targets an *intermediate* branch, so trunk protection can't gate
+> it, and a ruleset that does gate it also blocks git-stack's pushes. Draft is
+> the only mechanism that blocks the merge without blocking pushes.
 
 ### Landing a stack
 
@@ -112,6 +131,12 @@ it detects the merged PR, reparents the branches above onto trunk, and rebases
 them; then `git stack submit` retargets their PR bases and refreshes the stack
 list. Each PR body shows live approval/merge-state emojis (✅/♻️/⏳ while open,
 🟣/⚫ once merged/closed) as of the last submit.
+
+Deleting the merged branch is handled too: if a merge deletes the branch (via
+`--delete-branch` or the repo's auto-delete setting), `sync` reparents its
+orphaned children onto trunk, and — because GitHub closes a PR whose base branch
+was deleted — `submit` revives that child PR (reopening it, or opening a fresh
+one retargeted to trunk).
 
 ### Editing a branch in the middle of a stack
 
@@ -148,6 +173,7 @@ State lives in the repository's own git config (nothing outside git):
 | `branch.<n>.stackParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
 | `branch.<n>.stackPr` | Cached PR number. |
 | `branch.<n>.stackDescription` | PR body text set by `git stack describe`. |
+| `stack.gate` | `draft` once `git stack protect` enables merge-order enforcement. |
 
 (Conflict-marker state is **not** stored — `status` detects `<<<<<<<` in each
 branch's tip live, so it can never report a stale warning.)
