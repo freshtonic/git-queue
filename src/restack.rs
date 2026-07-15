@@ -85,6 +85,47 @@ pub fn propagate(stack: &Stack, changed: &str) -> Result<Report> {
     Ok(report)
 }
 
+/// Reconcile EVERY tracked branch onto its parent's current tip, bottom-up.
+/// Catches any staleness — a moved trunk, a mid-stack branch that took on
+/// remote commits, etc. Returns without restoring HEAD (the caller does that,
+/// since a fallback rebase may have moved it).
+pub fn restack_forest(stack: &Stack) -> Result<Report> {
+    let mut report = Report::default();
+    for b in stack.topo_order() {
+        let parent = match stack.parent_of(&b) {
+            Some(p) => p.to_string(),
+            None => continue,
+        };
+        let ptip = git::rev_parse(&parent)?;
+        let anchor = match meta::parent_sha(&b) {
+            Some(sha) => sha,
+            None => git::merge_base(&parent, &b)?,
+        };
+        if anchor == ptip {
+            continue;
+        }
+        let ranges = vec![format!("{anchor}..{b}")];
+        match git::replay_restack(&ptip, &ranges)? {
+            Replayed::Applied => {}
+            Replayed::Failed(msg) => {
+                eprintln!(
+                    "note: clean replay of `{b}` failed ({}); persisting conflict markers.",
+                    msg.lines().next().unwrap_or("conflict")
+                );
+                git::rebase_persist(&ptip, &anchor, &b)?;
+            }
+        }
+        meta::set_parent_sha(&b, &git::rev_parse(&parent)?)?;
+        let has_markers = git::has_conflict_markers(&b);
+        meta::set_conflicted(&b, has_markers)?;
+        if has_markers {
+            report.conflicted.push(b.clone());
+        }
+        report.restacked.push(b);
+    }
+    Ok(report)
+}
+
 /// Per-branch, marker-persisting rebase used when replay can't apply cleanly.
 /// Processes bottom-up so each branch rebases onto its already-updated parent.
 fn fallback_rebase(stack: &Stack, subtree_topo: &[String]) -> Result<()> {

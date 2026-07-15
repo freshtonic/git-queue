@@ -124,13 +124,22 @@ pub fn rebase_in_progress() -> bool {
     dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists()
 }
 
-/// `git rebase --onto <new_base> <upstream> <branch>`.
-pub fn rebase_onto(new_base: &str, upstream: &str, branch: &str) -> Result<()> {
-    run(&["rebase", "--onto", new_base, upstream, branch])
-}
-
 pub fn fetch(remote: &str) -> Result<()> {
     run(&["fetch", remote])
+}
+
+/// SHA of a remote-tracking branch `<remote>/<branch>`, if it exists.
+pub fn remote_branch(remote: &str, branch: &str) -> Option<String> {
+    let r = format!("{remote}/{branch}");
+    out(&["rev-parse", "--verify", "--quiet", &r])
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
+/// Fast-forward the *currently checked-out* branch to `target` (updates the
+/// work tree). Fails if it isn't a fast-forward.
+pub fn merge_ff_only(target: &str) -> Result<()> {
+    run(&["merge", "--ff-only", target])
 }
 
 /// Force-with-lease push, setting upstream. Shows git's own progress output.

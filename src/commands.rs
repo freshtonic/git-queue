@@ -142,65 +142,104 @@ pub fn next() -> Result<()> {
     }
 }
 
-/// `git stack sync` — restack everything onto the latest trunk.
-pub fn sync() -> Result<()> {
+/// `git stack sync [--no-push]` — pull in commits others pushed to stack
+/// branches, restack the whole stack onto the latest trunk, and (by default)
+/// push every branch back with `--force-with-lease` so remote work is never
+/// clobbered.
+pub fn sync(no_push: bool) -> Result<()> {
     git::ensure_repo()?;
     if git::rebase_in_progress() {
         bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git stack sync`");
     }
+    std::env::set_var(git::GUARD_ENV, "1"); // suppress our hooks during internal git ops
     let stack = Stack::load()?;
     let remote = meta::remote();
     let original = git::current_branch()?;
 
     println!("Fetching `{remote}`...");
     if let Err(e) = git::fetch(&remote) {
-        eprintln!(
-            "warning: fetch failed, restacking on local `{}` instead: {e}",
-            stack.trunk
-        );
+        eprintln!("warning: fetch failed; syncing against local refs only: {e}");
     }
 
-    // New trunk tip: prefer the remote-tracking ref, else local trunk.
-    let new_trunk_tip = match git::remote_trunk(&remote, &stack.trunk) {
-        Some(r) => git::rev_parse(&r)?,
-        None => git::rev_parse(&stack.trunk)?,
-    };
-    // Fast-forward the local trunk ref if it isn't checked out.
-    if original != stack.trunk {
-        let _ = git::force_ref(&stack.trunk, &new_trunk_tip);
-    }
-
-    for branch in stack.topo_order() {
-        let parent = match stack.parent_of(&branch) {
-            Some(p) => p.to_string(),
-            None => continue,
-        };
-        let parent_tip = if parent == stack.trunk {
-            new_trunk_tip.clone()
+    // Bring local trunk up to the remote trunk tip.
+    if let Some(remote_trunk) = git::remote_trunk(&remote, &stack.trunk) {
+        let tip = git::rev_parse(&remote_trunk)?;
+        if original == stack.trunk {
+            let _ = git::merge_ff_only(&remote_trunk);
         } else {
-            git::rev_parse(&parent)?
-        };
-        // Anchor: where this branch was last based. Fall back to merge-base.
-        let anchor = meta::parent_sha(&branch)
-            .unwrap_or_else(|| git::merge_base(&parent, &branch).unwrap_or_default());
-
-        if anchor == parent_tip {
-            continue; // already based on the current parent tip
+            let _ = git::force_ref(&stack.trunk, &tip);
         }
-        println!("Restacking `{branch}` onto `{parent}`...");
-        if let Err(e) = git::rebase_onto(&parent_tip, &anchor, &branch) {
-            eprintln!("\nConflict while restacking `{branch}`.");
-            eprintln!(
-                "Resolve the conflict, run `git rebase --continue`, then re-run `git stack sync`."
-            );
-            return Err(e);
-        }
-        meta::set_parent_sha(&branch, &parent_tip)?;
     }
 
-    git::checkout(&original)?;
-    println!("Stack is up to date with `{}`.", stack.trunk);
+    // Pull in commits teammates pushed to our stack branches (bottom-up).
+    for branch in stack.topo_order() {
+        match incorporate_remote(&branch, &remote, &original)? {
+            Some(RemoteAction::FastForwarded) => {
+                println!("Pulled remote commits into `{branch}` (fast-forward).")
+            }
+            Some(RemoteAction::Rebased) => {
+                println!("Merged your local commits on top of remote `{branch}`.")
+            }
+            None => {}
+        }
+    }
+
+    // Reconcile the whole forest onto updated parents (new engine).
+    let report = restack::restack_forest(&stack)?;
+
+    // Return to where we started before pushing.
+    git::checkout_quiet(&original)?;
+
+    // Push every branch back, with lease, unless asked not to.
+    if !no_push {
+        for branch in stack.topo_order() {
+            println!("Pushing `{branch}`...");
+            git::push(&remote, &branch)?;
+        }
+    }
+
+    if !report.conflicted.is_empty() {
+        restack::warn_conflicts(&report.conflicted);
+    } else {
+        println!("Stack is in sync with `{}`.", stack.trunk);
+    }
     Ok(())
+}
+
+enum RemoteAction {
+    FastForwarded,
+    Rebased,
+}
+
+/// Integrate `origin/<branch>` into the local branch, if the remote has commits
+/// we don't. Fast-forwards when we have nothing unique; otherwise replays our
+/// unique commits onto the remote tip (patch-id dedup, conflict markers
+/// persisted). Returns what it did, or `None` if there was nothing to pull.
+fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Option<RemoteAction>> {
+    let remote_sha = match git::remote_branch(remote, branch) {
+        Some(sha) => sha,
+        None => return Ok(None), // branch not on the remote yet
+    };
+    let local_sha = git::rev_parse(branch)?;
+    if local_sha == remote_sha {
+        return Ok(None);
+    }
+    if git::is_ancestor(&remote_sha, &local_sha) {
+        return Ok(None); // we're ahead; nothing to pull
+    }
+    if git::is_ancestor(&local_sha, &remote_sha) {
+        // Remote strictly ahead: fast-forward.
+        if branch == current {
+            git::merge_ff_only(&format!("{remote}/{branch}"))?;
+        } else {
+            git::force_ref(branch, &remote_sha)?;
+        }
+        return Ok(Some(RemoteAction::FastForwarded));
+    }
+    // Diverged: replay our unique commits onto the remote tip.
+    let base = git::merge_base(&format!("{remote}/{branch}"), branch)?;
+    git::rebase_persist(&remote_sha, &base, branch)?;
+    Ok(Some(RemoteAction::Rebased))
 }
 
 /// `git stack submit [--draft]` — push the current stack line and open/update

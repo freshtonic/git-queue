@@ -56,9 +56,9 @@ git stack status               # view the stack and PR states
 git stack down / up            # walk down/up the stack (aliases: prev/next)
 
 git stack submit               # push all branches + open/update numbered PRs
-# ... trunk moves on, or you amend a lower branch ...
-git stack sync                 # rebase the whole stack onto the latest trunk
-git stack submit               # force-push and refresh the PRs
+# ... trunk moves on, a teammate pushes to a branch, or you amend a lower one ...
+git stack sync                 # pull remote commits, restack onto trunk, push (with lease)
+git stack submit               # refresh the PRs
 ```
 
 ## Commands
@@ -76,7 +76,7 @@ git stack submit               # force-push and refresh the PRs
 | `git stack reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
 | `git stack restack` | Restack the current branch's descendants onto its tip. |
 | `git stack hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
-| `git stack sync` | Fetch and rebase every tracked branch onto the latest trunk. |
+| `git stack sync [--no-push]` | Pull remote commits into stack branches, restack onto the latest trunk, and push back with `--force-with-lease`. |
 | `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs. |
 
 ### Editing a branch in the middle of a stack

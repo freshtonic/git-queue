@@ -80,8 +80,12 @@ enum Command {
         #[command(subcommand)]
         action: HooksAction,
     },
-    /// Rebase the whole stack onto the latest trunk.
-    Sync,
+    /// Pull remote commits, restack onto the latest trunk, and push (with lease).
+    Sync {
+        /// Skip pushing the branches back to the remote.
+        #[arg(long)]
+        no_push: bool,
+    },
     /// Push the stack and open/update its numbered PRs.
     #[command(visible_alias = "push")]
     Submit {
@@ -135,7 +139,7 @@ fn main() {
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),
-        Command::Sync => commands::sync(),
+        Command::Sync { no_push } => commands::sync(no_push),
         Command::Submit { draft } => commands::submit(draft),
         Command::Commit { message } => commands::commit(message),
         Command::Amend => commands::amend(),

@@ -214,6 +214,78 @@ fn hooks_autorestack_on_plain_commit() {
     assert_eq!(git_out(dir, &["show", "b:hooked.txt"]), "hooked");
 }
 
+/// A repo with a bare `origin` remote and `main` pushed. Returns both temp dirs
+/// (keep the remote alive for the test's duration).
+fn new_repo_with_remote() -> (TempDir, TempDir) {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare", "-q", "-b", "main"]);
+    git(
+        dir,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(dir, &["push", "-q", "origin", "main"]);
+    (tmp, remote)
+}
+
+/// First field of `git ls-remote origin <ref>` (the remote's SHA), or "".
+fn ls_remote(dir: &Path, refname: &str) -> String {
+    git_out(dir, &["ls-remote", "origin", refname])
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+#[test]
+fn sync_pulls_teammate_commits_and_pushes_with_lease() {
+    let (tmp, _remote) = new_repo_with_remote();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b.txt");
+    git(dir, &["push", "-q", "-u", "origin", "a", "b"]);
+
+    // Simulate a teammate pushing a commit to `a`, then rewind our local `a`
+    // so the remote is strictly ahead of us.
+    git(dir, &["checkout", "-q", "a"]);
+    commit(dir, "teammate.txt");
+    git(dir, &["push", "-q", "origin", "a"]);
+    git(dir, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    git(dir, &["checkout", "-q", "b"]);
+    stack(dir).arg("sync").assert().success();
+
+    // Teammate's commit was pulled into `a`, and `b` restacked on top of it.
+    assert_eq!(git_out(dir, &["show", "a:teammate.txt"]), "teammate.txt");
+    assert!(is_ancestor(dir, "a", "b"), "b not restacked onto updated a");
+    assert_eq!(git_out(dir, &["show", "b:teammate.txt"]), "teammate.txt");
+    // Our restacked `b` was pushed back to the remote.
+    assert_eq!(ls_remote(dir, "b"), git_out(dir, &["rev-parse", "b"]));
+}
+
+#[test]
+fn sync_no_push_leaves_remote_untouched() {
+    let (tmp, _remote) = new_repo_with_remote();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    git(dir, &["push", "-q", "-u", "origin", "a"]);
+    let remote_a_before = ls_remote(dir, "a");
+
+    // Add a local commit that would normally be pushed.
+    commit(dir, "local.txt");
+    stack(dir).args(["sync", "--no-push"]).assert().success();
+
+    // Remote `a` is unchanged; local is ahead.
+    assert_eq!(ls_remote(dir, "a"), remote_a_before);
+    assert_ne!(ls_remote(dir, "a"), git_out(dir, &["rev-parse", "a"]));
+}
+
 #[test]
 fn init_detects_and_records_trunk() {
     let tmp = new_repo();
@@ -297,7 +369,7 @@ fn sync_restacks_onto_advanced_trunk() {
     commit(dir, "trunk.txt");
 
     // Restack (no remote -> warns and uses local trunk).
-    stack(dir).arg("sync").assert().success();
+    stack(dir).args(["sync", "--no-push"]).assert().success();
 
     // feat-b must now contain the new trunk commit AND both stack commits,
     // and trunk must be an ancestor of feat-b.
