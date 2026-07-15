@@ -20,14 +20,27 @@ shared stack map.
 ## Install
 
 ```sh
-cargo install --path .
-# ensure the resulting `git-stack` binary is on your PATH, then:
+./install.sh          # cargo install + man page
 git stack --version
+```
+
+`install.sh` runs `cargo install --path .` and then writes the man page to a
+directory on your `MANPATH` (`cargo install` only ever installs *binaries*, so
+the man page is placed separately). Afterwards both `man git-stack` and
+`git stack --help` work — git routes `git stack --help` to `man git-stack`.
+
+Binary only, no man page:
+
+```sh
+cargo install --path .
 ```
 
 Because the binary is named `git-stack`, git dispatches `git stack …` to it
 automatically (git's standard subcommand mechanism). It relies on `git` and, for
 PRs, the authenticated [`gh`](https://cli.github.com) CLI.
+
+> The man page is generated from the CLI definition itself (`clap_mangen`), so it
+> never drifts. Regenerate manually with `git-stack man --dir <man1-dir>`.
 
 ## Workflow
 
@@ -61,8 +74,9 @@ git stack submit               # force-push and refresh the PRs
 | `git stack sync` | Fetch and rebase every tracked branch onto the latest trunk. |
 | `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs. |
 
-> Note: `git stack <cmd> --help` is intercepted by git to open a man page. Use
-> `git stack help` or `git-stack --help` for CLI help.
+> Note: `git stack --help` and `git stack <cmd> --help` are intercepted by git to
+> open a man page (`man git-stack`). Install via `./install.sh` so that page
+> exists; otherwise use `git stack help` or `git-stack --help` for inline help.
 
 ## How it works
 

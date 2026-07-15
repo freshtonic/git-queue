@@ -7,7 +7,8 @@ mod meta;
 mod render;
 mod stack;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -63,6 +64,32 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
+    /// Generate the roff man page (used by install.sh; also enables `git stack --help`).
+    #[command(hide = true)]
+    Man {
+        /// Directory to write `git-stack.1` into. Prints to stdout if omitted.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+/// Render the man page from the clap definition and either write
+/// `<dir>/git-stack.1` or print it to stdout.
+fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
+    use std::io::Write;
+    let man = clap_mangen::Man::new(Cli::command());
+    let mut buffer: Vec<u8> = Vec::new();
+    man.render(&mut buffer)?;
+    match dir {
+        Some(dir) => {
+            std::fs::create_dir_all(&dir)?;
+            let path = dir.join("git-stack.1");
+            std::fs::write(&path, &buffer)?;
+            eprintln!("Wrote {}", path.display());
+        }
+        None => std::io::stdout().write_all(&buffer)?,
+    }
+    Ok(())
 }
 
 fn main() {
@@ -77,6 +104,7 @@ fn main() {
         Command::Prev => commands::prev(),
         Command::Sync => commands::sync(),
         Command::Submit { draft } => commands::submit(draft),
+        Command::Man { dir } => generate_man(dir),
     };
     if let Err(e) = result {
         eprintln!("error: {e:#}");
