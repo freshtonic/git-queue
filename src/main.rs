@@ -101,6 +101,8 @@ enum Command {
         #[arg(long)]
         draft: bool,
     },
+    /// Close every open (non-merged) PR in the current stack.
+    Yank,
     /// Generate the roff man page (used by install.sh; also enables `git stack --help`).
     #[command(hide = true)]
     Man {
@@ -151,6 +153,7 @@ fn main() {
         Command::Prev => commands::prev(),
         Command::Sync { no_push } => commands::sync(no_push),
         Command::Submit { draft } => commands::submit(draft),
+        Command::Yank => commands::yank(),
         Command::Commit { message } => commands::commit(message),
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),

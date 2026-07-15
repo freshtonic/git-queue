@@ -17,7 +17,27 @@ pub struct Entry {
 pub struct PrRef {
     pub number: u64,
     pub url: String,
-    pub state: String,
+    pub state: String, // OPEN | CLOSED | MERGED
+    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | None
+    pub review: Option<String>,
+}
+
+/// Emoji for a PR's review decision.
+fn approval_emoji(review: &Option<String>) -> &'static str {
+    match review.as_deref() {
+        Some("APPROVED") => "✅",
+        Some("CHANGES_REQUESTED") => "🔴",
+        _ => "⏳", // REVIEW_REQUIRED / not yet reviewed
+    }
+}
+
+/// Emoji for a PR's merge state.
+fn state_emoji(state: &str) -> &'static str {
+    match state {
+        "MERGED" => "🟣",
+        "CLOSED" => "⚫",
+        _ => "🟢", // OPEN
+    }
 }
 
 /// Numbered title: `[k/n] <subject>`, stripping any prior `[i/j] ` prefix so
@@ -51,7 +71,10 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
             total
         ),
         String::new(),
-        "Merge in order, bottom to top:".to_string(),
+        "Part of a stack (listed bottom → top). PRs merge bottom-first; merging one \
+         supersedes the PRs above it until the author runs `git stack sync`, which \
+         retargets their bases and rebases them."
+            .to_string(),
         String::new(),
     ];
     // Bottom-first: index 0 merges first.
@@ -62,6 +85,15 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
         } else {
             line[i - 1].branch.as_str()
         };
+        // Merge-state emoji always; approval emoji only while the PR is open
+        // (a merged/closed PR's review status is no longer meaningful).
+        let status = match &e.pr {
+            Some(p) if p.state == "OPEN" => {
+                format!("{}{} ", approval_emoji(&p.review), state_emoji(&p.state))
+            }
+            Some(p) => format!("{} ", state_emoji(&p.state)),
+            None => String::new(),
+        };
         // Link text: `#<n> branch` linked to the PR URL if we have one.
         let label = match &e.pr {
             Some(p) if !p.url.is_empty() => format!("[#{} `{}`]({})", p.number, e.branch, p.url),
@@ -70,13 +102,19 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
         };
         let arrow = format!(" → `{base}`");
         let line_str = if is_current {
-            format!("{}. **{label}{arrow}** &nbsp;👈 **this PR**", i + 1)
+            format!("{}. {status}**{label}{arrow}** &nbsp;👈 **this PR**", i + 1)
         } else {
-            format!("{}. {label}{arrow}", i + 1)
+            format!("{}. {status}{label}{arrow}", i + 1)
         };
         lines.push(line_str);
     }
     lines.push(String::new());
+    lines.push(
+        "<sub>✅ approved · 🔴 changes requested · ⏳ review pending &nbsp;|&nbsp; \
+         🟣 merged · 🟢 open · ⚫ closed &nbsp;—&nbsp; status as of the last \
+         `git stack submit`.</sub>"
+            .to_string(),
+    );
     lines.push("<sub>🥞 Managed by git-stack — do not edit this list by hand.</sub>".to_string());
     lines.join("\n")
 }
@@ -181,34 +219,50 @@ mod tests {
         assert_eq!(composed, format!("{BEGIN}\nnav\n{END}"));
     }
 
-    fn entry(branch: &str, number: u64, url: &str) -> Entry {
+    fn entry(branch: &str, number: u64, url: &str, state: &str, review: Option<&str>) -> Entry {
         Entry {
             branch: branch.to_string(),
             pr: Some(PrRef {
                 number,
                 url: url.to_string(),
-                state: "OPEN".to_string(),
+                state: state.to_string(),
+                review: review.map(|s| s.to_string()),
             }),
             conflicted: false,
         }
     }
 
     #[test]
-    fn nav_block_links_and_marks_current() {
+    fn nav_block_links_marks_current_and_shows_status() {
         let line = vec![
-            entry("api", 10, "https://x/pull/10"),
-            entry("service", 11, "https://x/pull/11"),
-            entry("ui", 12, "https://x/pull/12"),
+            entry("api", 10, "https://x/pull/10", "MERGED", Some("APPROVED")),
+            entry(
+                "service",
+                11,
+                "https://x/pull/11",
+                "OPEN",
+                Some("CHANGES_REQUESTED"),
+            ),
+            entry("ui", 12, "https://x/pull/12", "OPEN", None),
         ];
         let nav = nav_block(&line, "service", "main");
-        // Bottom-first merge order, linked to PR URLs.
-        assert!(nav.contains("1. [#10 `api`](https://x/pull/10) → `main`"));
-        // Current PR is bolded and marked, and targets the branch below it.
+        // Merged PR: state emoji only (approval no longer meaningful).
         assert!(
-            nav.contains("**[#11 `service`](https://x/pull/11) → `api`**"),
+            nav.contains("1. 🟣 [#10 `api`](https://x/pull/10) → `main`"),
             "{nav}"
         );
+        // Current PR: emojis, then bolded label targeting the branch below.
+        assert!(
+            nav.contains("2. 🔴🟢 **[#11 `service`](https://x/pull/11) → `api`**"),
+            "{nav}"
+        );
+        // Not-yet-reviewed open PR.
+        assert!(nav.contains("3. ⏳🟢 [#12 `ui`]"), "{nav}");
         assert!(nav.contains("👈 **this PR**"));
         assert!(nav.contains("2 of 3"));
+        assert!(
+            !nav.contains("Merge in order"),
+            "old misleading caption removed"
+        );
     }
 }

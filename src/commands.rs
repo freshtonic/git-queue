@@ -480,56 +480,76 @@ pub fn submit(draft: bool) -> Result<()> {
     let branches = &line.branches;
     let total = branches.len();
 
-    // Guard: don't open an empty PR.
-    for (i, b) in branches.iter().enumerate() {
-        let base = if i == 0 {
+    let base_of = |i: usize| -> String {
+        if i == 0 {
             stack.trunk.clone()
         } else {
             branches[i - 1].clone()
-        };
+        }
+    };
+
+    // Look up existing PRs once. A MERGED/CLOSED PR is "frozen": we must not push
+    // to it, recreate it, or edit its base (GitHub rejects a base change on a
+    // closed PR). We still list it (with its merged/closed emoji).
+    let remote = meta::remote();
+    let existing: Vec<Option<gh::Pr>> = branches
+        .iter()
+        .map(|b| gh::find(b))
+        .collect::<Result<_>>()?;
+    let frozen: Vec<bool> = existing
+        .iter()
+        .map(|p| {
+            matches!(
+                p.as_ref().map(|pr| pr.state.as_str()),
+                Some("MERGED") | Some("CLOSED")
+            )
+        })
+        .collect();
+
+    // Guard: don't open an empty PR (already-landed branches are skipped).
+    for (i, b) in branches.iter().enumerate() {
+        if frozen[i] {
+            continue;
+        }
+        let base = base_of(i);
         if git::ahead_count(&base, b)? == 0 {
             bail!("`{b}` has no commits beyond `{base}`; add a commit before submitting");
         }
     }
 
-    // Pass 1: push every branch (bottom-first so bases exist), then
-    // create-or-find its PR to learn the number.
-    let remote = meta::remote();
+    // Pass 1: push active branches (bottom-first so bases exist) and
+    // create-or-find their PRs.
     let mut prs: Vec<Option<PrRef>> = vec![None; total];
     for (i, b) in branches.iter().enumerate() {
-        let base = if i == 0 {
-            stack.trunk.clone()
-        } else {
-            branches[i - 1].clone()
-        };
+        if frozen[i] {
+            prs[i] = existing[i].as_ref().map(pr_ref); // keep untouched
+            continue;
+        }
+        let base = base_of(i);
         println!("Pushing `{b}`...");
         git::push(&remote, b)?;
 
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
-
-        let number = match gh::find(b)? {
+        let number = match &existing[i] {
             Some(pr) => pr.number,
-            None => {
-                // Temporary body; the real nav block is written in pass 2.
-                gh::create(b, &base, &title, "Opening…", draft)?
-            }
+            None => gh::create(b, &base, &title, "Opening…", draft)?,
         };
         meta::set_pr(b, number)?;
     }
 
-    // Re-read PR metadata now that all exist (numbers, urls, states).
+    // Re-read active PRs now that any new ones exist.
     for (i, b) in branches.iter().enumerate() {
+        if frozen[i] {
+            continue;
+        }
         if let Some(pr) = gh::find(b)? {
-            prs[i] = Some(PrRef {
-                number: pr.number,
-                url: pr.url,
-                state: pr.state,
-            });
+            prs[i] = Some(pr_ref(&pr));
         }
     }
 
-    // Pass 2: write correct base, numbered title and shared nav block on each.
+    // Pass 2: write correct base, numbered title and shared nav block on the
+    // ACTIVE PRs (frozen ones are left exactly as they are).
     let entries: Vec<Entry> = branches
         .iter()
         .enumerate()
@@ -541,11 +561,9 @@ pub fn submit(draft: bool) -> Result<()> {
         .collect();
 
     for (i, b) in branches.iter().enumerate() {
-        let base = if i == 0 {
-            stack.trunk.clone()
-        } else {
-            branches[i - 1].clone()
-        };
+        if frozen[i] {
+            continue;
+        }
         let number = match &prs[i] {
             Some(p) => p.number,
             None => continue,
@@ -555,7 +573,7 @@ pub fn submit(draft: bool) -> Result<()> {
         let nav = render::nav_block(&entries, b, &stack.trunk);
         let description = meta::description(b).unwrap_or_default();
         let body = render::compose_body(&description, &nav);
-        gh::edit(number, &base, &title, &body)?;
+        gh::edit(number, &base_of(i), &title, &body)?;
     }
 
     println!("\nSubmitted {total} PR(s):");
@@ -563,6 +581,45 @@ pub fn submit(draft: bool) -> Result<()> {
         if let Some(p) = &prs[i] {
             println!("  [{}/{}] {}  {}", i + 1, total, b, p.url);
         }
+    }
+    Ok(())
+}
+
+fn pr_ref(pr: &gh::Pr) -> PrRef {
+    PrRef {
+        number: pr.number,
+        url: pr.url.clone(),
+        state: pr.state.clone(),
+        review: pr.review_decision.clone(),
+    }
+}
+
+/// `git stack yank` — close every open (non-merged) PR in the current stack.
+/// Merged PRs are left alone; local branches and metadata are untouched.
+pub fn yank() -> Result<()> {
+    git::ensure_repo()?;
+    if !gh::ready() {
+        bail!("`gh` is not installed or not authenticated; run `gh auth login`");
+    }
+    let stack = Stack::load()?;
+    let current = git::current_branch()?;
+    if !stack.is_tracked(&current) {
+        bail!("`{current}` is not a stack branch");
+    }
+    let line = stack.line_through(&current)?;
+    let mut closed = 0;
+    for b in &line.branches {
+        if let Some(pr) = gh::find(b)? {
+            if pr.state == "OPEN" {
+                gh::close(pr.number)?;
+                println!("Closed #{} ({b})", pr.number);
+                closed += 1;
+            }
+        }
+    }
+    match closed {
+        0 => println!("No open PRs in this stack to close."),
+        n => println!("Closed {n} open PR(s). Merged PRs and local branches are untouched."),
     }
     Ok(())
 }
@@ -780,6 +837,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             number,
             url: String::new(),
             state: "?".to_string(),
+            review: None,
         });
         entries.push(Entry {
             branch: b.clone(),

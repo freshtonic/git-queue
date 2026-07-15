@@ -13,6 +13,9 @@ pub struct Pr {
     pub state: String, // OPEN | CLOSED | MERGED
     #[serde(rename = "baseRefName")]
     pub base: String,
+    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null
+    #[serde(rename = "reviewDecision", default)]
+    pub review_decision: Option<String>,
 }
 
 fn gh(args: &[&str]) -> Result<String> {
@@ -53,7 +56,7 @@ pub fn find(branch: &str) -> Result<Option<Pr>> {
         "--limit",
         "1",
         "--json",
-        "number,title,url,state,baseRefName",
+        "number,title,url,state,baseRefName,reviewDecision",
     ])?;
     let mut prs: Vec<Pr> = serde_json::from_str(&json).context("parsing gh pr list output")?;
     Ok(prs.pop())
@@ -73,6 +76,12 @@ pub fn create(head: &str, base: &str, title: &str, body: &str, draft: bool) -> R
         Some(pr) => Ok(pr.number),
         None => bail!("created a PR for `{head}` but could not read it back"),
     }
+}
+
+/// Close a PR without merging it.
+pub fn close(number: u64) -> Result<()> {
+    gh(&["pr", "close", &number.to_string()])?;
+    Ok(())
 }
 
 /// Update an existing PR's base, title and body.
