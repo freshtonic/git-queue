@@ -69,31 +69,42 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
         .success()
 }
 
-/// Returns true (and prints a skip note) when `git <sub>` is unavailable, so a
-/// test can early-return. `commit`/`sync` need `git replay`; `amend`/`reword`
-/// need `git history` — both require a very recent git and may be absent in CI.
-fn skip_missing(sub: &str) -> bool {
-    let out = StdCommand::new("git").arg(sub).arg("-h").output();
-    let available = match out {
-        Ok(o) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            );
-            text.to_lowercase().contains("usage")
-        }
-        Err(_) => false,
-    };
-    if !available {
-        eprintln!("SKIP: `git {sub}` is unavailable (needs a newer git)");
-    }
-    !available
+/// The installed git's (major, minor) version.
+fn git_version() -> (u32, u32) {
+    let out = StdCommand::new("git")
+        .arg("--version")
+        .output()
+        .expect("git --version");
+    let s = String::from_utf8_lossy(&out.stdout);
+    let ver = s
+        .split_whitespace()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or("0.0");
+    let mut parts = ver.split('.').filter_map(|p| p.parse().ok());
+    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
 }
+
+/// Returns true (and prints a skip note) when the installed git is older than
+/// `min`, so a test can early-return. `commit`/`sync` need `git replay` (2.44);
+/// `amend`/`reword` need `git history` (2.55). CI may run an older git.
+fn skip_below(min: (u32, u32), feature: &str) -> bool {
+    let v = git_version();
+    let ok = v.0 > min.0 || (v.0 == min.0 && v.1 >= min.1);
+    if !ok {
+        eprintln!(
+            "SKIP: {feature} needs git >= {}.{} (have {}.{})",
+            min.0, min.1, v.0, v.1
+        );
+    }
+    !ok
+}
+
+const REPLAY: (u32, u32) = (2, 44); // `git replay`
+const HISTORY: (u32, u32) = (2, 55); // `git history`
 
 #[test]
 fn commit_on_mid_branch_restacks_descendants() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
@@ -122,7 +133,7 @@ fn commit_on_mid_branch_restacks_descendants() {
 
 #[test]
 fn commit_restacks_a_fork_in_one_go() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
@@ -152,7 +163,7 @@ fn commit_restacks_a_fork_in_one_go() {
 
 #[test]
 fn amend_folds_staged_changes_and_updates_descendants() {
-    if skip_missing("history") {
+    if skip_below(HISTORY, "git history") {
         return;
     }
     let tmp = new_repo();
@@ -179,7 +190,7 @@ fn amend_folds_staged_changes_and_updates_descendants() {
 
 #[test]
 fn conflicting_restack_persists_markers_and_flags_branch() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
@@ -217,7 +228,7 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
 
 #[test]
 fn amend_on_conflict_errors_and_preserves_staged_work() {
-    if skip_missing("history") {
+    if skip_below(HISTORY, "git history") {
         return;
     }
     let tmp = new_repo();
@@ -252,7 +263,7 @@ fn amend_on_conflict_errors_and_preserves_staged_work() {
 
 #[test]
 fn resolving_markers_clears_the_status_warning() {
-    if skip_missing("replay") || skip_missing("history") {
+    if skip_below(REPLAY, "git replay") || skip_below(HISTORY, "git history") {
         return;
     }
     let tmp = new_repo();
@@ -296,7 +307,7 @@ fn resolving_markers_clears_the_status_warning() {
 
 #[test]
 fn hooks_autorestack_on_plain_commit() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
@@ -352,7 +363,7 @@ fn ls_remote(dir: &Path, refname: &str) -> String {
 
 #[test]
 fn sync_pulls_teammate_commits_and_pushes_with_lease() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let (tmp, _remote) = new_repo_with_remote();
@@ -384,7 +395,7 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
 
 #[test]
 fn sync_no_push_leaves_remote_untouched() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let (tmp, _remote) = new_repo_with_remote();
@@ -425,8 +436,8 @@ fn split_divides_a_branch_into_a_stack() {
     commit(dir, "c3.txt");
 
     // Editor assigns commit 1 -> api, 2 -> service, 3 -> ui.
-    let editor =
-        "sed -i '' -e '1s/^feature /api /' -e '2s/^feature /service /' -e '3s/^feature /ui /'";
+    // perl -i is portable across macOS/Linux; BSD `sed -i ''` differs from GNU.
+    let editor = "perl -i -pe 's/^feature /api / if $. == 1; s/^feature /service / if $. == 2; s/^feature /ui / if $. == 3'";
     stack(dir)
         .env("GIT_EDITOR", editor)
         .arg("split")
@@ -559,7 +570,7 @@ fn prev_and_next_navigate_the_stack() {
 
 #[test]
 fn sync_restacks_onto_advanced_trunk() {
-    if skip_missing("replay") {
+    if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
