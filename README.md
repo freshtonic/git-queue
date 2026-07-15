@@ -143,6 +143,13 @@ place (idempotent) without disturbing your description.
 
 See [DESIGN.md](DESIGN.md) for the full design.
 
+## Claude skill
+
+[`skills/using-git-stack/SKILL.md`](skills/using-git-stack/SKILL.md) is a Claude
+Code skill (CipherPowers format) that teaches Claude to drive `git stack`
+confidently — the mental model, which command to reach for, conflict handling,
+and worked examples. Copy it into your plugin's `skills/` directory to enable it.
+
 ## Development
 
 ```sh
