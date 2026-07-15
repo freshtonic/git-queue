@@ -1,0 +1,22 @@
+[package]
+name = "git-stack"
+version = "0.1.0"
+edition = "2021"
+description = "Manage stacks of dependent branches and their numbered pull requests"
+license = "MIT"
+
+# The binary is named `git-stack` so that `git stack ...` dispatches to it
+# when it is on PATH (git's standard subcommand mechanism).
+[[bin]]
+name = "git-stack"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
