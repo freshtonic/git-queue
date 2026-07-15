@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # git-stack's commit/sync use `git replay` and amend/reword use
+      # `git history` — both need a recent git. Pull the newest from the PPA.
+      # Tests self-skip any feature the installed git still lacks.
+      - name: Install latest git
+        run: |
+          sudo add-apt-repository -y ppa:git-core/ppa
+          sudo apt-get update
+          sudo apt-get install -y git
+          git --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --verbose
+
+      # Note: `submit`/`yank` need an authenticated `gh` and a GitHub repo, so
+      # they aren't covered here. The rest run against throwaway local repos.
+      - name: Test
+        run: cargo test --verbose

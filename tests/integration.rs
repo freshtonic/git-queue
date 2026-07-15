@@ -69,8 +69,33 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
         .success()
 }
 
+/// Returns true (and prints a skip note) when `git <sub>` is unavailable, so a
+/// test can early-return. `commit`/`sync` need `git replay`; `amend`/`reword`
+/// need `git history` — both require a very recent git and may be absent in CI.
+fn skip_missing(sub: &str) -> bool {
+    let out = StdCommand::new("git").arg(sub).arg("-h").output();
+    let available = match out {
+        Ok(o) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            text.to_lowercase().contains("usage")
+        }
+        Err(_) => false,
+    };
+    if !available {
+        eprintln!("SKIP: `git {sub}` is unavailable (needs a newer git)");
+    }
+    !available
+}
+
 #[test]
 fn commit_on_mid_branch_restacks_descendants() {
+    if skip_missing("replay") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -97,6 +122,9 @@ fn commit_on_mid_branch_restacks_descendants() {
 
 #[test]
 fn commit_restacks_a_fork_in_one_go() {
+    if skip_missing("replay") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -124,6 +152,9 @@ fn commit_restacks_a_fork_in_one_go() {
 
 #[test]
 fn amend_folds_staged_changes_and_updates_descendants() {
+    if skip_missing("history") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -148,6 +179,9 @@ fn amend_folds_staged_changes_and_updates_descendants() {
 
 #[test]
 fn conflicting_restack_persists_markers_and_flags_branch() {
+    if skip_missing("replay") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -183,6 +217,9 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
 
 #[test]
 fn amend_on_conflict_errors_and_preserves_staged_work() {
+    if skip_missing("history") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -215,6 +252,9 @@ fn amend_on_conflict_errors_and_preserves_staged_work() {
 
 #[test]
 fn resolving_markers_clears_the_status_warning() {
+    if skip_missing("replay") || skip_missing("history") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -256,6 +296,9 @@ fn resolving_markers_clears_the_status_warning() {
 
 #[test]
 fn hooks_autorestack_on_plain_commit() {
+    if skip_missing("replay") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -309,6 +352,9 @@ fn ls_remote(dir: &Path, refname: &str) -> String {
 
 #[test]
 fn sync_pulls_teammate_commits_and_pushes_with_lease() {
+    if skip_missing("replay") {
+        return;
+    }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -338,6 +384,9 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
 
 #[test]
 fn sync_no_push_leaves_remote_untouched() {
+    if skip_missing("replay") {
+        return;
+    }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
@@ -510,6 +559,9 @@ fn prev_and_next_navigate_the_stack() {
 
 #[test]
 fn sync_restacks_onto_advanced_trunk() {
+    if skip_missing("replay") {
+        return;
+    }
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();

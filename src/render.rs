@@ -26,7 +26,7 @@ pub struct PrRef {
 fn approval_emoji(review: &Option<String>) -> &'static str {
     match review.as_deref() {
         Some("APPROVED") => "✅",
-        Some("CHANGES_REQUESTED") => "🔴",
+        Some("CHANGES_REQUESTED") => "♻️",
         _ => "⏳", // REVIEW_REQUIRED / not yet reviewed
     }
 }
@@ -110,7 +110,7 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
     }
     lines.push(String::new());
     lines.push(
-        "<sub>✅ approved · 🔴 changes requested · ⏳ review pending &nbsp;|&nbsp; \
+        "<sub>✅ approved · ♻️ changes requested · ⏳ review pending &nbsp;|&nbsp; \
          🟣 merged · 🟢 open · ⚫ closed &nbsp;—&nbsp; status as of the last \
          `git stack submit`.</sub>"
             .to_string(),
@@ -253,7 +253,7 @@ mod tests {
         );
         // Current PR: emojis, then bolded label targeting the branch below.
         assert!(
-            nav.contains("2. 🔴🟢 **[#11 `service`](https://x/pull/11) → `api`**"),
+            nav.contains("2. ♻️🟢 **[#11 `service`](https://x/pull/11) → `api`**"),
             "{nav}"
         );
         // Not-yet-reviewed open PR.

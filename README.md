@@ -20,14 +20,17 @@ shared stack map.
 ## Install
 
 ```sh
-./install.sh          # cargo install + man page
+git clone git@github.com:freshtonic/git-stack.git
+cd git-stack
+./install.sh          # cargo install (the binary) + install the man page
 git stack --version
 ```
 
 `install.sh` runs `cargo install --path .` and then writes the man page to a
 directory on your `MANPATH` (`cargo install` only ever installs *binaries*, so
 the man page is placed separately). Afterwards both `man git-stack` and
-`git stack --help` work — git routes `git stack --help` to `man git-stack`.
+`git stack --help` work — git routes `git stack --help` to `man git-stack`
+(use `git stack help` for the inline CLI help).
 
 Binary only, no man page:
 
@@ -36,8 +39,27 @@ cargo install --path .
 ```
 
 Because the binary is named `git-stack`, git dispatches `git stack …` to it
-automatically (git's standard subcommand mechanism). It relies on `git` and, for
-PRs, the authenticated [`gh`](https://cli.github.com) CLI.
+automatically (git's standard subcommand mechanism).
+
+### Optional: auto-restack hooks
+
+To have a plain `git commit`/`git commit --amend` on a stack branch
+automatically restack its descendants, install the git hooks (per repository):
+
+```sh
+git stack hooks install     # writes post-commit / post-rewrite hooks
+git stack hooks uninstall   # remove them
+```
+
+Without the hooks, use `git stack commit` / `git stack amend` explicitly.
+
+### Requirements
+
+- **git** — `git stack commit`/`sync` use `git replay` (git ≥ 2.44) and
+  `git stack amend`/`reword` use `git history` (git ≥ 2.55). Other commands work
+  on older git; the ones needing a feature will tell you if it's missing.
+- **[`gh`](https://cli.github.com)** — the authenticated GitHub CLI, for
+  `submit`/`yank` (PR management). Not needed for local stack operations.
 
 > The man page is generated from the CLI definition itself (`clap_mangen`), so it
 > never drifts. Regenerate manually with `git-stack man --dir <man1-dir>`.
