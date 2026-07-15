@@ -106,10 +106,11 @@ git stack submit               # refresh the PRs
 
 ### Landing a stack
 
-PRs merge **bottom-first**. After the bottom PR lands, run `git stack sync` — it
-detects the merged PR, reparents the branches above onto trunk, and rebases
+PRs merge in **FIFO order** — the oldest PR (`#1`, at the base of the stack)
+merges first, then the next, and so on. After a PR lands, run `git stack sync` —
+it detects the merged PR, reparents the branches above onto trunk, and rebases
 them; then `git stack submit` retargets their PR bases and refreshes the stack
-list. Each PR body shows live approval/merge-state emojis (✅/🔴/⏳ while open,
+list. Each PR body shows live approval/merge-state emojis (✅/♻️/⏳ while open,
 🟣/⚫ once merged/closed) as of the last submit.
 
 ### Editing a branch in the middle of a stack
@@ -160,11 +161,11 @@ top, followed by that branch's `describe` text under a divider:
 ```markdown
 ### 📚 Stacked PR · 2 of 3
 
-Merge in order, bottom to top:
+Part of a stack. The PRs merge in FIFO order — the numbered order below, #1 first.
 
-1. [#10 `api`](…/pull/10) → `main`
-2. **[#11 `service`](…/pull/11) → `api`**  👈 **this PR**
-3. [#12 `ui`](…/pull/12) → `service`
+1. 🟣 [#10 `api`](…/pull/10) → `main`
+2. ♻️🟢 **[#11 `service`](…/pull/11) → `api`**  👈 **this PR**
+3. ⏳🟢 [#12 `ui`](…/pull/12) → `service`
 
 ---
 

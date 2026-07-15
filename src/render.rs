@@ -71,9 +71,10 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
             total
         ),
         String::new(),
-        "Part of a stack (listed bottom → top). PRs merge bottom-first; merging one \
-         supersedes the PRs above it until the author runs `git stack sync` (rebases the \
-         rest onto the merged base) and `git stack submit` (retargets their PRs)."
+        "Part of a stack. The PRs merge in FIFO order — the numbered order below, #1 \
+         first. Merging one supersedes the PRs after it until the author runs \
+         `git stack sync` (rebases the rest onto the merged base) and `git stack submit` \
+         (retargets their PRs)."
             .to_string(),
         String::new(),
     ];
@@ -260,9 +261,10 @@ mod tests {
         assert!(nav.contains("3. ⏳🟢 [#12 `ui`]"), "{nav}");
         assert!(nav.contains("👈 **this PR**"));
         assert!(nav.contains("2 of 3"));
+        assert!(nav.contains("FIFO"), "merge order described as FIFO");
         assert!(
-            !nav.contains("Merge in order"),
-            "old misleading caption removed"
+            !nav.contains("bottom-first"),
+            "confusing bottom-first wording removed"
         );
     }
 }
