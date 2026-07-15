@@ -78,8 +78,17 @@ git stack submit               # refresh the PRs
 | `git stack reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
 | `git stack restack` | Restack the current branch's descendants onto its tip. |
 | `git stack hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
-| `git stack sync [--no-push]` | Pull remote commits into stack branches, restack onto the latest trunk, and push back with `--force-with-lease`. |
-| `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs. |
+| `git stack sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), restack onto the latest trunk, and push back with `--force-with-lease`. |
+| `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs (skips merged/closed PRs). |
+| `git stack yank` | Close every open (non-merged) PR in the current stack. |
+
+### Landing a stack
+
+PRs merge **bottom-first**. After the bottom PR lands, run `git stack sync` — it
+detects the merged PR, reparents the branches above onto trunk, and rebases
+them; then `git stack submit` retargets their PR bases and refreshes the stack
+list. Each PR body shows live approval/merge-state emojis (✅/🔴/⏳ while open,
+🟣/⚫ once merged/closed) as of the last submit.
 
 ### Editing a branch in the middle of a stack
 

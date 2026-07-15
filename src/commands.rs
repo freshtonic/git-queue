@@ -371,7 +371,7 @@ pub fn sync(no_push: bool) -> Result<()> {
         bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git stack sync`");
     }
     std::env::set_var(git::GUARD_ENV, "1"); // suppress our hooks during internal git ops
-    let stack = Stack::load()?;
+    let mut stack = Stack::load()?;
     let remote = meta::remote();
     let original = git::current_branch()?;
 
@@ -388,6 +388,13 @@ pub fn sync(no_push: bool) -> Result<()> {
         } else {
             let _ = git::force_ref(&stack.trunk, &tip);
         }
+    }
+
+    // Prune branches whose PRs have merged: reparent their children onto the
+    // nearest surviving ancestor (trunk, once the bottom lands) and drop them
+    // from the stack. The restack below then rebases the survivors onto trunk.
+    if gh::ready() {
+        stack = prune_merged(stack)?;
     }
 
     // Pull in commits teammates pushed to our stack branches (bottom-up).
@@ -423,6 +430,46 @@ pub fn sync(no_push: bool) -> Result<()> {
         println!("Stack is in sync with `{}`.", stack.trunk);
     }
     Ok(())
+}
+
+/// Reparent the children of any MERGED-PR branch onto their nearest surviving
+/// ancestor, untrack the merged branches, and return the reloaded stack.
+fn prune_merged(stack: Stack) -> Result<Stack> {
+    use std::collections::HashSet;
+    let mut merged: HashSet<String> = HashSet::new();
+    for b in stack.topo_order() {
+        // Best-effort: ignore lookup failures (e.g. not a GitHub repo).
+        if let Some(pr) = gh::find(&b).ok().flatten() {
+            if pr.state == "MERGED" {
+                merged.insert(b);
+            }
+        }
+    }
+    if merged.is_empty() {
+        return Ok(stack);
+    }
+    // Reparent survivors whose parent has merged (walk up past merged ancestors).
+    for b in stack.topo_order() {
+        if merged.contains(&b) {
+            continue;
+        }
+        let current_parent = stack.parent_of(&b).unwrap().to_string();
+        let mut new_parent = current_parent.clone();
+        while merged.contains(&new_parent) {
+            new_parent = stack
+                .parent_of(&new_parent)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| stack.trunk.clone());
+        }
+        if new_parent != current_parent {
+            meta::set_parent(&b, &new_parent)?;
+        }
+    }
+    for b in &merged {
+        meta::untrack(b);
+        println!("`{b}` has merged — dropped from the stack, children reparented.");
+    }
+    Stack::load()
 }
 
 enum RemoteAction {

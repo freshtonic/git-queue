@@ -72,8 +72,8 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
         ),
         String::new(),
         "Part of a stack (listed bottom → top). PRs merge bottom-first; merging one \
-         supersedes the PRs above it until the author runs `git stack sync`, which \
-         retargets their bases and rebases them."
+         supersedes the PRs above it until the author runs `git stack sync` (rebases the \
+         rest onto the merged base) and `git stack submit` (retargets their PRs)."
             .to_string(),
         String::new(),
     ];
