@@ -182,6 +182,38 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
 }
 
 #[test]
+fn amend_on_conflict_errors_and_preserves_staged_work() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "db"]).assert().success();
+    stage(dir, "shared.txt", "db-original\n");
+    git(dir, &["commit", "-q", "-m", "db: add shared"]);
+    stack(dir).args(["create", "ui"]).assert().success();
+    stage(dir, "shared.txt", "ui-edit\n");
+    git(dir, &["commit", "-q", "-m", "ui: edit shared"]);
+
+    // Stage a revision to db's commit that will conflict when propagated to ui.
+    git(dir, &["checkout", "-q", "db"]);
+    stage(dir, "shared.txt", "db-revised\n");
+
+    // amend must FAIL loudly — never claim success while folding nothing.
+    stack(dir).arg("amend").assert().failure();
+
+    // db's commit is unchanged and the staged work is preserved.
+    assert_eq!(git_out(dir, &["show", "db:shared.txt"]), "db-original");
+    assert!(
+        !git_out(dir, &["diff", "--cached", "--name-only"]).is_empty(),
+        "staged changes should be preserved after a failed amend"
+    );
+    // ui is not stranded.
+    assert!(
+        is_ancestor(dir, "db", "ui"),
+        "ui must still descend from db"
+    );
+}
+
+#[test]
 fn resolving_markers_clears_the_status_warning() {
     let tmp = new_repo();
     let dir = tmp.path();

@@ -596,10 +596,19 @@ pub fn amend() -> Result<()> {
     if !git::staged_changes() {
         bail!("nothing staged — `git add` the changes you want to fold into `{current}` first");
     }
-    if git::history_fixup("HEAD")? {
+    // `git history fixup` may report a conflict (non-zero), but it can also exit
+    // 0 while doing nothing when the fold would conflict with a descendant.
+    // Detect BOTH: verify the commit actually changed before claiming success —
+    // otherwise we'd falsely tell the user their work was folded.
+    let before = git::rev_parse(&current)?;
+    let reported_conflict = git::history_fixup("HEAD")?;
+    let after = git::rev_parse(&current)?;
+    if reported_conflict || before == after {
         bail!(
-            "amend aborted: folding these changes into `{current}` would conflict with a descendant.\n\
-             Nothing was changed. Either resolve on the descendant first, or use `git stack commit` to add a separate commit."
+            "amend could not fold your changes into `{current}`: doing so would conflict with a \
+             descendant branch, so nothing was changed (your staged changes are intact).\n\
+             Resolve the conflict on the descendant first, or use `git stack commit` to add a \
+             separate commit instead."
         );
     }
     refresh_descendant_anchors(&current)?;
