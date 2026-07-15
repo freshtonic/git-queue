@@ -39,46 +39,65 @@ fn strip_prefix(subject: &str) -> &str {
     s
 }
 
-/// Build the shared navigation block listing every PR in the line, marking the
-/// one for `current`. Top of stack listed first (matches how reviewers read).
+/// Build the shared stack-navigation block: a formatted, linked list of every
+/// PR in the line in merge order (bottom first), with the current PR bolded and
+/// marked. Each entry links to the PR's URL when known.
 pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
-    let mut lines = vec!["### 📚 Stack".to_string(), String::new()];
     let total = line.len();
-    for (i, e) in line.iter().enumerate().rev() {
-        let number = total - i; // 1-based from the bottom
-        let marker = if e.branch == current {
-            " 👈 **this PR**"
+    let mut lines = vec![
+        format!(
+            "### 📚 Stacked PR &nbsp;·&nbsp; {} of {}",
+            position_of(line, current),
+            total
+        ),
+        String::new(),
+        "Merge in order, bottom to top:".to_string(),
+        String::new(),
+    ];
+    // Bottom-first: index 0 merges first.
+    for (i, e) in line.iter().enumerate() {
+        let is_current = e.branch == current;
+        let base = if i == 0 {
+            trunk
         } else {
-            ""
+            line[i - 1].branch.as_str()
         };
-        let target = if i == 0 {
-            trunk.to_string()
+        // Link text: `#<n> branch` linked to the PR URL if we have one.
+        let label = match &e.pr {
+            Some(p) if !p.url.is_empty() => format!("[#{} `{}`]({})", p.number, e.branch, p.url),
+            Some(p) => format!("#{} `{}`", p.number, e.branch),
+            None => format!("`{}` _(not submitted)_", e.branch),
+        };
+        let arrow = format!(" → `{base}`");
+        let line_str = if is_current {
+            format!("{}. **{label}{arrow}** &nbsp;👈 **this PR**", i + 1)
         } else {
-            line[i - 1].branch.clone()
+            format!("{}. {label}{arrow}", i + 1)
         };
-        let pr_txt = match &e.pr {
-            Some(p) => format!("#{}", p.number),
-            None => "(not submitted)".to_string(),
-        };
-        lines.push(format!(
-            "{}. {} `{}` → `{}`{}",
-            number, pr_txt, e.branch, target, marker
-        ));
+        lines.push(line_str);
     }
     lines.push(String::new());
-    lines.push("<sub>Managed by git-stack.</sub>".to_string());
+    lines.push("<sub>🥞 Managed by git-stack — do not edit this list by hand.</sub>".to_string());
     lines.join("\n")
 }
 
-/// Combine a user-authored body with the nav block, replacing any previous
-/// block bounded by the BEGIN/END markers.
-pub fn compose_body(user_body: &str, nav: &str) -> String {
-    let cleaned = strip_block(user_body);
-    let cleaned = cleaned.trim_end();
-    if cleaned.is_empty() {
+/// 1-based position of `current` within the (bottom-first) line.
+fn position_of(line: &[Entry], current: &str) -> usize {
+    line.iter()
+        .position(|e| e.branch == current)
+        .map_or(0, |i| i + 1)
+}
+
+/// Compose a PR body: the stack nav block PREPENDED, then the branch's
+/// description below it. Any previous nav block (BEGIN..END) is stripped first,
+/// so re-submitting is idempotent.
+pub fn compose_body(description: &str, nav: &str) -> String {
+    let desc = strip_block(description);
+    let desc = desc.trim();
+    if desc.is_empty() {
         format!("{BEGIN}\n{nav}\n{END}")
     } else {
-        format!("{cleaned}\n\n{BEGIN}\n{nav}\n{END}")
+        format!("{BEGIN}\n{nav}\n{END}\n\n---\n\n{desc}")
     }
 }
 
@@ -144,19 +163,52 @@ mod tests {
     }
 
     #[test]
-    fn compose_replaces_existing_block() {
-        let body = format!("Hello\n\n{BEGIN}\nold\n{END}\n");
+    fn compose_prepends_block_and_stays_idempotent() {
+        // A prior render (block already at the top) plus the description below.
+        let body = format!("{BEGIN}\nold\n{END}\n\n---\n\nHello");
         let composed = compose_body(&body, "new-nav");
+        assert!(composed.starts_with(BEGIN), "nav block must be prepended");
         assert!(composed.contains("new-nav"));
-        assert!(!composed.contains("old"));
-        assert!(composed.starts_with("Hello"));
-        // Only one block after recomposition.
+        assert!(!composed.contains("old"), "old nav must be stripped");
+        assert!(composed.contains("Hello"), "description preserved");
+        // Exactly one block after recomposition (idempotent).
         assert_eq!(composed.matches(BEGIN).count(), 1);
     }
 
     #[test]
-    fn compose_into_empty_body() {
+    fn compose_into_empty_description() {
         let composed = compose_body("", "nav");
         assert_eq!(composed, format!("{BEGIN}\nnav\n{END}"));
+    }
+
+    fn entry(branch: &str, number: u64, url: &str) -> Entry {
+        Entry {
+            branch: branch.to_string(),
+            pr: Some(PrRef {
+                number,
+                url: url.to_string(),
+                state: "OPEN".to_string(),
+            }),
+            conflicted: false,
+        }
+    }
+
+    #[test]
+    fn nav_block_links_and_marks_current() {
+        let line = vec![
+            entry("api", 10, "https://x/pull/10"),
+            entry("service", 11, "https://x/pull/11"),
+            entry("ui", 12, "https://x/pull/12"),
+        ];
+        let nav = nav_block(&line, "service", "main");
+        // Bottom-first merge order, linked to PR URLs.
+        assert!(nav.contains("1. [#10 `api`](https://x/pull/10) → `main`"));
+        // Current PR is bolded and marked, and targets the branch below it.
+        assert!(
+            nav.contains("**[#11 `service`](https://x/pull/11) → `api`**"),
+            "{nav}"
+        );
+        assert!(nav.contains("👈 **this PR**"));
+        assert!(nav.contains("2 of 3"));
     }
 }

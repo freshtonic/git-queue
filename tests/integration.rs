@@ -287,6 +287,33 @@ fn sync_no_push_leaves_remote_untouched() {
 }
 
 #[test]
+fn describe_stores_and_clears_description() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+    stack(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+
+    stack(dir)
+        .args(["describe", "-m", "Adds the API layer"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(dir, &["config", "--local", "branch.a.stackDescription"]),
+        "Adds the API layer"
+    );
+
+    // Empty description clears it.
+    stack(dir).args(["describe", "-m", ""]).assert().success();
+    let cleared = StdCommand::new("git")
+        .args(["config", "--local", "--get", "branch.a.stackDescription"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!cleared.status.success(), "description should be unset");
+}
+
+#[test]
 fn init_detects_and_records_trunk() {
     let tmp = new_repo();
     let dir = tmp.path();

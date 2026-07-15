@@ -42,6 +42,12 @@ enum Command {
     /// Show the current stack and its PR status.
     #[command(visible_aliases = ["ls", "list"])]
     Status,
+    /// Describe what the current branch/PR is about (becomes the PR body).
+    Describe {
+        /// Description text (opens $EDITOR if omitted).
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
     /// Adopt the current branch into a stack.
     Track {
         /// Parent branch (defaults to trunk).
@@ -135,6 +141,7 @@ fn main() {
         Command::Init { trunk } => commands::init(trunk),
         Command::Create { name } => commands::create(&name),
         Command::Status => commands::status(),
+        Command::Describe { message } => commands::describe(message),
         Command::Track { parent } => commands::track(parent),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),

@@ -69,6 +69,7 @@ git stack submit               # refresh the PRs
 | `git stack create <name>` | Create `<name>` on top of the current branch and track it. |
 | `git stack track [--parent <b>]` | Adopt the current branch into a stack (parent defaults to trunk). |
 | `git stack untrack` | Forget the current branch's stack metadata. |
+| `git stack describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
 | `git stack status` (`ls`, `list`) | Show the stack tree with PR numbers/states. |
 | `git stack up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
 | `git stack commit [-m <msg>]` | Make a **new** commit on the current branch, then restack all descendants onto the new tip. |
@@ -113,13 +114,31 @@ State lives in the repository's own git config (nothing outside git):
 | `branch.<n>.stackParent` | Parent branch of `<n>`. |
 | `branch.<n>.stackParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
 | `branch.<n>.stackPr` | Cached PR number. |
+| `branch.<n>.stackDescription` | PR body text set by `git stack describe`. |
+| `branch.<n>.stackConflicted` | Set when a restack persisted conflict markers. |
 
 Branches form a forest under trunk via parent pointers; a *stack line* is the
-linear chain from trunk to a leaf. `sync` restacks bottom-up with
-`git rebase --onto <new-parent-tip> <old-anchor> <branch>`, so only each
-branch's own commits are replayed. `submit` pushes bottom-first (so each PR's
+linear chain from trunk to a leaf. `submit` pushes bottom-first (so each PR's
 base exists), points each PR at the branch below it, and writes the `[k/n]`
-titles and shared navigation block.
+titles. Every PR body gets a formatted, linked **stack list prepended** to the
+top, followed by that branch's `describe` text under a divider:
+
+```markdown
+### 📚 Stacked PR · 2 of 3
+
+Merge in order, bottom to top:
+
+1. [#10 `api`](…/pull/10) → `main`
+2. **[#11 `service`](…/pull/11) → `api`**  👈 **this PR**
+3. [#12 `ui`](…/pull/12) → `service`
+
+---
+
+<your `git stack describe` text>
+```
+
+The list is bounded by hidden markers, so re-running `submit` re-renders it in
+place (idempotent) without disturbing your description.
 
 See [DESIGN.md](DESIGN.md) for the full design.
 

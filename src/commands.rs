@@ -3,7 +3,7 @@
 use crate::render::{self, Entry, PrRef};
 use crate::stack::Stack;
 use crate::{gh, git, meta, restack};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 /// `git stack init [--trunk <branch>]`
 pub fn init(trunk: Option<String>) -> Result<()> {
@@ -79,6 +79,63 @@ pub fn untrack() -> Result<()> {
     meta::untrack(&branch);
     println!("Stopped tracking `{branch}`.");
     Ok(())
+}
+
+/// `git stack describe [-m <text>]` — set the description of what the current
+/// branch/PR is about. It becomes the body of the PR (below the stack list) on
+/// the next `submit`. Opens `$EDITOR` when `-m` is omitted.
+pub fn describe(message: Option<String>) -> Result<()> {
+    git::ensure_repo()?;
+    let stack = Stack::load()?;
+    let branch = git::current_branch()?;
+    if !stack.is_tracked(&branch) {
+        bail!("`{branch}` is not a stack branch; `git stack create`/`track` it first");
+    }
+    let text = match message {
+        Some(m) => m,
+        None => edit_description(&branch, meta::description(&branch).as_deref())?,
+    };
+    meta::set_description(&branch, &text)?;
+    if text.trim().is_empty() {
+        println!("Cleared the description for `{branch}`.");
+    } else {
+        println!(
+            "Saved the description for `{branch}`. It will appear in the PR on `git stack submit`."
+        );
+    }
+    Ok(())
+}
+
+/// Open the user's git editor on a temp file seeded with `existing`, and return
+/// the edited text (lines starting with `#` are stripped as comments).
+fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
+    let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
+    let path = dir.join("STACK_DESCRIBE");
+    let template = format!(
+        "{}\n\n# Describe what `{branch}` is about. This becomes the PR body\n\
+         # (below the auto-generated stack list). Lines starting with '#' are ignored.\n",
+        existing.unwrap_or("")
+    );
+    std::fs::write(&path, template)?;
+
+    let editor = git::out(&["var", "GIT_EDITOR"])?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("{editor} \"$1\""))
+        .arg("sh") // $0
+        .arg(&path) // $1
+        .status()
+        .context("failed to launch editor")?;
+    if !status.success() {
+        bail!("editor exited with an error; description unchanged");
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let _ = std::fs::remove_file(&path);
+    let cleaned: Vec<&str> = raw
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect();
+    Ok(cleaned.join("\n").trim().to_string())
 }
 
 /// `git stack status`
@@ -334,7 +391,8 @@ pub fn submit(draft: bool) -> Result<()> {
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
         let nav = render::nav_block(&entries, b, &stack.trunk);
-        let body = render::compose_body("", &nav);
+        let description = meta::description(b).unwrap_or_default();
+        let body = render::compose_body(&description, &nav);
         gh::edit(number, &base, &title, &body)?;
     }
 

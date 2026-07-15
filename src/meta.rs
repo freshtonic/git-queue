@@ -81,6 +81,24 @@ pub fn set_pr(branch: &str, number: u64) -> Result<()> {
     config_set(&pr_key(branch), &number.to_string())
 }
 
+fn description_key(branch: &str) -> String {
+    format!("branch.{branch}.stackDescription")
+}
+
+/// The user-authored description of what this branch/PR is about.
+pub fn description(branch: &str) -> Option<String> {
+    config_get(&description_key(branch))
+}
+
+pub fn set_description(branch: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        config_unset(&description_key(branch));
+        Ok(())
+    } else {
+        config_set(&description_key(branch), text)
+    }
+}
+
 fn conflicted_key(branch: &str) -> String {
     format!("branch.{branch}.stackConflicted")
 }
@@ -104,6 +122,7 @@ pub fn untrack(branch: &str) {
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
     config_unset(&conflicted_key(branch));
+    config_unset(&description_key(branch));
 }
 
 /// All branches that have a `stackParent` recorded.
