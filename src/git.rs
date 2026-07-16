@@ -9,9 +9,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Env var set on child git processes while git-stack is restacking, so our
+/// Env var set on child git processes while git-queue is restacking, so our
 /// own hooks can detect the reentry and skip (avoiding infinite recursion).
-pub const GUARD_ENV: &str = "GIT_STACK_IN_RESTACK";
+pub const GUARD_ENV: &str = "GIT_QUEUE_IN_RESTACK";
 
 /// Run `git <args>` and capture trimmed stdout. Errors if git exits non-zero.
 pub fn out(args: &[&str]) -> Result<String> {
@@ -194,7 +194,7 @@ pub fn has_conflict_markers(rev: &str) -> bool {
 
 /// Make a normal commit on the current branch.
 pub fn commit(message: Option<&str>) -> Result<()> {
-    // Suppress our own hooks during the internal commit; git-stack does the
+    // Suppress our own hooks during the internal commit; git-queue does the
     // restack itself right after.
     let mut cmd = Command::new("git");
     cmd.env(GUARD_ENV, "1");

@@ -1,15 +1,13 @@
 [package]
-name = "git-stack"
+name = "git-queue"
 version = "0.1.0"
 edition = "2021"
 description = "Manage stacks of dependent branches and their numbered pull requests"
 license = "MIT"
 
-# The binary is named `git-stack` so that `git stack ...` dispatches to it
-# when it is on PATH (git's standard subcommand mechanism).
-[[bin]]
-name = "git-stack"
-path = "src/main.rs"
+# Two binaries are built from thin wrappers in src/bin/ around the library's
+# `run()`: `git-queue` (so `git queue ...` dispatches to it — git's standard
+# subcommand mechanism) and the alias `git-q` (so `git q ...` works too).
 
 [dependencies]
 anyhow = "1"

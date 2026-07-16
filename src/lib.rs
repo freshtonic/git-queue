@@ -1,4 +1,4 @@
-//! `git stack` — manage stacks of dependent branches and their numbered PRs.
+//! `git queue` — manage stacks of dependent branches and their numbered PRs.
 
 mod commands;
 mod gh;
@@ -13,13 +13,15 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "git-stack",
-    bin_name = "git stack",
+    name = "git-queue",
+    bin_name = "git queue",
     version,
     about = "Manage stacks of dependent branches and their numbered pull requests",
     long_about = "A stack is an ordered series of branches where branch N is built on top of \
-                  branch N-1. git-stack tracks that order, keeps the stack rebased on trunk, \
-                  and opens numbered, cross-linked pull requests — one per branch."
+                  branch N-1, giving the PRs a well-defined FIFO merge order — a queue. \
+                  git-queue tracks that order, keeps the stack rebased on trunk, and opens \
+                  numbered, cross-linked pull requests — one per branch. Installed as both \
+                  `git-queue` and `git-q`, so `git queue …` and `git q …` are equivalent."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -103,14 +105,14 @@ enum Command {
     },
     /// Close every open (non-merged) PR in the current stack.
     Yank,
-    /// Report whether merge-order enforcement is set up (read-only).
+    /// Report whether merge-order signalling is set up (read-only).
     Doctor,
-    /// Set up merge-order enforcement (label, workflow, branch protection).
+    /// Enable merge-order signalling: submit posts a red/green commit status per PR.
     Protect,
-    /// Generate the roff man page (used by install.sh; also enables `git stack --help`).
+    /// Generate the roff man page (used by install.sh; also enables `git queue --help`).
     #[command(hide = true)]
     Man {
-        /// Directory to write `git-stack.1` into. Prints to stdout if omitted.
+        /// Directory to write `git-queue.1` into. Prints to stdout if omitted.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
@@ -125,7 +127,7 @@ enum HooksAction {
 }
 
 /// Render the man page from the clap definition and either write
-/// `<dir>/git-stack.1` or print it to stdout.
+/// `<dir>/git-queue.1` or print it to stdout.
 fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
     use std::io::Write;
     let man = clap_mangen::Man::new(Cli::command());
@@ -134,7 +136,7 @@ fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
     match dir {
         Some(dir) => {
             std::fs::create_dir_all(&dir)?;
-            let path = dir.join("git-stack.1");
+            let path = dir.join("git-queue.1");
             std::fs::write(&path, &buffer)?;
             eprintln!("Wrote {}", path.display());
         }
@@ -143,7 +145,9 @@ fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() {
+/// Parse the CLI and run the selected subcommand. Exits the process on error.
+/// Called by both binaries (`git-queue` and its alias `git-q`).
+pub fn run() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Init { trunk } => commands::init(trunk),

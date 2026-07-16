@@ -1,10 +1,10 @@
-# git-stack
+# git-queue
 
 Manage **stacks** of dependent branches and their **numbered pull requests**.
 
 A *stack* is an ordered series of branches where branch *N* is built on top of
 branch *N-1*. The stack therefore has a well-defined merge order: the bottom
-branch merges into trunk first, then the next, and so on. `git-stack` tracks
+branch merges into trunk first, then the next, and so on. `git-queue` tracks
 that order, keeps the whole stack rebased on trunk, and opens one PR per branch
 — each targeting the branch below it, titled `[k/n]`, and cross-linked with a
 shared stack map.
@@ -20,17 +20,17 @@ shared stack map.
 ## Install
 
 ```sh
-git clone git@github.com:freshtonic/git-stack.git
-cd git-stack
+git clone git@github.com:freshtonic/git-queue.git
+cd git-queue
 ./install.sh          # cargo install (the binary) + install the man page
-git stack --version
+git queue --version
 ```
 
 `install.sh` runs `cargo install --path .` and then writes the man page to a
 directory on your `MANPATH` (`cargo install` only ever installs *binaries*, so
-the man page is placed separately). Afterwards both `man git-stack` and
-`git stack --help` work — git routes `git stack --help` to `man git-stack`
-(use `git stack help` for the inline CLI help).
+the man page is placed separately). Afterwards both `man git-queue` and
+`git queue --help` work — git routes `git queue --help` to `man git-queue`
+(use `git queue help` for the inline CLI help).
 
 Binary only, no man page:
 
@@ -38,8 +38,9 @@ Binary only, no man page:
 cargo install --path .
 ```
 
-Because the binary is named `git-stack`, git dispatches `git stack …` to it
-automatically (git's standard subcommand mechanism).
+Two binaries are installed — `git-queue` and its alias `git-q` — so git
+dispatches both `git queue …` and the shorter `git q …` to the same tool
+(git's standard subcommand mechanism).
 
 ### Optional: auto-restack hooks
 
@@ -47,88 +48,94 @@ To have a plain `git commit`/`git commit --amend` on a stack branch
 automatically restack its descendants, install the git hooks (per repository):
 
 ```sh
-git stack hooks install     # writes post-commit / post-rewrite hooks
-git stack hooks uninstall   # remove them
+git queue hooks install     # writes post-commit / post-rewrite hooks
+git queue hooks uninstall   # remove them
 ```
 
-Without the hooks, use `git stack commit` / `git stack amend` explicitly.
+Without the hooks, use `git queue commit` / `git queue amend` explicitly.
 
 ### Requirements
 
-- **git** — `git stack commit`/`sync` use `git replay` (git ≥ 2.44) and
-  `git stack amend`/`reword` use `git history` (git ≥ 2.55). Other commands work
+- **git** — `git queue commit`/`sync` use `git replay` (git ≥ 2.44) and
+  `git queue amend`/`reword` use `git history` (git ≥ 2.55). Other commands work
   on older git; the ones needing a feature will tell you if it's missing.
 - **[`gh`](https://cli.github.com)** — the authenticated GitHub CLI, for
   `submit`/`yank` (PR management). Not needed for local stack operations.
 
 > The man page is generated from the CLI definition itself (`clap_mangen`), so it
-> never drifts. Regenerate manually with `git-stack man --dir <man1-dir>`.
+> never drifts. Regenerate manually with `git-queue man --dir <man1-dir>`.
 
 ## Workflow
 
 ```sh
-git stack init                 # record the trunk (auto-detects main/master)
+git queue init                 # record the trunk (auto-detects main/master)
 
 git checkout main
-git stack create api           # new branch on trunk; make commits
-git stack create service       # new branch on top of `api`; make commits
-git stack create ui            # new branch on top of `service`; make commits
+git queue create api           # new branch on trunk; make commits
+git queue create service       # new branch on top of `api`; make commits
+git queue create ui            # new branch on top of `service`; make commits
 
-git stack status               # view the stack and PR states
-git stack down / up            # walk down/up the stack (aliases: prev/next)
+git queue status               # view the stack and PR states
+git queue down / up            # walk down/up the stack (aliases: prev/next)
 
-git stack submit               # push all branches + open/update numbered PRs
+git queue submit               # push all branches + open/update numbered PRs
 # ... trunk moves on, a teammate pushes to a branch, or you amend a lower one ...
-git stack sync                 # pull remote commits, restack onto trunk, push (with lease)
-git stack submit               # refresh the PRs
+git queue sync                 # pull remote commits, restack onto trunk, push (with lease)
+git queue submit               # refresh the PRs
 ```
 
 ## Commands
 
 | Command | Description |
 |---|---|
-| `git stack init [--trunk <b>]` | Record the trunk branch for this repo. |
-| `git stack create <name>` | Create `<name>` on top of the current branch and track it. |
-| `git stack split` | Split the current branch's commits into a stack (editor assigns commits to branches). |
-| `git stack track [--parent <b>]` | Adopt the current branch into a stack (parent defaults to trunk). |
-| `git stack untrack` | Forget the current branch's stack metadata. |
-| `git stack describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
-| `git stack status` (`ls`, `list`) | Show the stack tree with PR numbers/states. |
-| `git stack up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
-| `git stack commit [-m <msg>]` | Make a **new** commit on the current branch, then restack all descendants onto the new tip. |
-| `git stack amend` | Fold **staged** changes into the current commit and update every descendant. |
-| `git stack reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
-| `git stack restack` | Restack the current branch's descendants onto its tip. |
-| `git stack hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
-| `git stack sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), restack onto the latest trunk, and push back with `--force-with-lease`. |
-| `git stack submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
-| `git stack yank` | Close every open (non-merged) PR in the current stack. |
-| `git stack protect` | Enable draft-based merge-order enforcement for this repo. |
-| `git stack doctor` | Report whether merge-order enforcement is enabled (read-only). |
+| `git queue init [--trunk <b>]` | Record the trunk branch for this repo. |
+| `git queue create <name>` | Create `<name>` on top of the current branch and track it. |
+| `git queue split` | Split the current branch's commits into a stack (editor assigns commits to branches). |
+| `git queue track [--parent <b>]` | Adopt the current branch into a stack (parent defaults to trunk). |
+| `git queue untrack` | Forget the current branch's stack metadata. |
+| `git queue describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
+| `git queue status` (`ls`, `list`) | Show the stack tree with PR numbers/states. |
+| `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
+| `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then restack all descendants onto the new tip. |
+| `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |
+| `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
+| `git queue restack` | Restack the current branch's descendants onto its tip. |
+| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-restack descendants. |
+| `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), restack onto the latest trunk, and push back with `--force-with-lease`. |
+| `git queue submit [--draft]` (`push`) | Push the current stack line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
+| `git queue yank` | Close every open (non-merged) PR in the current stack. |
+| `git queue protect` | Enable merge-order signalling (a red/green commit status per PR) for this repo. |
+| `git queue doctor` | Report whether merge-order signalling is enabled (read-only). |
 
-### Enforcing merge order
+### Signalling merge order
 
-Run `git stack protect` once to stop PRs being merged out of order. It sets a
-local flag (`stack.gate = draft`) — no GitHub setup, workflow, ruleset, or admin
-rights required. With it on, `git stack submit` keeps the **bottom** (mergeable)
-PR *ready* and marks every PR above it as a **draft**; GitHub disables the merge
-button on drafts, so only the bottom PR can merge. As PRs land, `git stack sync`
-+ `git stack submit` readies the new bottom PR.
+Run `git queue protect` once to warn reviewers off merging PRs out of order. It
+sets a local flag (`queue.gate = status`) — no GitHub setup, workflow, ruleset,
+or admin rights required. With it on, `git queue submit` posts a
+`git-queue/merge-order` commit status on every open PR in the stack: green ✓
+("Ready — bottom of the stack") on the bottom PR, red ✗ ("Do not merge — merge
+PR #N first") on every PR above it, with the status's *Details* link pointing at
+the PR that must land first. As PRs land, `git queue sync` + `git queue submit`
+promote the new bottom PR to green.
 
-`git stack doctor` reports whether the gate is on. It's a *soft* gate — a
-reviewer can mark a PR "ready" and merge it deliberately.
+`git queue doctor` reports whether the gate is on. The gate is **advisory**: the
+red ✗ appears in the PR's checks list, but the merge button still works. PRs
+stay normal, reviewable, non-draft PRs.
 
-> Why draft, not a "do-not-merge" label + required check? With base-chaining a
-> non-bottom PR targets an *intermediate* branch, so trunk protection can't gate
-> it, and a ruleset that does gate it also blocks git-stack's pushes. Draft is
-> the only mechanism that blocks the merge without blocking pushes.
+> Why a commit status, not something that disables the merge button? Every hard
+> block GitHub offers lives on the *base* branch's rules — and with
+> base-chaining a non-bottom PR targets an intermediate stack branch, so a
+> ruleset that gates the merge also rejects git-queue's pushes to that branch
+> (and draft PRs, the one PR-level block, read socially as "not ready for
+> review"). A commit status is the strongest signal that leaves PRs normal and
+> pushes unblocked.
 
 ### Landing a stack
 
 PRs merge in **FIFO order** — the oldest PR (`#1`, at the base of the stack)
-merges first, then the next, and so on. After a PR lands, run `git stack sync` —
+merges first, then the next, and so on. After a PR lands, run `git queue sync` —
 it detects the merged PR, reparents the branches above onto trunk, and rebases
-them; then `git stack submit` retargets their PR bases and refreshes the stack
+them; then `git queue submit` retargets their PR bases and refreshes the stack
 list. Each PR body shows live approval/merge-state emojis (✅/♻️/⏳ while open,
 🟣/⚫ once merged/closed) as of the last submit.
 
@@ -140,26 +147,26 @@ one retargeted to trunk).
 
 ### Editing a branch in the middle of a stack
 
-When you change a branch that has descendants, git-stack propagates the change
+When you change a branch that has descendants, git-queue propagates the change
 up the stack automatically — forks included — using two engines depending on
 what you're doing:
 
 | You want to… | Command | Engine | On conflict |
 |---|---|---|---|
-| Add **new** work | `git stack commit` | `git replay --contained` (whole subtree, one atomic ref update) | conflict markers are **persisted** into the committed files so it always finishes, and the affected branches are flagged with a loud warning |
-| **Amend** a commit | `git stack amend` | `git history fixup` (atomic, worktree-free) | **aborts cleanly**, nothing changes, loud warning — `git history` cannot leave markers |
-| **Reword** a message | `git stack reword` | `git history reword` | aborts cleanly |
+| Add **new** work | `git queue commit` | `git replay --contained` (whole subtree, one atomic ref update) | conflict markers are **persisted** into the committed files so it always finishes, and the affected branches are flagged with a loud warning |
+| **Amend** a commit | `git queue amend` | `git history fixup` (atomic, worktree-free) | **aborts cleanly**, nothing changes, loud warning — `git history` cannot leave markers |
+| **Reword** a message | `git queue reword` | `git history reword` | aborts cleanly |
 
 Branches left holding persisted conflict markers are shown with `⚠ conflict
-markers` in `git stack status`. Search for `<<<<<<<`, resolve, and commit.
+markers` in `git queue status`. Search for `<<<<<<<`, resolve, and commit.
 
-Prefer plain `git commit`? Run `git stack hooks install` and a post-commit /
-post-rewrite hook will call `git stack restack` for you (the hooks are guarded
+Prefer plain `git commit`? Run `git queue hooks install` and a post-commit /
+post-rewrite hook will call `git queue restack` for you (the hooks are guarded
 against recursion and no-op off a stack).
 
-> Note: `git stack --help` and `git stack <cmd> --help` are intercepted by git to
-> open a man page (`man git-stack`). Install via `./install.sh` so that page
-> exists; otherwise use `git stack help` or `git-stack --help` for inline help.
+> Note: `git queue --help` and `git queue <cmd> --help` are intercepted by git to
+> open a man page (`man git-queue`). Install via `./install.sh` so that page
+> exists; otherwise use `git queue help` or `git-queue --help` for inline help.
 
 ## How it works
 
@@ -167,13 +174,13 @@ State lives in the repository's own git config (nothing outside git):
 
 | Key | Meaning |
 |---|---|
-| `stack.trunk` | Trunk branch name. |
-| `stack.remote` | Remote to push/fetch (default `origin`). |
-| `branch.<n>.stackParent` | Parent branch of `<n>`. |
-| `branch.<n>.stackParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
-| `branch.<n>.stackPr` | Cached PR number. |
-| `branch.<n>.stackDescription` | PR body text set by `git stack describe`. |
-| `stack.gate` | `draft` once `git stack protect` enables merge-order enforcement. |
+| `queue.trunk` | Trunk branch name. |
+| `queue.remote` | Remote to push/fetch (default `origin`). |
+| `branch.<n>.queueParent` | Parent branch of `<n>`. |
+| `branch.<n>.queueParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
+| `branch.<n>.queuePr` | Cached PR number. |
+| `branch.<n>.queueDescription` | PR body text set by `git queue describe`. |
+| `queue.gate` | `status` once `git queue protect` enables merge-order signalling. |
 
 (Conflict-marker state is **not** stored — `status` detects `<<<<<<<` in each
 branch's tip live, so it can never report a stale warning.)
@@ -195,7 +202,7 @@ Part of a stack. The PRs merge in FIFO order — the numbered order below, #1 fi
 
 ---
 
-<your `git stack describe` text>
+<your `git queue describe` text>
 ```
 
 The list is bounded by hidden markers, so re-running `submit` re-renders it in
@@ -205,8 +212,8 @@ See [DESIGN.md](DESIGN.md) for the full design.
 
 ## Claude skill
 
-[`skills/using-git-stack/SKILL.md`](skills/using-git-stack/SKILL.md) is a Claude
-Code skill (CipherPowers format) that teaches Claude to drive `git stack`
+[`skills/using-git-queue/SKILL.md`](skills/using-git-queue/SKILL.md) is a Claude
+Code skill (CipherPowers format) that teaches Claude to drive `git queue`
 confidently — the mental model, which command to reach for, conflict handling,
 and worked examples. Copy it into your plugin's `skills/` directory to enable it.
 

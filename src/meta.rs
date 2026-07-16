@@ -1,12 +1,14 @@
 //! Stack metadata, persisted in the repo's own git config.
 //!
 //! Keys:
-//!   stack.trunk                       -> trunk branch name
-//!   stack.remote                      -> remote name (default "origin")
-//!   branch.<name>.stackParent         -> parent branch of <name>
-//!   branch.<name>.stackParentSha      -> parent tip when last (re)based; the
+//!   queue.trunk                       -> trunk branch name
+//!   queue.remote                      -> remote name (default "origin")
+//!   queue.gate                        -> merge-order gate mode
+//!   branch.<name>.queueParent         -> parent branch of <name>
+//!   branch.<name>.queueParentSha      -> parent tip when last (re)based; the
 //!                                        rebase anchor used by `sync`
-//!   branch.<name>.stackPr             -> cached PR number
+//!   branch.<name>.queuePr             -> cached PR number
+//!   branch.<name>.queueDescription    -> PR body text set by `describe`
 
 use crate::git;
 use anyhow::{bail, Result};
@@ -27,22 +29,22 @@ fn config_unset(key: &str) {
 }
 
 pub fn remote() -> String {
-    config_get("stack.remote").unwrap_or_else(|| "origin".to_string())
+    config_get("queue.remote").unwrap_or_else(|| "origin".to_string())
 }
 
-/// Merge-order gate mode: `Some("label")` once `git stack protect` has enabled
-/// the merge-blocked label enforcement; `None` means no gating.
+/// Merge-order gate mode: `Some("status")` once `git queue protect` has
+/// enabled it; `None` means no gating.
 pub fn gate() -> Option<String> {
-    config_get("stack.gate")
+    config_get("queue.gate")
 }
 
 pub fn set_gate(mode: &str) -> Result<()> {
-    config_set("stack.gate", mode)
+    config_set("queue.gate", mode)
 }
 
 /// Configured trunk, or a best-effort detection of `main`/`master`.
 pub fn trunk() -> Result<String> {
-    if let Some(t) = config_get("stack.trunk") {
+    if let Some(t) = config_get("queue.trunk") {
         return Ok(t);
     }
     for candidate in ["main", "master"] {
@@ -50,21 +52,24 @@ pub fn trunk() -> Result<String> {
             return Ok(candidate.to_string());
         }
     }
-    bail!("no trunk configured and neither `main` nor `master` exists; run `git stack init --trunk <branch>`");
+    bail!("no trunk configured and neither `main` nor `master` exists; run `git queue init --trunk <branch>`");
 }
 
 pub fn set_trunk(name: &str) -> Result<()> {
-    config_set("stack.trunk", name)
+    config_set("queue.trunk", name)
 }
 
 fn parent_key(branch: &str) -> String {
-    format!("branch.{branch}.stackParent")
+    format!("branch.{branch}.queueParent")
 }
 fn parent_sha_key(branch: &str) -> String {
-    format!("branch.{branch}.stackParentSha")
+    format!("branch.{branch}.queueParentSha")
 }
 fn pr_key(branch: &str) -> String {
-    format!("branch.{branch}.stackPr")
+    format!("branch.{branch}.queuePr")
+}
+fn description_key(branch: &str) -> String {
+    format!("branch.{branch}.queueDescription")
 }
 
 pub fn parent(branch: &str) -> Option<String> {
@@ -91,10 +96,6 @@ pub fn set_pr(branch: &str, number: u64) -> Result<()> {
     config_set(&pr_key(branch), &number.to_string())
 }
 
-fn description_key(branch: &str) -> String {
-    format!("branch.{branch}.stackDescription")
-}
-
 /// The user-authored description of what this branch/PR is about.
 pub fn description(branch: &str) -> Option<String> {
     config_get(&description_key(branch))
@@ -114,28 +115,26 @@ pub fn untrack(branch: &str) {
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
     config_unset(&description_key(branch));
-    // Legacy: older versions stored a conflicted flag here; clear it if present.
-    config_unset(&format!("branch.{branch}.stackConflicted"));
 }
 
-/// All branches that have a `stackParent` recorded.
+/// All branches that have a `queueParent` recorded.
 pub fn tracked_branches() -> Vec<String> {
     // `--get-regexp` matches against canonical (lower-cased variable) key names.
     let raw = match git::out(&[
         "config",
         "--local",
         "--get-regexp",
-        r"^branch\..*\.stackparent$",
+        r"^branch\..*\.queueparent$",
     ]) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
     raw.lines()
         .filter_map(|line| {
-            // line: `branch.<name>.stackparent <parent>`
+            // line: `branch.<name>.queueparent <parent>`
             let key = line.split_whitespace().next()?;
             let inner = key.strip_prefix("branch.")?;
-            let name = inner.strip_suffix(".stackparent")?;
+            let name = inner.strip_suffix(".queueparent")?;
             Some(name.to_string())
         })
         .collect()

@@ -1,4 +1,4 @@
-//! End-to-end tests exercising the `git-stack` binary against throwaway repos.
+//! End-to-end tests exercising the `git-queue` binary against throwaway repos.
 //!
 //! These cover the git-only commands (init, create, status, track, sync).
 //! `submit` requires an authenticated `gh` and a GitHub remote, so it is not
@@ -31,7 +31,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 
 /// Our binary, rooted in `dir`.
 fn stack(dir: &Path) -> Command {
-    let mut c = Command::cargo_bin("git-stack").unwrap();
+    let mut c = Command::cargo_bin("git-queue").unwrap();
     c.current_dir(dir);
     c
 }
@@ -320,7 +320,7 @@ fn hooks_autorestack_on_plain_commit() {
     stack(dir).args(["hooks", "install"]).assert().success();
 
     // Plain `git commit` on `a`, with our binary on PATH for the hook to find.
-    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-stack")).parent().unwrap();
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
     git(dir, &["checkout", "-q", "a"]);
     stage(dir, "hooked.txt", "hooked");
@@ -445,13 +445,13 @@ fn split_divides_a_branch_into_a_stack() {
         .success();
 
     // Three tracked branches with the right parent chain.
-    assert_eq!(git_out(dir, &["config", "branch.api.stackParent"]), "main");
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
     assert_eq!(
-        git_out(dir, &["config", "branch.service.stackParent"]),
+        git_out(dir, &["config", "branch.service.queueParent"]),
         "api"
     );
     assert_eq!(
-        git_out(dir, &["config", "branch.ui.stackParent"]),
+        git_out(dir, &["config", "branch.ui.queueParent"]),
         "service"
     );
 
@@ -487,14 +487,14 @@ fn describe_stores_and_clears_description() {
         .assert()
         .success();
     assert_eq!(
-        git_out(dir, &["config", "--local", "branch.a.stackDescription"]),
+        git_out(dir, &["config", "--local", "branch.a.queueDescription"]),
         "Adds the API layer"
     );
 
     // Empty description clears it.
     stack(dir).args(["describe", "-m", ""]).assert().success();
     let cleared = StdCommand::new("git")
-        .args(["config", "--local", "--get", "branch.a.stackDescription"])
+        .args(["config", "--local", "--get", "branch.a.queueDescription"])
         .current_dir(dir)
         .output()
         .unwrap();
@@ -506,7 +506,7 @@ fn init_detects_and_records_trunk() {
     let tmp = new_repo();
     let dir = tmp.path();
     stack(dir).arg("init").assert().success();
-    assert_eq!(git_out(dir, &["config", "--local", "stack.trunk"]), "main");
+    assert_eq!(git_out(dir, &["config", "--local", "queue.trunk"]), "main");
 }
 
 #[test]
@@ -527,11 +527,11 @@ fn create_builds_a_tracked_chain() {
     );
     // Parent pointers recorded.
     assert_eq!(
-        git_out(dir, &["config", "--local", "branch.feat-a.stackParent"]),
+        git_out(dir, &["config", "--local", "branch.feat-a.queueParent"]),
         "main"
     );
     assert_eq!(
-        git_out(dir, &["config", "--local", "branch.feat-b.stackParent"]),
+        git_out(dir, &["config", "--local", "branch.feat-b.queueParent"]),
         "feat-a"
     );
 
@@ -619,7 +619,7 @@ fn track_adopts_an_existing_branch() {
 
     stack(dir).arg("track").assert().success();
     assert_eq!(
-        git_out(dir, &["config", "--local", "branch.hotfix.stackParent"]),
+        git_out(dir, &["config", "--local", "branch.hotfix.queueParent"]),
         "main"
     );
 }
@@ -635,9 +635,9 @@ fn untrack_removes_metadata() {
     stack(dir).arg("untrack").assert().success();
     // Config key should be gone (git config --get exits non-zero).
     let missing = StdCommand::new("git")
-        .args(["config", "--local", "--get", "branch.feat-a.stackParent"])
+        .args(["config", "--local", "--get", "branch.feat-a.queueParent"])
         .current_dir(dir)
         .output()
         .unwrap();
-    assert!(!missing.status.success(), "stackParent should be unset");
+    assert!(!missing.status.success(), "queueParent should be unset");
 }

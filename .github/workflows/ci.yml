@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # git-stack's commit/sync use `git replay` and amend/reword use
+      # git-queue's commit/sync use `git replay` and amend/reword use
       # `git history` — both need a recent git. Pull the newest from the PPA.
       # Tests self-skip any feature the installed git still lacks.
       - name: Install latest git

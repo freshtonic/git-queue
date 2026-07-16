@@ -2,8 +2,8 @@
 //! navigation block injected into every PR body. Kept side-effect-free so they
 //! can be unit-tested without git or the network.
 
-pub const BEGIN: &str = "<!-- git-stack:begin -->";
-pub const END: &str = "<!-- git-stack:end -->";
+pub const BEGIN: &str = "<!-- git-queue:begin -->";
+pub const END: &str = "<!-- git-queue:end -->";
 
 /// One entry in a stack line for rendering purposes.
 pub struct Entry {
@@ -20,7 +20,55 @@ pub struct PrRef {
     pub state: String, // OPEN | CLOSED | MERGED
     /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | None
     pub review: Option<String>,
-    pub is_draft: bool,
+}
+
+/// The commit-status context the merge-order gate posts under.
+pub const GATE_CONTEXT: &str = "git-queue/merge-order";
+
+/// One planned merge-order status (the advisory "status gate"), to be posted
+/// on the head commit of a PR.
+#[derive(Debug, PartialEq)]
+pub struct GateStatus {
+    /// Head branch of the PR receiving the status.
+    pub branch: String,
+    /// true -> green ✓ (mergeable now); false -> red ✗ (out of order).
+    pub success: bool,
+    pub description: String,
+    /// "Details" link for the status: the PR that must merge first.
+    pub target_url: Option<String>,
+}
+
+/// Plan the advisory merge-order statuses for a stack line (bottom-first): the
+/// bottom-most OPEN PR gets a success status, every open PR above it gets a
+/// failure status naming the PR that must merge first. Merged/closed PRs and
+/// branches without a PR get nothing.
+pub fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
+    let mut bottom: Option<&PrRef> = None;
+    let mut plan = Vec::new();
+    for e in entries {
+        let Some(pr) = &e.pr else { continue };
+        if pr.state != "OPEN" {
+            continue;
+        }
+        match bottom {
+            None => {
+                plan.push(GateStatus {
+                    branch: e.branch.clone(),
+                    success: true,
+                    description: "Ready — bottom of the stack, merge this PR first".to_string(),
+                    target_url: None,
+                });
+                bottom = Some(pr);
+            }
+            Some(b) => plan.push(GateStatus {
+                branch: e.branch.clone(),
+                success: false,
+                description: format!("Do not merge — merge PR #{} first (stack order)", b.number),
+                target_url: (!b.url.is_empty()).then(|| b.url.clone()),
+            }),
+        }
+    }
+    plan
 }
 
 /// Emoji for a PR's review decision.
@@ -74,7 +122,7 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
         String::new(),
         "Part of a stack. The PRs merge in FIFO order — the numbered order below, #1 \
          first. Merging one supersedes the PRs after it until the author runs \
-         `git stack sync` (rebases the rest onto the merged base) and `git stack submit` \
+         `git queue sync` (rebases the rest onto the merged base) and `git queue submit` \
          (retargets their PRs)."
             .to_string(),
         String::new(),
@@ -114,10 +162,10 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
     lines.push(
         "<sub>✅ approved · ♻️ changes requested · ⏳ review pending &nbsp;|&nbsp; \
          🟣 merged · 🟢 open · ⚫ closed &nbsp;—&nbsp; status as of the last \
-         `git stack submit`.</sub>"
+         `git queue submit`.</sub>"
             .to_string(),
     );
-    lines.push("<sub>🥞 Managed by git-stack — do not edit this list by hand.</sub>".to_string());
+    lines.push("<sub>🥞 Managed by git-queue — do not edit this list by hand.</sub>".to_string());
     lines.join("\n")
 }
 
@@ -185,7 +233,7 @@ pub fn status_tree(
     out.push_str("┴\n");
     out.push_str(&format!("  {trunk} (trunk)\n"));
     if let Some(f) = fork_note {
-        out.push_str(&format!("\nnote: `{f}` has multiple children; showing one line. Use `git stack status` from another branch to see the others.\n"));
+        out.push_str(&format!("\nnote: `{f}` has multiple children; showing one line. Use `git queue status` from another branch to see the others.\n"));
     }
     out
 }
@@ -229,9 +277,91 @@ mod tests {
                 url: url.to_string(),
                 state: state.to_string(),
                 review: review.map(|s| s.to_string()),
-                is_draft: false,
             }),
             conflicted: false,
+        }
+    }
+
+    #[test]
+    fn gate_plan_marks_bottom_ready_and_blocks_the_rest() {
+        let line = vec![
+            entry("api", 10, "https://x/pull/10", "OPEN", None),
+            entry("service", 11, "https://x/pull/11", "OPEN", None),
+            entry("ui", 12, "https://x/pull/12", "OPEN", None),
+        ];
+        let plan = gate_plan(&line);
+        assert_eq!(plan.len(), 3);
+        assert!(plan[0].success);
+        assert_eq!(plan[0].branch, "api");
+        assert_eq!(plan[0].target_url, None);
+        for s in &plan[1..] {
+            assert!(!s.success);
+            assert!(s.description.contains("#10"), "{}", s.description);
+            assert_eq!(s.target_url.as_deref(), Some("https://x/pull/10"));
+        }
+    }
+
+    #[test]
+    fn gate_plan_skips_merged_and_promotes_next_open_pr() {
+        let line = vec![
+            entry("api", 10, "https://x/pull/10", "MERGED", None),
+            entry("service", 11, "https://x/pull/11", "OPEN", None),
+            entry("ui", 12, "https://x/pull/12", "OPEN", None),
+        ];
+        let plan = gate_plan(&line);
+        assert_eq!(plan.len(), 2);
+        assert!(plan[0].success);
+        assert_eq!(plan[0].branch, "service");
+        assert!(!plan[1].success);
+        assert!(
+            plan[1].description.contains("#11"),
+            "{}",
+            plan[1].description
+        );
+    }
+
+    #[test]
+    fn gate_plan_ignores_closed_prs_and_unsubmitted_branches() {
+        let mut line = vec![
+            entry("api", 10, "https://x/pull/10", "CLOSED", None),
+            entry("service", 11, "https://x/pull/11", "OPEN", None),
+        ];
+        line.push(Entry {
+            branch: "ui".to_string(),
+            pr: None,
+            conflicted: false,
+        });
+        let plan = gate_plan(&line);
+        assert_eq!(plan.len(), 1);
+        assert!(plan[0].success);
+        assert_eq!(plan[0].branch, "service");
+    }
+
+    #[test]
+    fn gate_plan_is_empty_when_no_pr_is_open() {
+        let line = vec![
+            entry("api", 10, "https://x/pull/10", "MERGED", None),
+            entry("service", 11, "https://x/pull/11", "CLOSED", None),
+        ];
+        assert!(gate_plan(&line).is_empty());
+        assert!(gate_plan(&[]).is_empty());
+    }
+
+    #[test]
+    fn gate_plan_descriptions_fit_github_status_limit() {
+        // The GitHub statuses API caps descriptions at 140 characters.
+        let line = vec![
+            entry(
+                "api",
+                4_294_967_295,
+                "https://x/pull/4294967295",
+                "OPEN",
+                None,
+            ),
+            entry("ui", 12, "https://x/pull/12", "OPEN", None),
+        ];
+        for s in gate_plan(&line) {
+            assert!(s.description.len() <= 140, "{}", s.description);
         }
     }
 

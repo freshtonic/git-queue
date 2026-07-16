@@ -1,79 +1,89 @@
-//! Implementations of each `git stack` subcommand.
+//! Implementations of each `git queue` subcommand.
 
 use crate::render::{self, Entry, PrRef};
 use crate::stack::Stack;
 use crate::{gh, git, meta, restack};
 use anyhow::{bail, Context, Result};
 
-/// Enforce merge order with draft state: the bottom-most open PR is marked
-/// ready; every open PR above it is marked draft (GitHub disables the merge
-/// button on draft PRs, regardless of base branch, without blocking pushes).
-/// Merged/closed PRs are skipped. Only toggles when a PR's state is wrong.
-fn apply_draft_gate(prs: &[Option<PrRef>]) -> Result<()> {
-    let mut bottom_done = false;
-    for pr in prs.iter().flatten() {
-        if pr.state != "OPEN" {
-            continue; // merged/closed PRs are never gated
-        }
-        if !bottom_done {
-            if pr.is_draft {
-                gh::set_draft(pr.number, false)?; // the bottom PR is mergeable
-            }
-            bottom_done = true;
-        } else if !pr.is_draft {
-            gh::set_draft(pr.number, true)?; // block the ones above it
-        }
+/// Advertise merge order with commit statuses: the bottom-most open PR's head
+/// gets a green `git-queue/merge-order` status; every open PR above it gets a
+/// red one naming (and linking to) the PR that must merge first. Advisory: it
+/// signals in the checks UI without touching draft state, branch rules, or
+/// pushes. Assumes the branches were just pushed, so local tips == PR heads.
+fn apply_status_gate(entries: &[Entry]) -> Result<()> {
+    for s in render::gate_plan(entries) {
+        let sha = git::rev_parse(&s.branch)?;
+        gh::set_commit_status(
+            &sha,
+            render::GATE_CONTEXT,
+            s.success,
+            &s.description,
+            s.target_url.as_deref(),
+        )?;
     }
     Ok(())
 }
 
-/// `git stack doctor` — report-only diagnostics for merge-order enforcement.
+/// `git queue doctor` — report-only diagnostics for merge-order enforcement.
 pub fn doctor() -> Result<()> {
     git::ensure_repo()?;
-    println!("git stack doctor — merge-order enforcement\n");
+    println!("git queue doctor — merge-order enforcement\n");
 
     match meta::gate().as_deref() {
-        Some("draft") => {
-            println!("  \u{2713} gate: enabled (draft mode)");
-            println!("    Non-bottom PRs are kept as drafts so they can't be merged out of order;");
-            println!("    `git stack submit` readies the bottom PR and drafts the ones above it.");
+        Some("status") => {
+            println!("  \u{2713} gate: enabled (status mode)");
+            println!(
+                "    `git queue submit` posts a `{}` commit status on every open PR:",
+                render::GATE_CONTEXT
+            );
+            println!("    green \u{2713} on the bottom PR, red \u{2717} (\u{201c}merge PR #N first\u{201d}) on the ones above it.");
         }
         Some(other) => {
-            println!("  ! gate: unknown mode `{other}` \u{2014} run `git stack protect` to (re)enable draft mode");
+            println!("  ! gate: unknown mode `{other}` \u{2014} run `git queue protect` to (re)enable status mode");
         }
         None => {
-            println!("  \u{2717} gate: not enabled \u{2014} run `git stack protect` to turn it on");
+            println!("  \u{2717} gate: not enabled \u{2014} run `git queue protect` to turn it on");
         }
     }
 
     if gh::ready() {
         println!("  \u{2713} GitHub CLI: authenticated");
     } else {
-        println!("  ! GitHub CLI: not authenticated (`gh auth login`) \u{2014} needed for `submit` to set draft state");
+        println!("  ! GitHub CLI: not authenticated (`gh auth login`) \u{2014} needed for `submit` to post merge-order statuses");
     }
 
-    println!("\nNote: draft is a soft gate \u{2014} a reviewer can mark a PR ready and merge it deliberately.");
+    println!("\nNote: the gate is advisory \u{2014} a red \u{2717} in the checks list warns reviewers off,");
+    println!("but it does not disable the merge button.");
     Ok(())
 }
 
-/// `git stack protect` — enable draft-based merge-order enforcement.
+/// `git queue protect` — enable status-based merge-order signalling.
 ///
-/// Draft is the one GitHub mechanism that composes with base-chaining: a draft
-/// PR's merge button is disabled regardless of base branch, and (unlike branch
-/// rules / rulesets) draft status does not block pushing to the branch.
+/// A commit status is the one advisory GitHub mechanism that composes with
+/// base-chaining: it shows up in every PR's checks UI (red ✗ with "merge PR #N
+/// first") while leaving the PRs as normal, reviewable, non-draft PRs and
+/// never blocking pushes. Anything that actually disables the merge button
+/// requires base-branch rules, which also gate pushes to the stack branches.
 pub fn protect() -> Result<()> {
     git::ensure_repo()?;
-    meta::set_gate("draft")?;
-    println!("Enabled draft-based merge-order enforcement for this repository.\n");
-    println!("`git stack submit` now keeps the bottom (mergeable) PR ready and marks every PR");
-    println!("above it as a draft, so they can't be merged out of order. As PRs land, `git stack");
-    println!("sync` + `git stack submit` readies the new bottom PR.\n");
-    println!("No GitHub setup or admin rights needed. It is a soft gate: a reviewer can mark a PR");
-    println!("ready and merge it deliberately. Run `git stack submit` now to apply it.");
+    meta::set_gate("status")?;
+    println!("Enabled status-based merge-order signalling for this repository.\n");
+    println!(
+        "`git queue submit` now posts a `{}` commit status on every open",
+        render::GATE_CONTEXT
+    );
+    println!("PR in the stack: green \u{2713} on the bottom (mergeable) PR, red \u{2717} \u{201c}merge PR #N");
+    println!(
+        "first\u{201d} on every PR above it. As PRs land, `git queue sync` + `git queue submit`"
+    );
+    println!("promote the new bottom PR to green.\n");
+    println!("No GitHub setup or admin rights needed, and PRs stay normal (no drafts). The gate");
+    println!("is advisory: the red \u{2717} warns reviewers, but the merge button still works.");
+    println!("Run `git queue submit` now to apply it.");
     Ok(())
 }
 
-/// `git stack init [--trunk <branch>]`
+/// `git queue init [--trunk <branch>]`
 pub fn init(trunk: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = match trunk {
@@ -84,12 +94,12 @@ pub fn init(trunk: Option<String>) -> Result<()> {
         bail!("trunk branch `{trunk}` does not exist");
     }
     meta::set_trunk(&trunk)?;
-    println!("Initialized git-stack. Trunk is `{trunk}`.");
-    println!("Create your first stacked branch with:  git stack create <name>");
+    println!("Initialized git-queue. Trunk is `{trunk}`.");
+    println!("Create your first stacked branch with:  git queue create <name>");
     Ok(())
 }
 
-/// `git stack create <name>` — new branch on top of the current one.
+/// `git queue create <name>` — new branch on top of the current one.
 pub fn create(name: &str) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
@@ -109,11 +119,11 @@ pub fn create(name: &str) -> Result<()> {
     } else {
         println!("Created `{name}` on top of `{parent}`.");
     }
-    println!("Make your commits, then `git stack submit` to open PRs.");
+    println!("Make your commits, then `git queue submit` to open PRs.");
     Ok(())
 }
 
-/// `git stack split` — split the current branch's commits into a stack of
+/// `git queue split` — split the current branch's commits into a stack of
 /// branches. Opens a `rebase -i`-style editor where each commit is prefixed
 /// with the branch it should belong to; consecutive commits sharing a name
 /// become one branch, and the groups stack in order (file order = merge order).
@@ -179,7 +189,7 @@ pub fn split() -> Result<()> {
     if !reused {
         println!("note: `{branch}` still points at the old tip; delete it if you don't need it.");
     }
-    println!("Now on `{top}`. Run `git stack submit` to open the PRs.");
+    println!("Now on `{top}`. Run `git queue submit` to open the PRs.");
     Ok(())
 }
 
@@ -275,7 +285,7 @@ fn parse_segments(
     Ok(segments)
 }
 
-/// `git stack track [--parent <branch>]` — adopt the current branch.
+/// `git queue track [--parent <branch>]` — adopt the current branch.
 pub fn track(parent: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
@@ -302,7 +312,7 @@ pub fn track(parent: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `git stack untrack` — forget the current branch's stack metadata.
+/// `git queue untrack` — forget the current branch's stack metadata.
 pub fn untrack() -> Result<()> {
     git::ensure_repo()?;
     let branch = git::current_branch()?;
@@ -311,7 +321,7 @@ pub fn untrack() -> Result<()> {
     Ok(())
 }
 
-/// `git stack describe [-m <text>]` — set the description of what the current
+/// `git queue describe [-m <text>]` — set the description of what the current
 /// branch/PR is about. It becomes the body of the PR (below the stack list) on
 /// the next `submit`. Opens `$EDITOR` when `-m` is omitted.
 pub fn describe(message: Option<String>) -> Result<()> {
@@ -319,7 +329,7 @@ pub fn describe(message: Option<String>) -> Result<()> {
     let stack = Stack::load()?;
     let branch = git::current_branch()?;
     if !stack.is_tracked(&branch) {
-        bail!("`{branch}` is not a stack branch; `git stack create`/`track` it first");
+        bail!("`{branch}` is not a stack branch; `git queue create`/`track` it first");
     }
     let text = match message {
         Some(m) => m,
@@ -330,7 +340,7 @@ pub fn describe(message: Option<String>) -> Result<()> {
         println!("Cleared the description for `{branch}`.");
     } else {
         println!(
-            "Saved the description for `{branch}`. It will appear in the PR on `git stack submit`."
+            "Saved the description for `{branch}`. It will appear in the PR on `git queue submit`."
         );
     }
     Ok(())
@@ -368,7 +378,7 @@ fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
     Ok(cleaned.join("\n").trim().to_string())
 }
 
-/// `git stack status`
+/// `git queue status`
 pub fn status() -> Result<()> {
     git::ensure_repo()?;
     let stack = Stack::load()?;
@@ -381,12 +391,12 @@ pub fn status() -> Result<()> {
         match stack.roots().into_iter().next() {
             Some(r) => r,
             None => {
-                println!("No stacks yet. Create one with `git stack create <name>`.");
+                println!("No stacks yet. Create one with `git queue create <name>`.");
                 return Ok(());
             }
         }
     } else {
-        println!("Branch `{current}` is not tracked. Adopt it with `git stack track`.");
+        println!("Branch `{current}` is not tracked. Adopt it with `git queue track`.");
         return Ok(());
     };
 
@@ -400,7 +410,7 @@ pub fn status() -> Result<()> {
     Ok(())
 }
 
-/// `git stack prev` / `down` — check out the parent branch.
+/// `git queue prev` / `down` — check out the parent branch.
 pub fn prev() -> Result<()> {
     git::ensure_repo()?;
     let branch = git::current_branch()?;
@@ -413,7 +423,7 @@ pub fn prev() -> Result<()> {
     }
 }
 
-/// `git stack next` / `up` — check out the child branch.
+/// `git queue next` / `up` — check out the child branch.
 pub fn next() -> Result<()> {
     git::ensure_repo()?;
     let stack = Stack::load()?;
@@ -429,14 +439,14 @@ pub fn next() -> Result<()> {
     }
 }
 
-/// `git stack sync [--no-push]` — pull in commits others pushed to stack
+/// `git queue sync [--no-push]` — pull in commits others pushed to stack
 /// branches, restack the whole stack onto the latest trunk, and (by default)
 /// push every branch back with `--force-with-lease` so remote work is never
 /// clobbered.
 pub fn sync(no_push: bool) -> Result<()> {
     git::ensure_repo()?;
     if git::rebase_in_progress() {
-        bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git stack sync`");
+        bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git queue sync`");
     }
     std::env::set_var(git::GUARD_ENV, "1"); // suppress our hooks during internal git ops
     let mut stack = Stack::load()?;
@@ -460,7 +470,7 @@ pub fn sync(no_push: bool) -> Result<()> {
 
     // Heal branches orphaned by a merged-and-deleted parent. `--delete-branch`
     // (and manual branch deletion) removes the branch's git config, including
-    // our `stackParent`, leaving its children pointing at a branch that no
+    // our `queueParent`, leaving its children pointing at a branch that no
     // longer exists. Reparent those onto trunk.
     stack = heal_dangling_parents(stack)?;
 
@@ -609,7 +619,7 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
     Ok(Some(RemoteAction::Rebased))
 }
 
-/// `git stack submit [--draft]` — push the current stack line and open/update
+/// `git queue submit [--draft]` — push the current stack line and open/update
 /// its numbered PRs.
 pub fn submit(draft: bool) -> Result<()> {
     git::ensure_repo()?;
@@ -619,7 +629,7 @@ pub fn submit(draft: bool) -> Result<()> {
     let stack = Stack::load()?;
     let current = git::current_branch()?;
     if !stack.is_tracked(&current) {
-        bail!("`{current}` is not tracked; run `git stack create` or `git stack track` first");
+        bail!("`{current}` is not tracked; run `git queue create` or `git queue track` first");
     }
     let line = stack.line_through(&current)?;
     if let Some(fork) = &line.fork_at {
@@ -728,10 +738,14 @@ pub fn submit(draft: bool) -> Result<()> {
         gh::edit(number, &base_of(i), &title, &body)?;
     }
 
-    // Enforce merge order with draft state, if enabled.
-    let gated = meta::gate().as_deref() == Some("draft");
+    // Signal merge order with commit statuses, if enabled.
+    let gate = meta::gate();
+    let gated = gate.as_deref() == Some("status");
+    if let Some(other) = gate.as_deref().filter(|g| *g != "status") {
+        eprintln!("warning: unknown queue.gate mode `{other}` — no merge gate applied; run `git queue protect` to enable status mode");
+    }
     if gated {
-        apply_draft_gate(&prs)?;
+        apply_status_gate(&entries)?;
     }
 
     println!("\nSubmitted {total} PR(s):");
@@ -741,7 +755,7 @@ pub fn submit(draft: bool) -> Result<()> {
         }
     }
     if gated {
-        println!("Merge gate active: the bottom PR is ready; the rest are drafts.");
+        println!("Merge gate active: the bottom PR's `{}` status is \u{2713}; the rest are \u{2717} until it lands.", render::GATE_CONTEXT);
     }
     Ok(())
 }
@@ -752,11 +766,10 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
         url: pr.url.clone(),
         state: pr.state.clone(),
         review: pr.review_decision.clone(),
-        is_draft: pr.is_draft,
     }
 }
 
-/// `git stack yank` — close every open (non-merged) PR in the current stack.
+/// `git queue yank` — close every open (non-merged) PR in the current stack.
 /// Merged PRs are left alone; local branches and metadata are untouched.
 pub fn yank() -> Result<()> {
     git::ensure_repo()?;
@@ -786,7 +799,7 @@ pub fn yank() -> Result<()> {
     Ok(())
 }
 
-/// `git stack commit [-m <msg>]` — make a NEW commit on the current branch,
+/// `git queue commit [-m <msg>]` — make a NEW commit on the current branch,
 /// then restack all descendants onto the new tip (`git replay`, with a
 /// marker-persisting fallback on conflict).
 pub fn commit(message: Option<String>) -> Result<()> {
@@ -806,7 +819,7 @@ pub fn commit(message: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `git stack amend` — fold STAGED changes into the current branch's tip commit
+/// `git queue amend` — fold STAGED changes into the current branch's tip commit
 /// via `git history fixup`, atomically updating every descendant.
 pub fn amend() -> Result<()> {
     git::ensure_repo()?;
@@ -826,7 +839,7 @@ pub fn amend() -> Result<()> {
         bail!(
             "amend could not fold your changes into `{current}`: doing so would conflict with a \
              descendant branch, so nothing was changed (your staged changes are intact).\n\
-             Resolve the conflict on the descendant first, or use `git stack commit` to add a \
+             Resolve the conflict on the descendant first, or use `git queue commit` to add a \
              separate commit instead."
         );
     }
@@ -835,7 +848,7 @@ pub fn amend() -> Result<()> {
     Ok(())
 }
 
-/// `git stack reword [<commit>]` — rewrite a commit message via
+/// `git queue reword [<commit>]` — rewrite a commit message via
 /// `git history reword`, atomically updating descendants. Defaults to HEAD.
 pub fn reword(commit: Option<String>) -> Result<()> {
     git::ensure_repo()?;
@@ -850,7 +863,7 @@ pub fn reword(commit: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `git stack restack` — restack descendants of the current branch onto its
+/// `git queue restack` — restack descendants of the current branch onto its
 /// current tip. `--auto` (used by hooks) stays quiet when there's nothing to do
 /// and on non-stack branches.
 pub fn restack(auto: bool) -> Result<()> {
@@ -897,8 +910,8 @@ fn refresh_descendant_anchors(branch: &str) -> Result<()> {
     Ok(())
 }
 
-const HOOK_BEGIN: &str = "# >>> git-stack >>>";
-const HOOK_END: &str = "# <<< git-stack <<<";
+const HOOK_BEGIN: &str = "# >>> git-queue >>>";
+const HOOK_END: &str = "# <<< git-queue <<<";
 
 fn hook_snippet(only_amend: bool) -> String {
     let gate = if only_amend {
@@ -908,32 +921,32 @@ fn hook_snippet(only_amend: bool) -> String {
     };
     format!(
         "{HOOK_BEGIN}\n\
-         [ -n \"$GIT_STACK_IN_RESTACK\" ] && exit 0\n\
-         {gate}command -v git-stack >/dev/null 2>&1 && git-stack restack --auto || true\n\
+         [ -n \"$GIT_QUEUE_IN_RESTACK\" ] && exit 0\n\
+         {gate}command -v git-queue >/dev/null 2>&1 && git-queue restack --auto || true\n\
          {HOOK_END}\n"
     )
 }
 
-/// `git stack hooks install` — make plain `git commit`/amend auto-restack.
+/// `git queue hooks install` — make plain `git commit`/amend auto-restack.
 pub fn hooks_install() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
     std::fs::create_dir_all(&dir)?;
     install_hook(&dir.join("post-commit"), &hook_snippet(false))?;
     install_hook(&dir.join("post-rewrite"), &hook_snippet(true))?;
-    println!("Installed git-stack hooks. Plain `git commit` and `git commit --amend` on a");
+    println!("Installed git-queue hooks. Plain `git commit` and `git commit --amend` on a");
     println!("stack branch will now auto-restack descendants.");
     Ok(())
 }
 
-/// `git stack hooks uninstall` — remove the git-stack hook blocks.
+/// `git queue hooks uninstall` — remove the git-queue hook blocks.
 pub fn hooks_uninstall() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
     for name in ["post-commit", "post-rewrite"] {
         remove_hook(&dir.join(name))?;
     }
-    println!("Removed git-stack hooks.");
+    println!("Removed git-queue hooks.");
     Ok(())
 }
 
@@ -1000,7 +1013,6 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             url: String::new(),
             state: "?".to_string(),
             review: None,
-            is_draft: false,
         });
         entries.push(Entry {
             branch: b.clone(),

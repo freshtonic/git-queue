@@ -1,8 +1,8 @@
-# git-stack design
+# git-queue design
 
 ## Goal
 
-A `git stack` subcommand that manages **stacks** — ordered series of branches
+A `git queue` subcommand that manages **stacks** — ordered series of branches
 where branch *N* depends on branch *N-1* — and the creation of **numbered pull
 requests** from those branches.
 
@@ -28,11 +28,11 @@ it is versioned per-clone and inspectable with plain `git config`:
 
 | Key | Meaning |
 |---|---|
-| `stack.trunk` | Trunk branch. |
-| `stack.remote` | Remote (default `origin`). |
-| `branch.<n>.stackParent` | Parent branch. |
-| `branch.<n>.stackParentSha` | Parent tip at last (re)base — the **rebase anchor**. |
-| `branch.<n>.stackPr` | Cached PR number. |
+| `queue.trunk` | Trunk branch. |
+| `queue.remote` | Remote (default `origin`). |
+| `branch.<n>.queueParent` | Parent branch. |
+| `branch.<n>.queueParentSha` | Parent tip at last (re)base — the **rebase anchor**. |
+| `branch.<n>.queuePr` | Cached PR number. |
 
 ## Shelling out to `git` and `gh`
 
@@ -102,5 +102,5 @@ For stack line `main ← A ← B ← C`:
 
 - `submit` operates on one linear line; forked stacks warn and submit one line.
 - `sync` conflict recovery is resume-by-re-run, not an explicit `--continue`.
-- No `git stack merge` / land automation yet (rely on GitHub merge queue).
+- No `git queue merge` / land automation yet (rely on GitHub merge queue).
 - Forge is GitHub via `gh` only; a `Forge` trait could add GitLab later.

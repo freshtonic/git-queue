@@ -186,7 +186,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-stack"
+name = "git-queue"
 version = "0.1.0"
 dependencies = [
  "anyhow",

@@ -16,8 +16,6 @@ pub struct Pr {
     /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null
     #[serde(rename = "reviewDecision", default)]
     pub review_decision: Option<String>,
-    #[serde(rename = "isDraft", default)]
-    pub is_draft: bool,
 }
 
 fn gh(args: &[&str]) -> Result<String> {
@@ -58,7 +56,7 @@ pub fn find(branch: &str) -> Result<Option<Pr>> {
         "--limit",
         "1",
         "--json",
-        "number,title,url,state,baseRefName,reviewDecision,isDraft",
+        "number,title,url,state,baseRefName,reviewDecision",
     ])?;
     let mut prs: Vec<Pr> = serde_json::from_str(&json).context("parsing gh pr list output")?;
     Ok(prs.pop())
@@ -101,13 +99,35 @@ pub fn edit(number: u64, base: &str, title: &str, body: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mark a PR as draft (blocks its merge button) or ready.
-pub fn set_draft(number: u64, draft: bool) -> Result<()> {
-    let num = number.to_string();
-    if draft {
-        gh(&["pr", "ready", "--undo", &num])?;
-    } else {
-        gh(&["pr", "ready", &num])?;
+/// Post a commit status on `sha` (the merge-order gate). `gh api` resolves the
+/// `{owner}/{repo}` placeholders from the current repository's remote.
+pub fn set_commit_status(
+    sha: &str,
+    context: &str,
+    success: bool,
+    description: &str,
+    target_url: Option<&str>,
+) -> Result<()> {
+    let path = format!("repos/{{owner}}/{{repo}}/statuses/{sha}");
+    let state = format!("state={}", if success { "success" } else { "failure" });
+    let context = format!("context={context}");
+    let description = format!("description={description}");
+    let mut args = vec![
+        "api",
+        "--silent",
+        &path,
+        "-f",
+        &state,
+        "-f",
+        &context,
+        "-f",
+        &description,
+    ];
+    let url;
+    if let Some(u) = target_url {
+        url = format!("target_url={u}");
+        args.extend(["-f", &url]);
     }
+    gh(&args)?;
     Ok(())
 }
