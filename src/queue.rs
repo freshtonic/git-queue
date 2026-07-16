@@ -1,10 +1,10 @@
-//! The stack domain model, reconstructed from git-config metadata.
+//! The queue domain model, reconstructed from git-config metadata.
 //!
 //! Branches form a forest via parent pointers. A chain ends at its *base*: the
 //! first untracked ancestor. That is usually trunk, but any branch can be a
 //! base — a queue started on a release branch merges into that release branch.
-//! A *stack line* is the linear chain from just above its base up to a leaf.
-//! Numbered PRs and restacking operate on stack lines.
+//! A *queue line* is the linear chain from just above its base up to a leaf.
+//! Numbered PRs and requeueing operate on queue lines.
 
 use crate::meta;
 use anyhow::{bail, Result};
@@ -12,14 +12,14 @@ use std::collections::HashMap;
 
 const MAX_DEPTH: usize = 1000; // cycle guard
 
-pub struct Stack {
+pub struct Queue {
     pub trunk: String,
     /// branch -> parent branch
     parents: HashMap<String, String>,
 }
 
-impl Stack {
-    pub fn load() -> Result<Stack> {
+impl Queue {
+    pub fn load() -> Result<Queue> {
         let trunk = meta::trunk()?;
         let mut parents = HashMap::new();
         for b in meta::tracked_branches() {
@@ -27,7 +27,7 @@ impl Stack {
                 parents.insert(b, p);
             }
         }
-        Ok(Stack { trunk, parents })
+        Ok(Queue { trunk, parents })
     }
 
     pub fn is_tracked(&self, branch: &str) -> bool {
@@ -80,7 +80,7 @@ impl Stack {
     /// Chain from just-above-the-base up to and including `branch`,
     /// bottom-first. The base is the first untracked ancestor. Errors on a
     /// cycle.
-    pub fn downstack(&self, branch: &str) -> Result<Vec<String>> {
+    pub fn chain_to_base(&self, branch: &str) -> Result<Vec<String>> {
         let mut chain = vec![branch.to_string()];
         let mut cur = branch.to_string();
         for _ in 0..MAX_DEPTH {
@@ -101,11 +101,11 @@ impl Stack {
         bail!("parent chain for `{branch}` is too deep or cyclic");
     }
 
-    /// The full linear stack line through `branch`, bottom-first, extending
+    /// The full linear queue line through `branch`, bottom-first, extending
     /// upward while each branch has exactly one child. Stops (without error) at
     /// the first fork; `fork_at` reports where, so callers can warn.
     pub fn line_through(&self, branch: &str) -> Result<Line> {
-        let mut branches = self.downstack(branch)?;
+        let mut branches = self.chain_to_base(branch)?;
         let base = self
             .parent_of(&branches[0])
             .expect("bottom branch is tracked, so it has a parent")
@@ -164,7 +164,7 @@ impl Stack {
 
     /// Depth of `branch` below trunk (trunk's direct children are depth 1).
     fn depth(&self, branch: &str) -> usize {
-        self.downstack(branch)
+        self.chain_to_base(branch)
             .map(|c| c.len())
             .unwrap_or(usize::MAX)
     }
@@ -177,7 +177,7 @@ impl Stack {
     }
 }
 
-/// A linear stack line.
+/// A linear queue line.
 pub struct Line {
     /// Bottom-first branch names (excludes the base).
     pub branches: Vec<String>,

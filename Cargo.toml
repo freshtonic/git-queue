@@ -2,7 +2,7 @@
 name = "git-queue"
 version = "0.1.0"
 edition = "2021"
-description = "Manage stacks of dependent branches and their numbered pull requests"
+description = "Manage queues of dependent branches and their numbered pull requests"
 license = "MIT"
 
 # Two binaries are built from thin wrappers in src/bin/ around the library's

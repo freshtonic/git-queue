@@ -1,4 +1,4 @@
-//! Stack metadata, persisted in the repo's own git config.
+//! Queue metadata, persisted in the repo's own git config.
 //!
 //! Keys:
 //!   queue.trunk                       -> trunk branch name

@@ -30,7 +30,7 @@ fn git_out(dir: &Path, args: &[&str]) -> String {
 }
 
 /// Our binary, rooted in `dir`.
-fn stack(dir: &Path) -> Command {
+fn queue(dir: &Path) -> Command {
     let mut c = Command::cargo_bin("git-queue").unwrap();
     c.current_dir(dir);
     c
@@ -103,28 +103,28 @@ const REPLAY: (u32, u32) = (2, 44); // `git replay`
 const HISTORY: (u32, u32) = (2, 55); // `git history`
 
 #[test]
-fn commit_on_mid_branch_restacks_descendants() {
+fn commit_on_mid_branch_requeues_descendants() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "b"]).assert().success();
+    queue(dir).args(["create", "b"]).assert().success();
     commit(dir, "b.txt");
 
-    // New commit on mid-stack branch `a`.
+    // New commit on mid-queue branch `a`.
     git(dir, &["checkout", "-q", "a"]);
     stage(dir, "a2.txt", "more");
-    stack(dir)
+    queue(dir)
         .args(["commit", "-m", "more work on a"])
         .assert()
         .success();
 
-    // `b` must have been restacked onto the new `a` tip and still be intact.
-    assert!(is_ancestor(dir, "a", "b"), "b not restacked onto new a");
+    // `b` must have been requeued onto the new `a` tip and still be intact.
+    assert!(is_ancestor(dir, "a", "b"), "b not requeued onto new a");
     assert_eq!(git_out(dir, &["show", "b:a2.txt"]), "more");
     assert_eq!(git_out(dir, &["show", "b:b.txt"]), "b.txt");
     // HEAD restored to `a`.
@@ -132,31 +132,31 @@ fn commit_on_mid_branch_restacks_descendants() {
 }
 
 #[test]
-fn commit_restacks_a_fork_in_one_go() {
+fn commit_requeues_a_fork_in_one_go() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "b1"]).assert().success();
+    queue(dir).args(["create", "b1"]).assert().success();
     commit(dir, "b1.txt");
     // Fork: second child on `a`.
     git(dir, &["checkout", "-q", "a"]);
-    stack(dir).args(["create", "b2"]).assert().success();
+    queue(dir).args(["create", "b2"]).assert().success();
     commit(dir, "b2.txt");
 
     git(dir, &["checkout", "-q", "a"]);
     stage(dir, "shared.txt", "x");
-    stack(dir)
+    queue(dir)
         .args(["commit", "-m", "shared change"])
         .assert()
         .success();
 
     for leaf in ["b1", "b2"] {
-        assert!(is_ancestor(dir, "a", leaf), "{leaf} not restacked");
+        assert!(is_ancestor(dir, "a", leaf), "{leaf} not requeued");
         assert_eq!(git_out(dir, &["show", &format!("{leaf}:shared.txt")]), "x");
     }
 }
@@ -168,16 +168,16 @@ fn amend_folds_staged_changes_and_updates_descendants() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "b"]).assert().success();
+    queue(dir).args(["create", "b"]).assert().success();
     commit(dir, "b.txt");
 
     git(dir, &["checkout", "-q", "a"]);
     let commits_before = git_out(dir, &["rev-list", "--count", "main..a"]);
     stage(dir, "folded.txt", "folded");
-    stack(dir).arg("amend").assert().success();
+    queue(dir).arg("amend").assert().success();
 
     // Amend folds — it does NOT add a commit.
     assert_eq!(
@@ -189,17 +189,17 @@ fn amend_folds_staged_changes_and_updates_descendants() {
 }
 
 #[test]
-fn conflicting_restack_persists_markers_and_flags_branch() {
+fn conflicting_requeue_persists_markers_and_flags_branch() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "shared.txt", "base\n");
     git(dir, &["commit", "-q", "-m", "a: add shared"]);
-    stack(dir).args(["create", "b"]).assert().success();
+    queue(dir).args(["create", "b"]).assert().success();
     stage(dir, "shared.txt", "b-version\n");
     git(dir, &["commit", "-q", "-m", "b: change shared"]);
 
@@ -207,7 +207,7 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
     git(dir, &["checkout", "-q", "a"]);
     stage(dir, "shared.txt", "a-version\n");
     // Must still SUCCEED (markers are persisted, not left mid-rebase).
-    stack(dir)
+    queue(dir)
         .args(["commit", "-m", "a: conflicting change"])
         .assert()
         .success();
@@ -222,7 +222,7 @@ fn conflicting_restack_persists_markers_and_flags_branch() {
     assert!(!dir.join(".git/rebase-apply").exists());
 
     // status surfaces the warning marker.
-    let out = stack(dir).arg("status").output().unwrap();
+    let out = queue(dir).arg("status").output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("⚠"));
 }
 
@@ -233,11 +233,11 @@ fn amend_on_conflict_errors_and_preserves_staged_work() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "db"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "db"]).assert().success();
     stage(dir, "shared.txt", "db-original\n");
     git(dir, &["commit", "-q", "-m", "db: add shared"]);
-    stack(dir).args(["create", "ui"]).assert().success();
+    queue(dir).args(["create", "ui"]).assert().success();
     stage(dir, "shared.txt", "ui-edit\n");
     git(dir, &["commit", "-q", "-m", "ui: edit shared"]);
 
@@ -246,7 +246,7 @@ fn amend_on_conflict_errors_and_preserves_staged_work() {
     stage(dir, "shared.txt", "db-revised\n");
 
     // amend must FAIL loudly — never claim success while folding nothing.
-    stack(dir).arg("amend").assert().failure();
+    queue(dir).arg("amend").assert().failure();
 
     // db's commit is unchanged and the staged work is preserved.
     assert_eq!(git_out(dir, &["show", "db:shared.txt"]), "db-original");
@@ -268,22 +268,22 @@ fn resolving_markers_clears_the_status_warning() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "db"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "db"]).assert().success();
     stage(dir, "f.txt", "base\n");
     git(dir, &["commit", "-q", "-m", "db base"]);
-    stack(dir).args(["create", "ui"]).assert().success();
+    queue(dir).args(["create", "ui"]).assert().success();
     stage(dir, "f.txt", "ui-version\n");
     git(dir, &["commit", "-q", "-m", "ui change"]);
 
     // Conflicting commit on db -> ui gets persisted markers.
     git(dir, &["checkout", "-q", "db"]);
     stage(dir, "f.txt", "db-version\n");
-    stack(dir)
+    queue(dir)
         .args(["commit", "-m", "db conflicting"])
         .assert()
         .success();
-    let flagged = stack(dir).arg("status").output().unwrap();
+    let flagged = queue(dir).arg("status").output().unwrap();
     assert!(
         String::from_utf8_lossy(&flagged.stdout).contains("⚠"),
         "status should warn while markers exist"
@@ -292,13 +292,13 @@ fn resolving_markers_clears_the_status_warning() {
     // Resolve on ui and amend; status must stop warning (no stale flag).
     git(dir, &["checkout", "-q", "ui"]);
     stage(dir, "f.txt", "ui-version\n");
-    stack(dir).arg("amend").assert().success();
+    queue(dir).arg("amend").assert().success();
 
     assert!(
         !git_out(dir, &["show", "ui:f.txt"]).contains("<<<<<<<"),
         "ui should be clean after resolution"
     );
-    let cleared = stack(dir).arg("status").output().unwrap();
+    let cleared = queue(dir).arg("status").output().unwrap();
     assert!(
         !String::from_utf8_lossy(&cleared.stdout).contains("⚠"),
         "status must not warn after markers are resolved"
@@ -306,18 +306,18 @@ fn resolving_markers_clears_the_status_warning() {
 }
 
 #[test]
-fn hooks_autorestack_on_plain_commit() {
+fn hooks_autorequeue_on_plain_commit() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "b"]).assert().success();
+    queue(dir).args(["create", "b"]).assert().success();
     commit(dir, "b.txt");
-    stack(dir).args(["hooks", "install"]).assert().success();
+    queue(dir).args(["hooks", "install"]).assert().success();
 
     // Plain `git commit` on `a`, with our binary on PATH for the hook to find.
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
@@ -332,8 +332,8 @@ fn hooks_autorestack_on_plain_commit() {
         .unwrap();
     assert!(status.success());
 
-    // The post-commit hook should have auto-restacked `b`.
-    assert!(is_ancestor(dir, "a", "b"), "hook did not restack b");
+    // The post-commit hook should have auto-requeued `b`.
+    assert!(is_ancestor(dir, "a", "b"), "hook did not requeue b");
     assert_eq!(git_out(dir, &["show", "b:hooked.txt"]), "hooked");
 }
 
@@ -368,10 +368,10 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "b"]).assert().success();
+    queue(dir).args(["create", "b"]).assert().success();
     commit(dir, "b.txt");
     git(dir, &["push", "-q", "-u", "origin", "a", "b"]);
 
@@ -383,13 +383,13 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
     git(dir, &["reset", "-q", "--hard", "HEAD~1"]);
 
     git(dir, &["checkout", "-q", "b"]);
-    stack(dir).arg("sync").assert().success();
+    queue(dir).arg("sync").assert().success();
 
-    // Teammate's commit was pulled into `a`, and `b` restacked on top of it.
+    // Teammate's commit was pulled into `a`, and `b` requeued on top of it.
     assert_eq!(git_out(dir, &["show", "a:teammate.txt"]), "teammate.txt");
-    assert!(is_ancestor(dir, "a", "b"), "b not restacked onto updated a");
+    assert!(is_ancestor(dir, "a", "b"), "b not requeued onto updated a");
     assert_eq!(git_out(dir, &["show", "b:teammate.txt"]), "teammate.txt");
-    // Our restacked `b` was pushed back to the remote.
+    // Our requeued `b` was pushed back to the remote.
     assert_eq!(ls_remote(dir, "b"), git_out(dir, &["rev-parse", "b"]));
 }
 
@@ -400,15 +400,15 @@ fn sync_no_push_leaves_remote_untouched() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     git(dir, &["push", "-q", "-u", "origin", "a"]);
     let remote_a_before = ls_remote(dir, "a");
 
     // Add a local commit that would normally be pushed.
     commit(dir, "local.txt");
-    stack(dir).args(["sync", "--no-push"]).assert().success();
+    queue(dir).args(["sync", "--no-push"]).assert().success();
 
     // Remote `a` is unchanged; local is ahead.
     assert_eq!(ls_remote(dir, "a"), remote_a_before);
@@ -426,11 +426,11 @@ fn exists_at(dir: &Path, rev: &str, path: &str) -> bool {
 }
 
 #[test]
-fn split_divides_a_branch_into_a_stack() {
+fn split_divides_a_branch_into_a_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "feature"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "feature"]).assert().success();
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
     commit(dir, "c3.txt");
@@ -438,7 +438,7 @@ fn split_divides_a_branch_into_a_stack() {
     // Editor assigns commit 1 -> api, 2 -> service, 3 -> ui.
     // perl -i is portable across macOS/Linux; BSD `sed -i ''` differs from GNU.
     let editor = "perl -i -pe 's/^feature /api / if $. == 1; s/^feature /service / if $. == 2; s/^feature /ui / if $. == 3'";
-    stack(dir)
+    queue(dir)
         .env("GIT_EDITOR", editor)
         .arg("split")
         .assert()
@@ -470,7 +470,7 @@ fn split_divides_a_branch_into_a_stack() {
         assert!(exists_at(dir, "ui", f), "ui should include {f}");
     }
 
-    // Ends up checked out on the top of the new stack.
+    // Ends up checked out on the top of the new queue.
     assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "ui");
 }
 
@@ -478,11 +478,11 @@ fn split_divides_a_branch_into_a_stack() {
 fn describe_stores_and_clears_description() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
 
-    stack(dir)
+    queue(dir)
         .args(["describe", "-m", "Adds the API layer"])
         .assert()
         .success();
@@ -492,7 +492,7 @@ fn describe_stores_and_clears_description() {
     );
 
     // Empty description clears it.
-    stack(dir).args(["describe", "-m", ""]).assert().success();
+    queue(dir).args(["describe", "-m", ""]).assert().success();
     let cleared = StdCommand::new("git")
         .args(["config", "--local", "--get", "branch.a.queueDescription"])
         .current_dir(dir)
@@ -505,7 +505,7 @@ fn describe_stores_and_clears_description() {
 fn init_detects_and_records_trunk() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
     assert_eq!(git_out(dir, &["config", "--local", "queue.trunk"]), "main");
 }
 
@@ -513,11 +513,11 @@ fn init_detects_and_records_trunk() {
 fn create_builds_a_tracked_chain() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
 
-    stack(dir).args(["create", "feat-a"]).assert().success();
+    queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "feat-b"]).assert().success();
+    queue(dir).args(["create", "feat-b"]).assert().success();
     commit(dir, "b.txt");
 
     // We should now be on feat-b.
@@ -536,7 +536,7 @@ fn create_builds_a_tracked_chain() {
     );
 
     // Status lists both branches and marks the current one.
-    let out = stack(dir).arg("status").output().unwrap();
+    let out = queue(dir).arg("status").output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("feat-a"), "status missing feat-a:\n{text}");
     assert!(text.contains("feat-b"), "status missing feat-b:\n{text}");
@@ -547,21 +547,21 @@ fn create_builds_a_tracked_chain() {
 }
 
 #[test]
-fn prev_and_next_navigate_the_stack() {
+fn prev_and_next_navigate_the_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "feat-a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "feat-b"]).assert().success();
+    queue(dir).args(["create", "feat-b"]).assert().success();
     commit(dir, "b.txt");
 
-    stack(dir).arg("prev").assert().success();
+    queue(dir).arg("prev").assert().success();
     assert_eq!(
         git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
         "feat-a"
     );
-    stack(dir).arg("next").assert().success();
+    queue(dir).arg("next").assert().success();
     assert_eq!(
         git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
         "feat-b"
@@ -569,27 +569,27 @@ fn prev_and_next_navigate_the_stack() {
 }
 
 #[test]
-fn sync_restacks_onto_advanced_trunk() {
+fn sync_requeues_onto_advanced_trunk() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
 
-    stack(dir).args(["create", "feat-a"]).assert().success();
+    queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "feat-b"]).assert().success();
+    queue(dir).args(["create", "feat-b"]).assert().success();
     commit(dir, "b.txt");
 
-    // Advance trunk with a new commit that the stack doesn't have yet.
+    // Advance trunk with a new commit that the queue doesn't have yet.
     git(dir, &["checkout", "-q", "main"]);
     commit(dir, "trunk.txt");
 
-    // Restack (no remote -> warns and uses local trunk).
-    stack(dir).args(["sync", "--no-push"]).assert().success();
+    // Requeue (no remote -> warns and uses local trunk).
+    queue(dir).args(["sync", "--no-push"]).assert().success();
 
-    // feat-b must now contain the new trunk commit AND both stack commits,
+    // feat-b must now contain the new trunk commit AND both queue commits,
     // and trunk must be an ancestor of feat-b.
     git(dir, &["checkout", "-q", "feat-b"]);
     for f in ["trunk.txt", "a.txt", "b.txt"] {
@@ -611,13 +611,13 @@ fn sync_restacks_onto_advanced_trunk() {
 fn track_adopts_an_existing_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
 
     // Hand-made branch off main.
     git(dir, &["checkout", "-q", "-b", "hotfix"]);
     commit(dir, "hotfix.txt");
 
-    stack(dir).arg("track").assert().success();
+    queue(dir).arg("track").assert().success();
     assert_eq!(
         git_out(dir, &["config", "--local", "branch.hotfix.queueParent"]),
         "main"
@@ -628,11 +628,11 @@ fn track_adopts_an_existing_branch() {
 fn untrack_removes_metadata() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
-    stack(dir).args(["create", "feat-a"]).assert().success();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
 
-    stack(dir).arg("untrack").assert().success();
+    queue(dir).arg("untrack").assert().success();
     // Config key should be gone (git config --get exits non-zero).
     let missing = StdCommand::new("git")
         .args(["config", "--local", "--get", "branch.feat-a.queueParent"])
@@ -646,14 +646,14 @@ fn untrack_removes_metadata() {
 fn create_builds_a_queue_on_a_release_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
 
     // A release branch off main with its own commit becomes the base.
     git(dir, &["checkout", "-q", "-b", "release-1.2"]);
     commit(dir, "rel.txt");
-    stack(dir).args(["create", "fix-a"]).assert().success();
+    queue(dir).args(["create", "fix-a"]).assert().success();
     commit(dir, "a.txt");
-    stack(dir).args(["create", "fix-b"]).assert().success();
+    queue(dir).args(["create", "fix-b"]).assert().success();
     commit(dir, "b.txt");
 
     assert_eq!(
@@ -666,7 +666,7 @@ fn create_builds_a_queue_on_a_release_branch() {
     );
 
     // status shows the queue rooted at its base, not at trunk.
-    let out = stack(dir).arg("status").assert().success();
+    let out = queue(dir).arg("status").assert().success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
     assert!(stdout.contains("release-1.2 (base)"), "{stdout}");
     assert!(
@@ -676,23 +676,23 @@ fn create_builds_a_queue_on_a_release_branch() {
 
     // status also works from the base branch itself.
     git(dir, &["checkout", "-q", "release-1.2"]);
-    let out = stack(dir).arg("status").assert().success();
+    let out = queue(dir).arg("status").assert().success();
     let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
     assert!(stdout.contains("fix-b"), "{stdout}");
 }
 
 #[test]
-fn sync_restacks_queue_onto_advanced_base_branch() {
+fn sync_requeues_queue_onto_advanced_base_branch() {
     if skip_below(REPLAY, "git replay") {
         return;
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    stack(dir).arg("init").assert().success();
+    queue(dir).arg("init").assert().success();
 
     git(dir, &["checkout", "-q", "-b", "release-1.2"]);
     commit(dir, "rel.txt");
-    stack(dir).args(["create", "fix-a"]).assert().success();
+    queue(dir).args(["create", "fix-a"]).assert().success();
     commit(dir, "a.txt");
 
     // The base advances with a hotpatch the queue doesn't have yet.
@@ -700,7 +700,7 @@ fn sync_restacks_queue_onto_advanced_base_branch() {
     commit(dir, "hotpatch.txt");
     git(dir, &["checkout", "-q", "fix-a"]);
 
-    stack(dir).args(["sync", "--no-push"]).assert().success();
+    queue(dir).args(["sync", "--no-push"]).assert().success();
 
     git(dir, &["checkout", "-q", "fix-a"]);
     for f in ["rel.txt", "hotpatch.txt", "a.txt"] {
@@ -714,4 +714,41 @@ fn sync_restacks_queue_onto_advanced_base_branch() {
         !dir.join("rel.txt").exists(),
         "release commit leaked onto main"
     );
+}
+
+#[test]
+fn create_with_explicit_base_flag() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+
+    git(dir, &["checkout", "-q", "-b", "release-1.2"]);
+    commit(dir, "rel.txt");
+    git(dir, &["checkout", "-q", "main"]);
+
+    // Start a queue on the release branch without checking it out first.
+    queue(dir)
+        .args(["create", "fix-a", "--base", "release-1.2"])
+        .assert()
+        .success();
+
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "fix-a"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.fix-a.queueParent"]),
+        "release-1.2"
+    );
+    // The new branch starts at the base's tip, not at main's.
+    assert_eq!(
+        git_out(dir, &["rev-parse", "fix-a"]),
+        git_out(dir, &["rev-parse", "release-1.2"])
+    );
+
+    // A bogus base is rejected.
+    queue(dir)
+        .args(["create", "fix-b", "--base", "nope"])
+        .assert()
+        .failure();
 }

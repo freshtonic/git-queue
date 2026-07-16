@@ -1,11 +1,11 @@
-//! Pure rendering helpers: the status tree, PR titles, and the shared stack
+//! Pure rendering helpers: the status tree, PR titles, and the shared queue
 //! navigation block injected into every PR body. Kept side-effect-free so they
 //! can be unit-tested without git or the network.
 
 pub const BEGIN: &str = "<!-- git-queue:begin -->";
 pub const END: &str = "<!-- git-queue:end -->";
 
-/// One entry in a stack line for rendering purposes.
+/// One entry in a queue line for rendering purposes.
 pub struct Entry {
     pub branch: String,
     pub pr: Option<PrRef>,
@@ -38,7 +38,7 @@ pub struct GateStatus {
     pub target_url: Option<String>,
 }
 
-/// Plan the advisory merge-order statuses for a stack line (bottom-first): the
+/// Plan the advisory merge-order statuses for a queue line (bottom-first): the
 /// bottom-most OPEN PR gets a success status, every open PR above it gets a
 /// failure status naming the PR that must merge first. Merged/closed PRs and
 /// branches without a PR get nothing.
@@ -55,7 +55,7 @@ pub fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
                 plan.push(GateStatus {
                     branch: e.branch.clone(),
                     success: true,
-                    description: "Ready — bottom of the stack, merge this PR first".to_string(),
+                    description: "Ready — front of the queue, merge this PR first".to_string(),
                     target_url: None,
                 });
                 bottom = Some(pr);
@@ -63,7 +63,7 @@ pub fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
             Some(b) => plan.push(GateStatus {
                 branch: e.branch.clone(),
                 success: false,
-                description: format!("Do not merge — merge PR #{} first (stack order)", b.number),
+                description: format!("Do not merge — merge PR #{} first (queue order)", b.number),
                 target_url: (!b.url.is_empty()).then(|| b.url.clone()),
             }),
         }
@@ -90,7 +90,7 @@ fn state_emoji(state: &str) -> &'static str {
 }
 
 /// Numbered title: `[k/n] <subject>`, stripping any prior `[i/j] ` prefix so
-/// re-submitting doesn't stack prefixes.
+/// re-submitting doesn't pile up prefixes.
 pub fn numbered_title(subject: &str, index: usize, total: usize) -> String {
     format!("[{}/{}] {}", index + 1, total, strip_prefix(subject))
 }
@@ -108,19 +108,19 @@ fn strip_prefix(subject: &str) -> &str {
     s
 }
 
-/// Build the shared stack-navigation block: a formatted, linked list of every
+/// Build the shared queue-navigation block: a formatted, linked list of every
 /// PR in the line in merge order (bottom first), with the current PR bolded and
 /// marked. Each entry links to the PR's URL when known.
 pub fn nav_block(line: &[Entry], current: &str, base: &str) -> String {
     let total = line.len();
     let mut lines = vec![
         format!(
-            "### 📚 Stacked PR &nbsp;·&nbsp; {} of {}",
+            "### 📚 Queued PR &nbsp;·&nbsp; {} of {}",
             position_of(line, current),
             total
         ),
         String::new(),
-        "Part of a stack. The PRs merge in FIFO order — the numbered order below, #1 \
+        "Part of a queue. The PRs merge in FIFO order — the numbered order below, #1 \
          first. Merging one supersedes the PRs after it until the author runs \
          `git queue sync` (rebases the rest onto the merged base) and `git queue submit` \
          (retargets their PRs)."
@@ -176,7 +176,7 @@ fn position_of(line: &[Entry], current: &str) -> usize {
         .map_or(0, |i| i + 1)
 }
 
-/// Compose a PR body: the stack nav block PREPENDED, then the branch's
+/// Compose a PR body: the queue nav block PREPENDED, then the branch's
 /// description below it. Any previous nav block (BEGIN..END) is stripped first,
 /// so re-submitting is idempotent.
 pub fn compose_body(description: &str, nav: &str) -> String {
@@ -203,7 +203,7 @@ pub fn strip_block(body: &str) -> String {
     }
 }
 
-/// Render the status tree, top of stack first, marking `current`.
+/// Render the status tree, top of queue first, marking `current`.
 /// `entries` is bottom-first; `base` is the branch the line merges into
 /// (labelled "trunk" when it is the trunk, "base" otherwise).
 pub fn status_tree(

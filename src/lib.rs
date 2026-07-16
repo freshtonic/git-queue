@@ -1,12 +1,12 @@
-//! `git queue` — manage stacks of dependent branches and their numbered PRs.
+//! `git queue` — manage queues of dependent branches and their numbered PRs.
 
 mod commands;
 mod gh;
 mod git;
 mod meta;
+mod queue;
 mod render;
-mod restack;
-mod stack;
+mod requeue;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
@@ -16,12 +16,13 @@ use std::path::PathBuf;
     name = "git-queue",
     bin_name = "git queue",
     version,
-    about = "Manage stacks of dependent branches and their numbered pull requests",
-    long_about = "A stack is an ordered series of branches where branch N is built on top of \
-                  branch N-1, giving the PRs a well-defined FIFO merge order — a queue. \
-                  git-queue tracks that order, keeps the stack rebased on trunk, and opens \
-                  numbered, cross-linked pull requests — one per branch. Installed as both \
-                  `git-queue` and `git-q`, so `git queue …` and `git q …` are equivalent."
+    about = "Manage queues of dependent branches and their numbered pull requests",
+    long_about = "A PR queue is an ordered series of dependent branches: each branch builds on \
+                  the one before it, and the PRs merge in FIFO order — front of the queue \
+                  first. git-queue tracks that order, keeps the queue rebased on its base \
+                  branch, and opens numbered, cross-linked pull requests — one per branch. \
+                  Installed as both `git-queue` and `git-q`, so `git queue …` and `git q …` \
+                  are equivalent."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -36,15 +37,18 @@ enum Command {
         #[arg(long)]
         trunk: Option<String>,
     },
-    /// Create a new branch stacked on top of the current one.
+    /// Create a new branch queued after the current one.
     Create {
         /// Name of the new branch.
         name: String,
+        /// Start the queue on this base branch instead of the current branch.
+        #[arg(long)]
+        base: Option<String>,
     },
-    /// Show the current stack and its PR status.
+    /// Show the current queue and its PR status.
     #[command(visible_aliases = ["ls", "list"])]
     Status,
-    /// Split the current branch's commits into a stack of branches.
+    /// Split the current branch's commits into a queue of branches.
     Split,
     /// Describe what the current branch/PR is about (becomes the PR body).
     Describe {
@@ -52,21 +56,21 @@ enum Command {
         #[arg(short = 'm', long)]
         message: Option<String>,
     },
-    /// Adopt the current branch into a stack.
+    /// Adopt the current branch into a queue.
     Track {
         /// Parent branch (defaults to trunk).
         #[arg(long)]
         parent: Option<String>,
     },
-    /// Forget the current branch's stack metadata.
+    /// Forget the current branch's queue metadata.
     Untrack,
-    /// Check out the child branch (up the stack).
+    /// Check out the child branch (toward the back of the queue).
     #[command(visible_alias = "up")]
     Next,
-    /// Check out the parent branch (down the stack).
+    /// Check out the parent branch (toward the front of the queue).
     #[command(visible_alias = "down")]
     Prev,
-    /// Make a new commit on the current branch and restack its descendants.
+    /// Make a new commit on the current branch and requeue its descendants.
     Commit {
         /// Commit message (opens the editor if omitted).
         #[arg(short = 'm', long)]
@@ -79,31 +83,32 @@ enum Command {
         /// Commit to reword.
         commit: Option<String>,
     },
-    /// Restack the current branch's descendants onto its tip.
-    Restack {
-        /// Quiet on no-op / non-stack branches (used by hooks).
+    /// Requeue the current branch's descendants onto its tip.
+    #[command(visible_alias = "restack")]
+    Requeue {
+        /// Quiet on no-op / non-queue branches (used by hooks).
         #[arg(long)]
         auto: bool,
     },
-    /// Install or remove hooks that auto-restack after plain commits.
+    /// Install or remove hooks that auto-requeue after plain commits.
     Hooks {
         #[command(subcommand)]
         action: HooksAction,
     },
-    /// Pull remote commits, restack onto the latest trunk, and push (with lease).
+    /// Pull remote commits, requeue onto the latest base branch, and push (with lease).
     Sync {
         /// Skip pushing the branches back to the remote.
         #[arg(long)]
         no_push: bool,
     },
-    /// Push the stack and open/update its numbered PRs.
+    /// Push the queue and open/update its numbered PRs.
     #[command(visible_alias = "push")]
     Submit {
         /// Open new PRs as drafts.
         #[arg(long)]
         draft: bool,
     },
-    /// Close every open (non-merged) PR in the current stack.
+    /// Close every open (non-merged) PR in the current queue.
     Yank,
     /// Report whether merge-order signalling is set up (read-only).
     Doctor,
@@ -120,9 +125,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum HooksAction {
-    /// Install the auto-restack hooks.
+    /// Install the auto-requeue hooks.
     Install,
-    /// Remove the auto-restack hooks.
+    /// Remove the auto-requeue hooks.
     Uninstall,
 }
 
@@ -151,7 +156,7 @@ pub fn run() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Init { trunk } => commands::init(trunk),
-        Command::Create { name } => commands::create(&name),
+        Command::Create { name, base } => commands::create(&name, base.as_deref()),
         Command::Status => commands::status(),
         Command::Split => commands::split(),
         Command::Describe { message } => commands::describe(message),
@@ -167,7 +172,7 @@ pub fn run() {
         Command::Commit { message } => commands::commit(message),
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),
-        Command::Restack { auto } => commands::restack(auto),
+        Command::Requeue { auto } => commands::requeue(auto),
         Command::Hooks { action } => match action {
             HooksAction::Install => commands::hooks_install(),
             HooksAction::Uninstall => commands::hooks_uninstall(),

@@ -9,9 +9,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-/// Env var set on child git processes while git-queue is restacking, so our
+/// Env var set on child git processes while git-queue is requeueing, so our
 /// own hooks can detect the reentry and skip (avoiding infinite recursion).
-pub const GUARD_ENV: &str = "GIT_QUEUE_IN_RESTACK";
+pub const GUARD_ENV: &str = "GIT_QUEUE_IN_REQUEUE";
 
 /// Run `git <args>` and capture trimmed stdout. Errors if git exits non-zero.
 pub fn out(args: &[&str]) -> Result<String> {
@@ -201,7 +201,7 @@ pub fn has_conflict_markers(rev: &str) -> bool {
 /// Make a normal commit on the current branch.
 pub fn commit(message: Option<&str>) -> Result<()> {
     // Suppress our own hooks during the internal commit; git-queue does the
-    // restack itself right after.
+    // requeue itself right after.
     let mut cmd = Command::new("git");
     cmd.env(GUARD_ENV, "1");
     match message {
@@ -248,17 +248,17 @@ pub fn history_reword(commit: &str) -> Result<bool> {
     Ok(!status.success())
 }
 
-/// Outcome of a `git replay` restack attempt.
+/// Outcome of a `git replay` requeue attempt.
 pub enum Replayed {
     Applied,
     /// Replay could not apply cleanly (typically a conflict); message is stderr.
     Failed(String),
 }
 
-/// Restack every branch contained in `ranges` onto `onto` in one operation via
+/// Requeue every branch contained in `ranges` onto `onto` in one operation via
 /// `git replay --contained`, applying the emitted ref updates atomically with
 /// `git update-ref --stdin`. No worktree is touched.
-pub fn replay_restack(onto: &str, ranges: &[String]) -> Result<Replayed> {
+pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
     let mut args: Vec<String> = vec![
         "replay".into(),
         "--onto".into(),
@@ -300,7 +300,7 @@ pub fn replay_restack(onto: &str, ranges: &[String]) -> Result<Replayed> {
     Ok(Replayed::Applied)
 }
 
-/// Fallback restack of a single branch that NEVER leaves an interactive
+/// Fallback requeue of a single branch that NEVER leaves an interactive
 /// conflict state: on conflict it stages the marker-filled files, commits them,
 /// and continues, so it always finishes. `--update-refs` moves any intermediate
 /// branch refs in the rebased range. Detect persisted markers afterwards with
@@ -339,7 +339,7 @@ pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            bail!("restack of `{branch}` did not converge; aborted the rebase");
+            bail!("requeue of `{branch}` did not converge; aborted the rebase");
         }
         // Stage the conflict markers as the "resolution".
         let mut add = Command::new("git");

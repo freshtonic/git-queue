@@ -1,8 +1,8 @@
 //! Implementations of each `git queue` subcommand.
 
+use crate::queue::Queue;
 use crate::render::{self, Entry, PrRef};
-use crate::stack::Stack;
-use crate::{gh, git, meta, restack};
+use crate::{gh, git, meta, requeue};
 use anyhow::{bail, Context, Result};
 
 /// Advertise merge order with commit statuses: the bottom-most open PR's head
@@ -36,7 +36,8 @@ pub fn doctor() -> Result<()> {
                 "    `git queue submit` posts a `{}` commit status on every open PR:",
                 render::GATE_CONTEXT
             );
-            println!("    green \u{2713} on the bottom PR, red \u{2717} (\u{201c}merge PR #N first\u{201d}) on the ones above it.");
+            println!("    green \u{2713} on the PR at the front of the queue, red \u{2717} (\u{201c}merge PR #N first\u{201d})");
+            println!("    on the ones behind it.");
         }
         Some(other) => {
             println!("  ! gate: unknown mode `{other}` \u{2014} run `git queue protect` to (re)enable status mode");
@@ -63,7 +64,7 @@ pub fn doctor() -> Result<()> {
 /// base-chaining: it shows up in every PR's checks UI (red ✗ with "merge PR #N
 /// first") while leaving the PRs as normal, reviewable, non-draft PRs and
 /// never blocking pushes. Anything that actually disables the merge button
-/// requires base-branch rules, which also gate pushes to the stack branches.
+/// requires base-branch rules, which also gate pushes to the queue branches.
 pub fn protect() -> Result<()> {
     git::ensure_repo()?;
     meta::set_gate("status")?;
@@ -72,11 +73,11 @@ pub fn protect() -> Result<()> {
         "`git queue submit` now posts a `{}` commit status on every open",
         render::GATE_CONTEXT
     );
-    println!("PR in the stack: green \u{2713} on the bottom (mergeable) PR, red \u{2717} \u{201c}merge PR #N");
+    println!("PR in the queue: green \u{2713} on the front (mergeable) PR, red \u{2717} \u{201c}merge PR #N");
     println!(
         "first\u{201d} on every PR above it. As PRs land, `git queue sync` + `git queue submit`"
     );
-    println!("promote the new bottom PR to green.\n");
+    println!("promote the PR now at the front to green.\n");
     println!("No GitHub setup or admin rights needed, and PRs stay normal (no drafts). The gate");
     println!("is advisory: the red \u{2717} warns reviewers, but the merge button still works.");
     println!("Run `git queue submit` now to apply it.");
@@ -95,18 +96,27 @@ pub fn init(trunk: Option<String>) -> Result<()> {
     }
     meta::set_trunk(&trunk)?;
     println!("Initialized git-queue. Trunk is `{trunk}`.");
-    println!("Create your first stacked branch with:  git queue create <name>");
+    println!("Create your first queued branch with:  git queue create <name>");
     Ok(())
 }
 
-/// `git queue create <name>` — new branch on top of the current one.
-pub fn create(name: &str) -> Result<()> {
+/// `git queue create <name> [--base <branch>]` — new branch queued after the
+/// current one (or on an explicit `--base` branch).
+pub fn create(name: &str, base: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
     if git::branch_exists(name) {
         bail!("branch `{name}` already exists");
     }
-    let parent = git::current_branch()?;
+    let parent = match base {
+        Some(b) => {
+            if !git::branch_exists(b) {
+                bail!("base branch `{b}` does not exist");
+            }
+            b.to_string()
+        }
+        None => git::current_branch()?,
+    };
     let parent_sha = git::rev_parse(&parent)?;
 
     git::create_branch(name, &parent)?;
@@ -115,32 +125,32 @@ pub fn create(name: &str) -> Result<()> {
     git::checkout(name)?;
 
     if parent == trunk {
-        println!("Created `{name}` on trunk `{trunk}`. It is the bottom of a new stack.");
+        println!("Created `{name}` on trunk `{trunk}`. It is the front of a new queue.");
     } else if meta::parent(&parent).is_none() {
-        println!("Created `{name}` on `{parent}`. It is the bottom of a new queue;");
+        println!("Created `{name}` on `{parent}`. It is the front of a new queue;");
         println!("its PR will target `{parent}` (the merge base), not `{trunk}`.");
     } else {
-        println!("Created `{name}` on top of `{parent}`.");
+        println!("Created `{name}` after `{parent}` in the queue.");
     }
     println!("Make your commits, then `git queue submit` to open PRs.");
     Ok(())
 }
 
-/// `git queue split` — split the current branch's commits into a stack of
+/// `git queue split` — split the current branch's commits into a queue of
 /// branches. Opens a `rebase -i`-style editor where each commit is prefixed
 /// with the branch it should belong to; consecutive commits sharing a name
-/// become one branch, and the groups stack in order (file order = merge order).
+/// become one branch, and the groups queue in order (file order = merge order).
 pub fn split() -> Result<()> {
     git::ensure_repo()?;
     if !git::worktree_clean() {
         bail!("working tree has uncommitted changes; commit or stash them before splitting");
     }
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let branch = git::current_branch()?;
-    let base = if stack.is_tracked(&branch) {
-        stack.parent_of(&branch).unwrap().to_string()
+    let base = if queue.is_tracked(&branch) {
+        queue.parent_of(&branch).unwrap().to_string()
     } else {
-        stack.trunk.clone()
+        queue.trunk.clone()
     };
 
     let commits = git::commits_between(&base, &branch)?;
@@ -183,7 +193,7 @@ pub fn split() -> Result<()> {
     // If the original branch wasn't reused as a segment, it still points at the
     // old tip; leave it but tell the user.
     let reused = segments.iter().any(|(n, _)| n == &branch);
-    println!("Split `{branch}` into {} stacked branches:", segments.len());
+    println!("Split `{branch}` into {} queued branches:", segments.len());
     let mut p = base.clone();
     for (name, _) in &segments {
         println!("  {p} ← {name}");
@@ -200,7 +210,7 @@ pub fn split() -> Result<()> {
 /// pairs in commit order.
 fn edit_split_plan(branch: &str, commits: &[(String, String)]) -> Result<Vec<(String, String)>> {
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
-    let path = dir.join("STACK_SPLIT");
+    let path = dir.join("QUEUE_SPLIT");
     let mut body = String::new();
     for (sha, subject) in commits {
         body.push_str(&format!(
@@ -210,9 +220,9 @@ fn edit_split_plan(branch: &str, commits: &[(String, String)]) -> Result<Vec<(St
     }
     let template = format!(
         "{body}\n\
-         # Split `{branch}` into a stack. The first token on each line is the branch\n\
+         # Split `{branch}` into a queue. The first token on each line is the branch\n\
          # that commit belongs to — edit it. Consecutive commits with the SAME branch\n\
-         # become one PR; groups stack top-to-bottom in this file (top = merges first).\n\
+         # become one PR; groups queue top-to-bottom in this file (top = merges first).\n\
          # Do not reorder or delete commit lines. Lines starting with '#' are ignored.\n"
     );
     std::fs::write(&path, template)?;
@@ -315,7 +325,7 @@ pub fn track(parent: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `git queue untrack` — forget the current branch's stack metadata.
+/// `git queue untrack` — forget the current branch's queue metadata.
 pub fn untrack() -> Result<()> {
     git::ensure_repo()?;
     let branch = git::current_branch()?;
@@ -325,14 +335,14 @@ pub fn untrack() -> Result<()> {
 }
 
 /// `git queue describe [-m <text>]` — set the description of what the current
-/// branch/PR is about. It becomes the body of the PR (below the stack list) on
+/// branch/PR is about. It becomes the body of the PR (below the queue list) on
 /// the next `submit`. Opens `$EDITOR` when `-m` is omitted.
 pub fn describe(message: Option<String>) -> Result<()> {
     git::ensure_repo()?;
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let branch = git::current_branch()?;
-    if !stack.is_tracked(&branch) {
-        bail!("`{branch}` is not a stack branch; `git queue create`/`track` it first");
+    if !queue.is_tracked(&branch) {
+        bail!("`{branch}` is not a queue branch; `git queue create`/`track` it first");
     }
     let text = match message {
         Some(m) => m,
@@ -353,10 +363,10 @@ pub fn describe(message: Option<String>) -> Result<()> {
 /// the edited text (lines starting with `#` are stripped as comments).
 fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
-    let path = dir.join("STACK_DESCRIBE");
+    let path = dir.join("QUEUE_DESCRIBE");
     let template = format!(
         "{}\n\n# Describe what `{branch}` is about. This becomes the PR body\n\
-         # (below the auto-generated stack list). Lines starting with '#' are ignored.\n",
+         # (below the auto-generated queue list). Lines starting with '#' are ignored.\n",
         existing.unwrap_or("")
     );
     std::fs::write(&path, template)?;
@@ -384,20 +394,20 @@ fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
 /// `git queue status`
 pub fn status() -> Result<()> {
     git::ensure_repo()?;
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let current = git::current_branch()?;
 
     // Choose a line to show: the current branch's; or, standing on trunk or a
     // base branch, the first queue rooted here.
-    let anchor = if stack.is_tracked(&current) {
+    let anchor = if queue.is_tracked(&current) {
         current.clone()
-    } else if let Some(child) = stack.children(&current).into_iter().next() {
+    } else if let Some(child) = queue.children(&current).into_iter().next() {
         child
-    } else if current == stack.trunk {
-        match stack.roots().into_iter().next() {
+    } else if current == queue.trunk {
+        match queue.roots().into_iter().next() {
             Some(r) => r,
             None => {
-                println!("No stacks yet. Create one with `git queue create <name>`.");
+                println!("No queues yet. Create one with `git queue create <name>`.");
                 return Ok(());
             }
         }
@@ -406,7 +416,7 @@ pub fn status() -> Result<()> {
         return Ok(());
     };
 
-    let line = stack.line_through(&anchor)?;
+    let line = queue.line_through(&anchor)?;
     let entries = build_entries(&line.branches)?;
     let fork = line.fork_at.as_deref();
     print!(
@@ -415,7 +425,7 @@ pub fn status() -> Result<()> {
             &entries,
             &current,
             &line.base,
-            line.base == stack.trunk,
+            line.base == queue.trunk,
             fork
         )
     );
@@ -438,11 +448,11 @@ pub fn prev() -> Result<()> {
 /// `git queue next` / `up` — check out the child branch.
 pub fn next() -> Result<()> {
     git::ensure_repo()?;
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let branch = git::current_branch()?;
-    let kids = stack.children(&branch);
+    let kids = queue.children(&branch);
     match kids.len() {
-        0 => bail!("`{branch}` is at the top of its stack (no children)"),
+        0 => bail!("`{branch}` is at the top of its queue (no children)"),
         1 => git::checkout(&kids[0]),
         _ => {
             let list = kids.join("\n  ");
@@ -451,8 +461,8 @@ pub fn next() -> Result<()> {
     }
 }
 
-/// `git queue sync [--no-push]` — pull in commits others pushed to stack
-/// branches, restack the whole stack onto the latest trunk, and (by default)
+/// `git queue sync [--no-push]` — pull in commits others pushed to queue
+/// branches, requeue the whole queue onto the latest trunk, and (by default)
 /// push every branch back with `--force-with-lease` so remote work is never
 /// clobbered.
 pub fn sync(no_push: bool) -> Result<()> {
@@ -461,7 +471,7 @@ pub fn sync(no_push: bool) -> Result<()> {
         bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git queue sync`");
     }
     std::env::set_var(git::GUARD_ENV, "1"); // suppress our hooks during internal git ops
-    let mut stack = Stack::load()?;
+    let mut queue = Queue::load()?;
     let remote = meta::remote();
     let original = git::current_branch()?;
     let started_clean = git::worktree_clean();
@@ -473,7 +483,7 @@ pub fn sync(no_push: bool) -> Result<()> {
 
     // Bring every line's local base (trunk, release branches, ...) up to its
     // remote tip. Bases are treated as remote-canonical, like trunk always was.
-    for base in stack.bases() {
+    for base in queue.bases() {
         if let Some(remote_base) = git::remote_trunk(&remote, &base) {
             let tip = git::rev_parse(&remote_base)?;
             if original == base {
@@ -488,17 +498,17 @@ pub fn sync(no_push: bool) -> Result<()> {
     // (and manual branch deletion) removes the branch's git config, including
     // our `queueParent`, leaving its children pointing at a branch that no
     // longer exists. Reparent those onto trunk.
-    stack = heal_dangling_parents(stack)?;
+    queue = heal_dangling_parents(queue)?;
 
     // Prune branches whose PRs have merged: reparent their children onto the
     // nearest surviving ancestor (trunk, once the bottom lands) and drop them
-    // from the stack. The restack below then rebases the survivors onto trunk.
+    // from the queue. The requeue below then rebases the survivors onto trunk.
     if gh::ready() {
-        stack = prune_merged(stack)?;
+        queue = prune_merged(queue)?;
     }
 
-    // Pull in commits teammates pushed to our stack branches (bottom-up).
-    for branch in stack.topo_order() {
+    // Pull in commits teammates pushed to our queue branches (bottom-up).
+    for branch in queue.topo_order() {
         match incorporate_remote(&branch, &remote, &original)? {
             Some(RemoteAction::FastForwarded) => {
                 println!("Pulled remote commits into `{branch}` (fast-forward).")
@@ -511,15 +521,15 @@ pub fn sync(no_push: bool) -> Result<()> {
     }
 
     // Detach HEAD while refs move: `git replay` updates refs in place without
-    // touching the worktree, so restacking the checked-out branch would leave
+    // touching the worktree, so requeueing the checked-out branch would leave
     // the worktree stale. Detaching makes the checkout below a real one.
     git::detach_head()?;
 
     // Reconcile the whole forest onto updated parents (new engine).
-    let report = restack::restack_forest(&stack)?;
+    let report = requeue::requeue_forest(&queue)?;
 
-    // Return to where we started before pushing. Restacking moves refs without
-    // touching the worktree, so if `original` itself was restacked the files on
+    // Return to where we started before pushing. Requeueing moves refs without
+    // touching the worktree, so if `original` itself was requeued the files on
     // disk are stale; with a clean starting tree it is safe to snap them to the
     // branch tip.
     git::checkout_quiet(&original)?;
@@ -534,21 +544,21 @@ pub fn sync(no_push: bool) -> Result<()> {
 
     // Push every branch back, with lease, unless asked not to.
     if !no_push {
-        for branch in stack.topo_order() {
+        for branch in queue.topo_order() {
             println!("Pushing `{branch}`...");
             git::push(&remote, &branch)?;
         }
     }
 
     if !report.conflicted.is_empty() {
-        restack::warn_conflicts(&report.conflicted);
+        requeue::warn_conflicts(&report.conflicted);
     } else {
-        let bases = stack.bases();
+        let bases = queue.bases();
         match bases.as_slice() {
             [] => println!("Nothing to sync yet."),
-            [one] => println!("Stack is in sync with `{one}`."),
+            [one] => println!("Queue is in sync with `{one}`."),
             many => println!(
-                "Stacks are in sync with their bases: {}.",
+                "Queues are in sync with their bases: {}.",
                 many.iter()
                     .map(|b| format!("`{b}`"))
                     .collect::<Vec<_>>()
@@ -560,38 +570,38 @@ pub fn sync(no_push: bool) -> Result<()> {
 }
 
 /// Reparent tracked branches whose parent is gone (not trunk, not tracked, and
-/// no such branch exists) onto trunk. Returns the reloaded stack if anything
+/// no such branch exists) onto trunk. Returns the reloaded queue if anything
 /// changed.
-fn heal_dangling_parents(stack: Stack) -> Result<Stack> {
+fn heal_dangling_parents(queue: Queue) -> Result<Queue> {
     let mut changed = false;
-    for b in stack.topo_order() {
-        let parent = match stack.parent_of(&b) {
+    for b in queue.topo_order() {
+        let parent = match queue.parent_of(&b) {
             Some(p) => p.to_string(),
             None => continue,
         };
-        if stack.is_tracked(&parent) || git::branch_exists(&parent) {
+        if queue.is_tracked(&parent) || git::branch_exists(&parent) {
             continue;
         }
-        meta::set_parent(&b, &stack.trunk)?;
+        meta::set_parent(&b, &queue.trunk)?;
         eprintln!(
             "note: `{b}`'s parent `{parent}` is gone (merged?); reparented onto `{}`.",
-            stack.trunk
+            queue.trunk
         );
         changed = true;
     }
     if changed {
-        Stack::load()
+        Queue::load()
     } else {
-        Ok(stack)
+        Ok(queue)
     }
 }
 
 /// Reparent the children of any MERGED-PR branch onto their nearest surviving
-/// ancestor, untrack the merged branches, and return the reloaded stack.
-fn prune_merged(stack: Stack) -> Result<Stack> {
+/// ancestor, untrack the merged branches, and return the reloaded queue.
+fn prune_merged(queue: Queue) -> Result<Queue> {
     use std::collections::HashSet;
     let mut merged: HashSet<String> = HashSet::new();
-    for b in stack.topo_order() {
+    for b in queue.topo_order() {
         // Best-effort: ignore lookup failures (e.g. not a GitHub repo).
         if let Some(pr) = gh::find(&b).ok().flatten() {
             if pr.state == "MERGED" {
@@ -600,20 +610,20 @@ fn prune_merged(stack: Stack) -> Result<Stack> {
         }
     }
     if merged.is_empty() {
-        return Ok(stack);
+        return Ok(queue);
     }
     // Reparent survivors whose parent has merged (walk up past merged ancestors).
-    for b in stack.topo_order() {
+    for b in queue.topo_order() {
         if merged.contains(&b) {
             continue;
         }
-        let current_parent = stack.parent_of(&b).unwrap().to_string();
+        let current_parent = queue.parent_of(&b).unwrap().to_string();
         let mut new_parent = current_parent.clone();
         while merged.contains(&new_parent) {
-            new_parent = stack
+            new_parent = queue
                 .parent_of(&new_parent)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| stack.trunk.clone());
+                .unwrap_or_else(|| queue.trunk.clone());
         }
         if new_parent != current_parent {
             meta::set_parent(&b, &new_parent)?;
@@ -621,9 +631,9 @@ fn prune_merged(stack: Stack) -> Result<Stack> {
     }
     for b in &merged {
         meta::untrack(b);
-        println!("`{b}` has merged — dropped from the stack, children reparented.");
+        println!("`{b}` has merged — dropped from the queue, children reparented.");
     }
-    Stack::load()
+    Queue::load()
 }
 
 enum RemoteAction {
@@ -662,19 +672,19 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
     Ok(Some(RemoteAction::Rebased))
 }
 
-/// `git queue submit [--draft]` — push the current stack line and open/update
+/// `git queue submit [--draft]` — push the current queue line and open/update
 /// its numbered PRs.
 pub fn submit(draft: bool) -> Result<()> {
     git::ensure_repo()?;
     if !gh::ready() {
         bail!("`gh` is not installed or not authenticated; run `gh auth login`");
     }
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let current = git::current_branch()?;
-    if !stack.is_tracked(&current) {
+    if !queue.is_tracked(&current) {
         bail!("`{current}` is not tracked; run `git queue create` or `git queue track` first");
     }
-    let line = stack.line_through(&current)?;
+    let line = queue.line_through(&current)?;
     if let Some(fork) = &line.fork_at {
         eprintln!("warning: `{fork}` has multiple children; submitting only this line.");
     }
@@ -698,7 +708,7 @@ pub fn submit(draft: bool) -> Result<()> {
         .map(|b| gh::find(b))
         .collect::<Result<_>>()?;
     // Only MERGED PRs are "frozen" (left untouched). A CLOSED PR in the active
-    // line is revived below — GitHub closes a stacked PR when its base branch is
+    // line is revived below — GitHub closes a queued PR when its base branch is
     // deleted (e.g. `--delete-branch` on the PR below), and we must not skip it.
     let frozen: Vec<bool> = existing
         .iter()
@@ -798,7 +808,7 @@ pub fn submit(draft: bool) -> Result<()> {
         }
     }
     if gated {
-        println!("Merge gate active: the bottom PR's `{}` status is \u{2713}; the rest are \u{2717} until it lands.", render::GATE_CONTEXT);
+        println!("Merge gate active: the front PR's `{}` status is \u{2713}; the rest are \u{2717} until it lands.", render::GATE_CONTEXT);
     }
     Ok(())
 }
@@ -812,19 +822,19 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
     }
 }
 
-/// `git queue yank` — close every open (non-merged) PR in the current stack.
+/// `git queue yank` — close every open (non-merged) PR in the current queue.
 /// Merged PRs are left alone; local branches and metadata are untouched.
 pub fn yank() -> Result<()> {
     git::ensure_repo()?;
     if !gh::ready() {
         bail!("`gh` is not installed or not authenticated; run `gh auth login`");
     }
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let current = git::current_branch()?;
-    if !stack.is_tracked(&current) {
-        bail!("`{current}` is not a stack branch");
+    if !queue.is_tracked(&current) {
+        bail!("`{current}` is not a queue branch");
     }
-    let line = stack.line_through(&current)?;
+    let line = queue.line_through(&current)?;
     let mut closed = 0;
     for b in &line.branches {
         if let Some(pr) = gh::find(b)? {
@@ -836,29 +846,29 @@ pub fn yank() -> Result<()> {
         }
     }
     match closed {
-        0 => println!("No open PRs in this stack to close."),
+        0 => println!("No open PRs in this queue to close."),
         n => println!("Closed {n} open PR(s). Merged PRs and local branches are untouched."),
     }
     Ok(())
 }
 
 /// `git queue commit [-m <msg>]` — make a NEW commit on the current branch,
-/// then restack all descendants onto the new tip (`git replay`, with a
+/// then requeue all descendants onto the new tip (`git replay`, with a
 /// marker-persisting fallback on conflict).
 pub fn commit(message: Option<String>) -> Result<()> {
     git::ensure_repo()?;
-    // Suppress our own hooks for the internal git calls; we restack explicitly.
+    // Suppress our own hooks for the internal git calls; we requeue explicitly.
     std::env::set_var(git::GUARD_ENV, "1");
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let current = git::current_branch()?;
 
     git::commit(message.as_deref())?;
 
-    if !stack.is_tracked(&current) {
-        return Ok(()); // not a stack branch; just a normal commit
+    if !queue.is_tracked(&current) {
+        return Ok(()); // not a queue branch; just a normal commit
     }
-    let report = restack::propagate(&stack, &current)?;
-    finish_restack(&report, &current);
+    let report = requeue::propagate(&queue, &current)?;
+    finish_requeue(&report, &current);
     Ok(())
 }
 
@@ -906,36 +916,36 @@ pub fn reword(commit: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `git queue restack` — restack descendants of the current branch onto its
+/// `git queue requeue` — requeue descendants of the current branch onto its
 /// current tip. `--auto` (used by hooks) stays quiet when there's nothing to do
-/// and on non-stack branches.
-pub fn restack(auto: bool) -> Result<()> {
+/// and on non-queue branches.
+pub fn requeue(auto: bool) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
-    let stack = Stack::load()?;
+    let queue = Queue::load()?;
     let current = git::current_branch()?;
-    if !stack.is_tracked(&current) && current != stack.trunk {
+    if !queue.is_tracked(&current) && current != queue.trunk {
         if auto {
             return Ok(());
         }
-        bail!("`{current}` is not part of a stack");
+        bail!("`{current}` is not part of a queue");
     }
-    let report = restack::propagate(&stack, &current)?;
+    let report = requeue::propagate(&queue, &current)?;
     if auto && report.is_empty() && report.conflicted.is_empty() {
         return Ok(());
     }
-    finish_restack(&report, &current);
+    finish_requeue(&report, &current);
     Ok(())
 }
 
-/// Report the outcome of a restack (loud warning if markers were persisted).
-fn finish_restack(report: &restack::Report, branch: &str) {
+/// Report the outcome of a requeue (loud warning if markers were persisted).
+fn finish_requeue(report: &requeue::Report, branch: &str) {
     if !report.conflicted.is_empty() {
-        restack::warn_conflicts(&report.conflicted);
+        requeue::warn_conflicts(&report.conflicted);
     } else if !report.is_empty() {
         println!(
-            "Restacked {} descendant branch(es) of `{branch}`.",
-            report.restacked.len()
+            "Requeueed {} descendant branch(es) of `{branch}`.",
+            report.requeued.len()
         );
     }
 }
@@ -943,9 +953,9 @@ fn finish_restack(report: &restack::Report, branch: &str) {
 /// After git-history rewrote `branch`'s history, its descendants' stored parent
 /// anchors are stale; refresh them to the new parent tips.
 fn refresh_descendant_anchors(branch: &str) -> Result<()> {
-    let stack = Stack::load()?;
-    for b in stack.descendants_topo(branch) {
-        if let Some(parent) = stack.parent_of(&b) {
+    let queue = Queue::load()?;
+    for b in queue.descendants_topo(branch) {
+        if let Some(parent) = queue.parent_of(&b) {
             let ptip = git::rev_parse(parent)?;
             meta::set_parent_sha(&b, &ptip)?;
         }
@@ -964,13 +974,13 @@ fn hook_snippet(only_amend: bool) -> String {
     };
     format!(
         "{HOOK_BEGIN}\n\
-         [ -n \"$GIT_QUEUE_IN_RESTACK\" ] && exit 0\n\
-         {gate}command -v git-queue >/dev/null 2>&1 && git-queue restack --auto || true\n\
+         [ -n \"$GIT_QUEUE_IN_REQUEUE\" ] && exit 0\n\
+         {gate}command -v git-queue >/dev/null 2>&1 && git-queue requeue --auto || true\n\
          {HOOK_END}\n"
     )
 }
 
-/// `git queue hooks install` — make plain `git commit`/amend auto-restack.
+/// `git queue hooks install` — make plain `git commit`/amend auto-requeue.
 pub fn hooks_install() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
@@ -978,7 +988,7 @@ pub fn hooks_install() -> Result<()> {
     install_hook(&dir.join("post-commit"), &hook_snippet(false))?;
     install_hook(&dir.join("post-rewrite"), &hook_snippet(true))?;
     println!("Installed git-queue hooks. Plain `git commit` and `git commit --amend` on a");
-    println!("stack branch will now auto-restack descendants.");
+    println!("queue branch will now auto-requeue descendants.");
     Ok(())
 }
 
