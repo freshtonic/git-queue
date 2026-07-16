@@ -641,3 +641,77 @@ fn untrack_removes_metadata() {
         .unwrap();
     assert!(!missing.status.success(), "queueParent should be unset");
 }
+
+#[test]
+fn create_builds_a_queue_on_a_release_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+
+    // A release branch off main with its own commit becomes the base.
+    git(dir, &["checkout", "-q", "-b", "release-1.2"]);
+    commit(dir, "rel.txt");
+    stack(dir).args(["create", "fix-a"]).assert().success();
+    commit(dir, "a.txt");
+    stack(dir).args(["create", "fix-b"]).assert().success();
+    commit(dir, "b.txt");
+
+    assert_eq!(
+        git_out(dir, &["config", "branch.fix-a.queueParent"]),
+        "release-1.2"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.fix-b.queueParent"]),
+        "fix-a"
+    );
+
+    // status shows the queue rooted at its base, not at trunk.
+    let out = stack(dir).arg("status").assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(stdout.contains("release-1.2 (base)"), "{stdout}");
+    assert!(
+        stdout.contains("fix-a") && stdout.contains("fix-b"),
+        "{stdout}"
+    );
+
+    // status also works from the base branch itself.
+    git(dir, &["checkout", "-q", "release-1.2"]);
+    let out = stack(dir).arg("status").assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(stdout.contains("fix-b"), "{stdout}");
+}
+
+#[test]
+fn sync_restacks_queue_onto_advanced_base_branch() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    stack(dir).arg("init").assert().success();
+
+    git(dir, &["checkout", "-q", "-b", "release-1.2"]);
+    commit(dir, "rel.txt");
+    stack(dir).args(["create", "fix-a"]).assert().success();
+    commit(dir, "a.txt");
+
+    // The base advances with a hotpatch the queue doesn't have yet.
+    git(dir, &["checkout", "-q", "release-1.2"]);
+    commit(dir, "hotpatch.txt");
+    git(dir, &["checkout", "-q", "fix-a"]);
+
+    stack(dir).args(["sync", "--no-push"]).assert().success();
+
+    git(dir, &["checkout", "-q", "fix-a"]);
+    for f in ["rel.txt", "hotpatch.txt", "a.txt"] {
+        assert!(dir.join(f).exists(), "fix-a missing {f} after sync");
+    }
+    assert!(is_ancestor(dir, "release-1.2", "fix-a"));
+    // Trunk stays out of the queue: main must not be an ancestor of the new
+    // base commits' line beyond the fork point (rel.txt is not on main).
+    git(dir, &["checkout", "-q", "main"]);
+    assert!(
+        !dir.join("rel.txt").exists(),
+        "release commit leaked onto main"
+    );
+}

@@ -116,6 +116,9 @@ pub fn create(name: &str) -> Result<()> {
 
     if parent == trunk {
         println!("Created `{name}` on trunk `{trunk}`. It is the bottom of a new stack.");
+    } else if meta::parent(&parent).is_none() {
+        println!("Created `{name}` on `{parent}`. It is the bottom of a new queue;");
+        println!("its PR will target `{parent}` (the merge base), not `{trunk}`.");
     } else {
         println!("Created `{name}` on top of `{parent}`.");
     }
@@ -384,9 +387,12 @@ pub fn status() -> Result<()> {
     let stack = Stack::load()?;
     let current = git::current_branch()?;
 
-    // Choose a line to show: the current branch's, or the first root's.
+    // Choose a line to show: the current branch's; or, standing on trunk or a
+    // base branch, the first queue rooted here.
     let anchor = if stack.is_tracked(&current) {
         current.clone()
+    } else if let Some(child) = stack.children(&current).into_iter().next() {
+        child
     } else if current == stack.trunk {
         match stack.roots().into_iter().next() {
             Some(r) => r,
@@ -405,7 +411,13 @@ pub fn status() -> Result<()> {
     let fork = line.fork_at.as_deref();
     print!(
         "{}",
-        render::status_tree(&entries, &current, &stack.trunk, fork)
+        render::status_tree(
+            &entries,
+            &current,
+            &line.base,
+            line.base == stack.trunk,
+            fork
+        )
     );
     Ok(())
 }
@@ -452,19 +464,23 @@ pub fn sync(no_push: bool) -> Result<()> {
     let mut stack = Stack::load()?;
     let remote = meta::remote();
     let original = git::current_branch()?;
+    let started_clean = git::worktree_clean();
 
     println!("Fetching `{remote}`...");
     if let Err(e) = git::fetch(&remote) {
         eprintln!("warning: fetch failed; syncing against local refs only: {e}");
     }
 
-    // Bring local trunk up to the remote trunk tip.
-    if let Some(remote_trunk) = git::remote_trunk(&remote, &stack.trunk) {
-        let tip = git::rev_parse(&remote_trunk)?;
-        if original == stack.trunk {
-            let _ = git::merge_ff_only(&remote_trunk);
-        } else {
-            let _ = git::force_ref(&stack.trunk, &tip);
+    // Bring every line's local base (trunk, release branches, ...) up to its
+    // remote tip. Bases are treated as remote-canonical, like trunk always was.
+    for base in stack.bases() {
+        if let Some(remote_base) = git::remote_trunk(&remote, &base) {
+            let tip = git::rev_parse(&remote_base)?;
+            if original == base {
+                let _ = git::merge_ff_only(&remote_base);
+            } else {
+                let _ = git::force_ref(&base, &tip);
+            }
         }
     }
 
@@ -494,11 +510,27 @@ pub fn sync(no_push: bool) -> Result<()> {
         }
     }
 
+    // Detach HEAD while refs move: `git replay` updates refs in place without
+    // touching the worktree, so restacking the checked-out branch would leave
+    // the worktree stale. Detaching makes the checkout below a real one.
+    git::detach_head()?;
+
     // Reconcile the whole forest onto updated parents (new engine).
     let report = restack::restack_forest(&stack)?;
 
-    // Return to where we started before pushing.
+    // Return to where we started before pushing. Restacking moves refs without
+    // touching the worktree, so if `original` itself was restacked the files on
+    // disk are stale; with a clean starting tree it is safe to snap them to the
+    // branch tip.
     git::checkout_quiet(&original)?;
+    if started_clean {
+        git::reset_hard_head()?;
+    } else {
+        eprintln!(
+            "note: the worktree had local changes when sync started; if `{original}` was \
+             rebased, run `git reset --hard` once your changes are safe."
+        );
+    }
 
     // Push every branch back, with lease, unless asked not to.
     if !no_push {
@@ -511,7 +543,18 @@ pub fn sync(no_push: bool) -> Result<()> {
     if !report.conflicted.is_empty() {
         restack::warn_conflicts(&report.conflicted);
     } else {
-        println!("Stack is in sync with `{}`.", stack.trunk);
+        let bases = stack.bases();
+        match bases.as_slice() {
+            [] => println!("Nothing to sync yet."),
+            [one] => println!("Stack is in sync with `{one}`."),
+            many => println!(
+                "Stacks are in sync with their bases: {}.",
+                many.iter()
+                    .map(|b| format!("`{b}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
     }
     Ok(())
 }
@@ -526,7 +569,7 @@ fn heal_dangling_parents(stack: Stack) -> Result<Stack> {
             Some(p) => p.to_string(),
             None => continue,
         };
-        if parent == stack.trunk || stack.is_tracked(&parent) || git::branch_exists(&parent) {
+        if stack.is_tracked(&parent) || git::branch_exists(&parent) {
             continue;
         }
         meta::set_parent(&b, &stack.trunk)?;
@@ -640,7 +683,7 @@ pub fn submit(draft: bool) -> Result<()> {
 
     let base_of = |i: usize| -> String {
         if i == 0 {
-            stack.trunk.clone()
+            line.base.clone()
         } else {
             branches[i - 1].clone()
         }
@@ -732,7 +775,7 @@ pub fn submit(draft: bool) -> Result<()> {
         };
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
-        let nav = render::nav_block(&entries, b, &stack.trunk);
+        let nav = render::nav_block(&entries, b, &line.base);
         let description = meta::description(b).unwrap_or_default();
         let body = render::compose_body(&description, &nav);
         gh::edit(number, &base_of(i), &title, &body)?;

@@ -111,7 +111,7 @@ fn strip_prefix(subject: &str) -> &str {
 /// Build the shared stack-navigation block: a formatted, linked list of every
 /// PR in the line in merge order (bottom first), with the current PR bolded and
 /// marked. Each entry links to the PR's URL when known.
-pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
+pub fn nav_block(line: &[Entry], current: &str, base: &str) -> String {
     let total = line.len();
     let mut lines = vec![
         format!(
@@ -130,8 +130,8 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
     // Bottom-first: index 0 merges first.
     for (i, e) in line.iter().enumerate() {
         let is_current = e.branch == current;
-        let base = if i == 0 {
-            trunk
+        let target = if i == 0 {
+            base
         } else {
             line[i - 1].branch.as_str()
         };
@@ -150,7 +150,7 @@ pub fn nav_block(line: &[Entry], current: &str, trunk: &str) -> String {
             Some(p) => format!("#{} `{}`", p.number, e.branch),
             None => format!("`{}` _(not submitted)_", e.branch),
         };
-        let arrow = format!(" → `{base}`");
+        let arrow = format!(" → `{target}`");
         let line_str = if is_current {
             format!("{}. {status}**{label}{arrow}** &nbsp;👈 **this PR**", i + 1)
         } else {
@@ -204,11 +204,13 @@ pub fn strip_block(body: &str) -> String {
 }
 
 /// Render the status tree, top of stack first, marking `current`.
-/// `entries` is bottom-first; `trunk` is shown as the base.
+/// `entries` is bottom-first; `base` is the branch the line merges into
+/// (labelled "trunk" when it is the trunk, "base" otherwise).
 pub fn status_tree(
     entries: &[Entry],
     current: &str,
-    trunk: &str,
+    base: &str,
+    base_is_trunk: bool,
     fork_note: Option<&str>,
 ) -> String {
     let mut out = String::new();
@@ -231,7 +233,8 @@ pub fn status_tree(
         out.push_str(&format!("{node} {}{pr}{warn}{here}\n", e.branch));
     }
     out.push_str("┴\n");
-    out.push_str(&format!("  {trunk} (trunk)\n"));
+    let label = if base_is_trunk { "trunk" } else { "base" };
+    out.push_str(&format!("  {base} ({label})\n"));
     if let Some(f) = fork_note {
         out.push_str(&format!("\nnote: `{f}` has multiple children; showing one line. Use `git queue status` from another branch to see the others.\n"));
     }

@@ -99,6 +99,12 @@ pub fn checkout_quiet(branch: &str) -> Result<()> {
     run(&["checkout", "-q", branch])
 }
 
+/// Snap index and worktree to HEAD. Discards local changes — callers must
+/// ensure the worktree was clean before the refs moved under it.
+pub fn reset_hard_head() -> Result<()> {
+    run(&["reset", "-q", "--hard"])
+}
+
 /// Create `name` at `start_point` without checking it out.
 pub fn create_branch(name: &str, start_point: &str) -> Result<()> {
     run(&["branch", name, start_point])

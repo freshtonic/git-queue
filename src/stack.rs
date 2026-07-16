@@ -1,8 +1,10 @@
 //! The stack domain model, reconstructed from git-config metadata.
 //!
-//! Branches form a forest rooted at `trunk` via parent pointers. A *stack line*
-//! is the linear chain from just above trunk up to a leaf. Numbered PRs and
-//! restacking operate on stack lines.
+//! Branches form a forest via parent pointers. A chain ends at its *base*: the
+//! first untracked ancestor. That is usually trunk, but any branch can be a
+//! base — a queue started on a release branch merges into that release branch.
+//! A *stack line* is the linear chain from just above its base up to a leaf.
+//! Numbered PRs and restacking operate on stack lines.
 
 use crate::meta;
 use anyhow::{bail, Result};
@@ -48,19 +50,43 @@ impl Stack {
         kids
     }
 
-    /// Branches directly on trunk (bottoms of stacks), sorted.
+    /// Bottoms of all queues: tracked branches whose parent is untracked
+    /// (i.e. sits directly on a base — trunk or otherwise), sorted.
     pub fn roots(&self) -> Vec<String> {
-        self.children(&self.trunk)
+        let mut roots: Vec<String> = self
+            .parents
+            .iter()
+            .filter(|(_, p)| !self.parents.contains_key(*p))
+            .map(|(b, _)| b.clone())
+            .collect();
+        roots.sort();
+        roots
     }
 
-    /// Chain from just-above-trunk up to and including `branch`, bottom-first.
-    /// Errors on a cycle or a parent chain that never reaches trunk.
+    /// Every distinct base branch (untracked parents of tracked branches),
+    /// sorted and deduplicated.
+    pub fn bases(&self) -> Vec<String> {
+        let mut bases: Vec<String> = self
+            .parents
+            .values()
+            .filter(|p| !self.parents.contains_key(*p))
+            .cloned()
+            .collect();
+        bases.sort();
+        bases.dedup();
+        bases
+    }
+
+    /// Chain from just-above-the-base up to and including `branch`,
+    /// bottom-first. The base is the first untracked ancestor. Errors on a
+    /// cycle.
     pub fn downstack(&self, branch: &str) -> Result<Vec<String>> {
         let mut chain = vec![branch.to_string()];
         let mut cur = branch.to_string();
         for _ in 0..MAX_DEPTH {
             match self.parents.get(&cur) {
-                Some(p) if *p == self.trunk => {
+                // An untracked parent is the line's base: stop below it.
+                Some(p) if !self.parents.contains_key(p) => {
                     chain.reverse();
                     return Ok(chain);
                 }
@@ -68,10 +94,8 @@ impl Stack {
                     chain.push(p.clone());
                     cur = p.clone();
                 }
-                None => bail!(
-                    "branch `{branch}` is not connected to trunk `{}` (missing parent for `{cur}`)",
-                    self.trunk
-                ),
+                // Only reachable on the first step: an untracked `branch`.
+                None => bail!("`{branch}` is not a tracked queue branch"),
             }
         }
         bail!("parent chain for `{branch}` is too deep or cyclic");
@@ -82,6 +106,10 @@ impl Stack {
     /// the first fork; `fork_at` reports where, so callers can warn.
     pub fn line_through(&self, branch: &str) -> Result<Line> {
         let mut branches = self.downstack(branch)?;
+        let base = self
+            .parent_of(&branches[0])
+            .expect("bottom branch is tracked, so it has a parent")
+            .to_string();
         let mut fork_at = None;
         loop {
             let top = branches.last().unwrap().clone();
@@ -95,7 +123,11 @@ impl Stack {
                 }
             }
         }
-        Ok(Line { branches, fork_at })
+        Ok(Line {
+            branches,
+            base,
+            fork_at,
+        })
     }
 
     /// All descendants of `branch` (children, grandchildren, ...), topologically
@@ -147,8 +179,11 @@ impl Stack {
 
 /// A linear stack line.
 pub struct Line {
-    /// Bottom-first branch names (excludes trunk).
+    /// Bottom-first branch names (excludes the base).
     pub branches: Vec<String>,
+    /// The branch this line merges into: the bottom branch's (untracked)
+    /// parent. Usually trunk, but any branch can be a base.
+    pub base: String,
     /// Set if the line stopped early because a branch had multiple children.
     pub fork_at: Option<String>,
 }
