@@ -84,22 +84,6 @@ pub fn protect() -> Result<()> {
     Ok(())
 }
 
-/// `git queue init [--trunk <branch>]`
-pub fn init(trunk: Option<String>) -> Result<()> {
-    git::ensure_repo()?;
-    let trunk = match trunk {
-        Some(t) => t,
-        None => meta::trunk()?, // detect main/master
-    };
-    if !git::branch_exists(&trunk) {
-        bail!("trunk branch `{trunk}` does not exist");
-    }
-    meta::set_trunk(&trunk)?;
-    println!("Initialized git-queue. Trunk is `{trunk}`.");
-    println!("Create your first queued branch with:  git queue create <name>");
-    Ok(())
-}
-
 /// `git queue create <name> [--base <branch>]` — new branch queued after the
 /// current one (or on an explicit `--base` branch).
 pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Result<()> {

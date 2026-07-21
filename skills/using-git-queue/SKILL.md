@@ -125,7 +125,6 @@ promote the next one to green.
 ## Worked example
 
 ```sh
-git queue init                       # record trunk (auto-detects main/master)
 
 git checkout main
 git queue create types               # front of the queue

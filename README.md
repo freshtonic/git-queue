@@ -80,8 +80,6 @@ Without the hooks, use `git queue commit` / `git queue amend` explicitly.
 ## Workflow
 
 ```sh
-git queue init                 # record the trunk (auto-detects main/master)
-
 git checkout main
 git queue create api           # new branch on trunk; make commits
 git queue create service       # next in the queue, after `api`; make commits
@@ -133,7 +131,6 @@ git queue create fix-a --base release-1.2            # base named explicitly
 
 | Command | Description |
 |---|---|
-| `git queue init [--trunk <b>]` | Record the trunk branch for this repo. |
 | `git queue create <name> [--base <b>]` | Create `<name>` queued after the current branch (or on base `<b>`) and track it. |
 | `git queue split [--queue <n>] [--delete-original]` | Split the current branch's commits into a queue (editor assigns commits to branches; they are created as `queue/<name>/<segment>`). If no segment reuses the original branch name, offers to delete the now-redundant old branch. |
 | `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Stable-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
@@ -277,7 +274,7 @@ State lives in the repository's own git config (nothing outside git):
 
 | Key | Meaning |
 |---|---|
-| `queue.trunk` | Trunk branch name. |
+| `queue.trunk` | Trunk override. Normally unset: git-queue uses the remote's default branch (`origin/HEAD`), falling back to `main`/`master`. |
 | `queue.remote` | Remote to push/fetch (default `origin`). |
 | `branch.<n>.queueParent` | Parent branch of `<n>`. |
 | `branch.<n>.queueParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |

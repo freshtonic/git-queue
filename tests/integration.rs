@@ -109,7 +109,6 @@ fn commit_on_mid_branch_requeues_descendants() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "b"]).assert().success();
@@ -138,7 +137,6 @@ fn commit_requeues_a_fork_in_one_go() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "b1"]).assert().success();
@@ -168,7 +166,6 @@ fn amend_folds_staged_changes_and_updates_descendants() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "b"]).assert().success();
@@ -195,7 +192,6 @@ fn conflicting_requeue_persists_markers_and_flags_branch() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "shared.txt", "base\n");
     git(dir, &["commit", "-q", "-m", "a: add shared"]);
@@ -233,7 +229,6 @@ fn amend_on_conflict_errors_and_preserves_staged_work() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "db"]).assert().success();
     stage(dir, "shared.txt", "db-original\n");
     git(dir, &["commit", "-q", "-m", "db: add shared"]);
@@ -268,7 +263,6 @@ fn resolving_markers_clears_the_status_warning() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "db"]).assert().success();
     stage(dir, "f.txt", "base\n");
     git(dir, &["commit", "-q", "-m", "db base"]);
@@ -317,7 +311,6 @@ fn hooks_autorequeue_on_plain_commit() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "b"]).assert().success();
@@ -373,7 +366,6 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "b"]).assert().success();
@@ -413,7 +405,6 @@ fn sync_no_push_leaves_remote_untouched() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     git(dir, &["push", "-q", "-u", "origin", "a"]);
@@ -442,7 +433,6 @@ fn exists_at(dir: &Path, rev: &str, path: &str) -> bool {
 fn split_divides_a_branch_into_a_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "feature"]).assert().success();
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
@@ -500,7 +490,6 @@ fn split_divides_a_branch_into_a_queue() {
 fn describe_stores_and_clears_description() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
 
@@ -538,18 +527,46 @@ fn describe_stores_and_clears_description() {
 }
 
 #[test]
-fn init_detects_and_records_trunk() {
+fn trunk_is_autodetected_without_any_setup() {
+    // main/master fallback: no init step exists, create just works.
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
-    assert_eq!(git_out(dir, &["config", "--local", "queue.trunk"]), "main");
+    queue(dir).args(["create", "a"]).assert().success();
+    assert_eq!(git_out(dir, &["config", "branch.a.queueParent"]), "main");
+
+    // Unusual trunk name: the remote's default branch (origin/HEAD) wins.
+    let tmp2 = TempDir::new().unwrap();
+    let dir2 = tmp2.path();
+    git(dir2, &["init", "-q", "-b", "develop"]);
+    git(dir2, &["config", "user.email", "t@example.com"]);
+    git(dir2, &["config", "user.name", "T"]);
+    commit(dir2, "seed.txt");
+    let remote = TempDir::new().unwrap();
+    git(remote.path(), &["init", "--bare", "-q", "-b", "develop"]);
+    git(
+        dir2,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(dir2, &["push", "-q", "-u", "origin", "develop"]);
+    git(
+        dir2,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/develop",
+        ],
+    );
+    queue(dir2).args(["create", "fix"]).assert().success();
+    assert_eq!(
+        git_out(dir2, &["config", "branch.fix.queueParent"]),
+        "develop"
+    );
 }
 
 #[test]
 fn create_builds_a_tracked_chain() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
@@ -586,7 +603,6 @@ fn create_builds_a_tracked_chain() {
 fn prev_and_next_navigate_the_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
     queue(dir).args(["create", "feat-b"]).assert().success();
@@ -611,7 +627,6 @@ fn sync_requeues_onto_advanced_trunk() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
@@ -647,7 +662,6 @@ fn sync_requeues_onto_advanced_trunk() {
 fn track_adopts_an_existing_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     // Hand-made branch off main.
     git(dir, &["checkout", "-q", "-b", "hotfix"]);
@@ -664,7 +678,6 @@ fn track_adopts_an_existing_branch() {
 fn untrack_removes_metadata() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "feat-a"]).assert().success();
     commit(dir, "a.txt");
 
@@ -682,7 +695,6 @@ fn untrack_removes_metadata() {
 fn create_builds_a_queue_on_a_release_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     // A release branch off main with its own commit becomes the base.
     git(dir, &["checkout", "-q", "-b", "release-1.2"]);
@@ -724,7 +736,6 @@ fn sync_requeues_queue_onto_advanced_base_branch() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     git(dir, &["checkout", "-q", "-b", "release-1.2"]);
     commit(dir, "rel.txt");
@@ -756,7 +767,6 @@ fn sync_requeues_queue_onto_advanced_base_branch() {
 fn create_with_explicit_base_flag() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
 
     git(dir, &["checkout", "-q", "-b", "release-1.2"]);
     commit(dir, "rel.txt");
@@ -796,7 +806,6 @@ fn sync_prunes_tracking_refs_of_branches_deleted_on_the_remote() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a.txt");
     git(dir, &["push", "-q", "-u", "origin", "a"]);
@@ -838,7 +847,6 @@ fn subjects(dir: &Path, range: &str) -> Vec<String> {
 fn move_reorders_commits_within_a_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "one.txt");
     let c1 = sha(dir, "HEAD");
@@ -860,7 +868,6 @@ fn move_reorders_commits_within_a_branch() {
 fn move_commit_to_a_different_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "a1.txt");
     let a1 = sha(dir, "HEAD");
@@ -886,7 +893,6 @@ fn move_commit_to_a_different_branch() {
 fn move_an_inclusive_range_of_commits() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "f1.txt");
     let f1 = sha(dir, "HEAD");
@@ -911,7 +917,6 @@ fn move_an_inclusive_range_of_commits() {
 fn move_persists_conflict_markers() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     std::fs::write(dir.join("c.txt"), "one\n").unwrap();
     git(dir, &["add", "c.txt"]);
@@ -940,7 +945,6 @@ fn move_persists_conflict_markers() {
 fn move_rejects_commits_outside_the_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     let seed = sha(dir, "main");
     queue(dir).args(["create", "a"]).assert().success();
     commit(dir, "x.txt");
@@ -967,7 +971,6 @@ fn sync_does_not_pull_back_our_own_stale_remote_state() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
     git(dir, &["add", "f.txt"]);
@@ -1012,7 +1015,6 @@ fn queue_id_of(dir: &Path, rev: &str) -> String {
 fn commit_msg_hook_stamps_queue_ids_on_queue_branches_only() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     queue(dir).args(["hooks", "install"]).assert().success();
 
@@ -1047,7 +1049,6 @@ fn queue_commit_stamps_an_id_without_hooks() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "a.txt", "a");
     queue(dir)
@@ -1072,7 +1073,6 @@ fn sync_pulls_teammate_commits_but_not_stale_copies_of_ours() {
     }
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f.txt", "v1\n");
     queue(dir)
@@ -1118,7 +1118,6 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "a.txt", "a");
     queue(dir)
@@ -1165,7 +1164,6 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
 fn track_stamp_ids_flag_stamps_adopted_commits() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     git(dir, &["checkout", "-q", "-b", "adopted"]);
     commit(dir, "one.txt");
     commit(dir, "two.txt");
@@ -1189,7 +1187,6 @@ fn track_stamp_ids_flag_stamps_adopted_commits() {
 fn track_without_stamping_keeps_hashes() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     git(dir, &["checkout", "-q", "-b", "adopted"]);
     commit(dir, "one.txt");
     let before = sha(dir, "adopted");
@@ -1215,7 +1212,6 @@ fn log_shows_indented_commits_with_id_prefixes() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "a1.txt", "a1");
     queue(dir)
@@ -1258,7 +1254,6 @@ fn log_shows_indented_commits_with_id_prefixes() {
 fn move_accepts_queued_commit_ids() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f1.txt", "f1");
     queue(dir)
@@ -1305,7 +1300,6 @@ fn reword_accepts_queued_commit_ids() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f1.txt", "f1");
     queue(dir)
@@ -1334,7 +1328,6 @@ fn reword_accepts_queued_commit_ids() {
 fn track_split_divides_an_adopted_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     git(dir, &["checkout", "-q", "-b", "big"]);
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
@@ -1372,7 +1365,6 @@ fn track_split_divides_an_adopted_branch() {
 fn split_cleans_up_an_unreused_original_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     git(dir, &["checkout", "-q", "-b", "big"]);
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
@@ -1407,7 +1399,6 @@ fn split_cleans_up_an_unreused_original_branch() {
 fn split_keeps_the_original_by_default_when_not_a_tty() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     git(dir, &["checkout", "-q", "-b", "big"]);
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
@@ -1434,7 +1425,6 @@ fn split_keeps_the_original_by_default_when_not_a_tty() {
 fn ls_lists_queues_most_recently_touched_first() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "alpha"]).assert().success();
     commit(dir, "a.txt");
     git(dir, &["checkout", "-q", "main"]);
@@ -1468,7 +1458,6 @@ fn ls_lists_queues_most_recently_touched_first() {
 fn name_shows_and_renames_the_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "work"]).assert().success();
     commit(dir, "w.txt");
 
@@ -1494,7 +1483,6 @@ fn checkout_amend_preserves_id_and_rebases_the_rest() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f1.txt", "v1\n");
     queue(dir)
@@ -1541,7 +1529,6 @@ fn checkout_plain_commit_inserts_mid_queue_with_hooks() {
     }
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f1.txt", "f1");
     queue(dir)
@@ -1582,7 +1569,6 @@ fn checkout_plain_commit_inserts_mid_queue_with_hooks() {
 fn checkout_validates_membership_and_cleanliness() {
     let tmp = new_repo();
     let dir = tmp.path();
-    queue(dir).arg("init").assert().success();
     let trunk_commit = sha(dir, "main");
     queue(dir).args(["create", "a"]).assert().success();
     stage(dir, "f1.txt", "f1");
@@ -1613,7 +1599,10 @@ fn man_page_documents_real_commands_in_detail() {
     );
     // Real names, detailed sections, and argument docs.
     assert!(roff.contains(".SH COMMANDS"), "missing COMMANDS section");
-    assert!(roff.contains("git queue init"), "missing real command name");
+    assert!(
+        roff.contains("git queue create"),
+        "missing real command name"
+    );
     assert!(
         roff.contains("\\-\\-new\\-parent <NEW_PARENT>") && !roff.contains("[\\-\\-new\\-parent"),
         "required option must not render as optional"

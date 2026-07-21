@@ -46,21 +46,29 @@ pub fn set_gate(mode: &str) -> Result<()> {
     config_set("queue.gate", mode)
 }
 
-/// Configured trunk, or a best-effort detection of `main`/`master`.
+/// The trunk branch: an explicit `queue.trunk` config wins, then the remote's
+/// default branch (origin/HEAD), then `main`/`master`.
 pub fn trunk() -> Result<String> {
     if let Some(t) = config_get("queue.trunk") {
         return Ok(t);
+    }
+    if let Ok(head) = git::out(&[
+        "symbolic-ref",
+        "--short",
+        &format!("refs/remotes/{}/HEAD", remote()),
+    ]) {
+        if let Some(name) = head.split_once('/').map(|(_, n)| n) {
+            if git::branch_exists(name) {
+                return Ok(name.to_string());
+            }
+        }
     }
     for candidate in ["main", "master"] {
         if git::branch_exists(candidate) {
             return Ok(candidate.to_string());
         }
     }
-    bail!("no trunk configured and neither `main` nor `master` exists; run `git queue init --trunk <branch>`");
-}
-
-pub fn set_trunk(name: &str) -> Result<()> {
-    config_set("queue.trunk", name)
+    bail!("cannot determine the trunk branch; set it with `git config queue.trunk <branch>`");
 }
 
 fn parent_key(branch: &str) -> String {

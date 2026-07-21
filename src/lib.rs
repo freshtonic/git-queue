@@ -32,15 +32,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Configure the trunk branch for this repository.
-    #[command(
-        long_about = "Records which branch is trunk (`queue.trunk` in the repo's git config), auto-detecting `main` or `master` when `--trunk` is omitted. Trunk is the default merge target for new queues and the reference point for landed-work detection. Run once per repository; re-run any time to change it. Nothing else is written and no commits are touched."
-    )]
-    Init {
-        /// Trunk branch (defaults to main/master if present).
-        #[arg(long)]
-        trunk: Option<String>,
-    },
     /// Create a new branch queued after the current one.
     #[command(
         long_about = "Creates `<name>` at the current branch's tip (or at `--base <branch>`'s tip) and records it as the next branch of the queue. Extending a queue inherits its name; starting a new one asks for a name (or takes `--queue`). The front PR of a queue targets its base branch — which is how queues can be built on release or bugfix branches, not just trunk. Make commits, then `git queue submit` opens the numbered PRs."
@@ -410,7 +401,6 @@ fn commands_section(cmd: &clap::Command) -> String {
 pub fn run() {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Init { trunk } => commands::init(trunk),
         Command::Create { name, base, queue } => {
             commands::create(&name, base.as_deref(), queue.as_deref())
         }
