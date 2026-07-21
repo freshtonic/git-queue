@@ -1083,6 +1083,41 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
     }
 }
 
+/// Resolve a user-supplied commit-ish for queue commands: a git revision, or
+/// a `Queued-Commit-Id` — full, or a unique prefix such as the abbreviated
+/// form `git queue log` displays. Id lookup is scoped to the line's commits.
+fn resolve_queue_rev(line: &Line, arg: &str) -> Result<String> {
+    let arg = arg.trim();
+    if arg.starts_with("q-") {
+        let top = line.branches.last().unwrap();
+        let ids = git::queue_ids(&format!("{}..{top}", line.base))?;
+        let matches: Vec<&(String, Option<String>)> = ids
+            .iter()
+            .filter(|(_, id)| {
+                id.as_deref()
+                    .map(|i| i == arg || i.starts_with(arg))
+                    .unwrap_or(false)
+            })
+            .collect();
+        match matches.as_slice() {
+            [(sha, _)] => return Ok(sha.clone()),
+            [] => {
+                // Fall through: maybe it's a real revision that happens to
+                // start with `q-`.
+                if let Ok(sha) = git::rev_parse(arg) {
+                    return Ok(sha);
+                }
+                bail!("no commit in this queue has Queued-Commit-Id `{arg}`");
+            }
+            many => bail!(
+                "Queued-Commit-Id prefix `{arg}` is ambiguous ({} matches); use more characters",
+                many.len()
+            ),
+        }
+    }
+    git::rev_parse(arg).with_context(|| format!("`{arg}` is not a commit"))
+}
+
 /// `git queue move <commit>[..<commit>] --new-parent <commit>` — relocate a
 /// commit (or an inclusive range of consecutive commits) to directly follow
 /// `--new-parent`, within one PR or across PRs. The whole line is rewritten in
@@ -1116,9 +1151,7 @@ pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
         .enumerate()
         .map(|(i, (sha, _))| (sha.as_str(), i))
         .collect();
-    let resolve = |rev: &str| -> Result<String> {
-        git::rev_parse(rev.trim()).with_context(|| format!("`{rev}` is not a commit"))
-    };
+    let resolve = |rev: &str| -> Result<String> { resolve_queue_rev(&line, rev) };
 
     // <commit> or an inclusive <first>..<last> range.
     let (first, last) = match spec.split_once("..") {
@@ -1434,7 +1467,18 @@ pub fn reword(commit: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
     let current = git::current_branch()?;
-    let target = commit.unwrap_or_else(|| "HEAD".to_string());
+    let target = match commit {
+        Some(c) if c.starts_with("q-") => {
+            let queue = Queue::load()?;
+            if !queue.is_tracked(&current) {
+                bail!("`{current}` is not a queue branch; ids can only name queued commits");
+            }
+            let line = queue.line_through(&current)?;
+            resolve_queue_rev(&line, &c)?
+        }
+        Some(c) => c,
+        None => "HEAD".to_string(),
+    };
     if git::history_reword(&target)? {
         bail!("reword aborted (rewriting `{target}` would conflict with a descendant); nothing changed");
     }

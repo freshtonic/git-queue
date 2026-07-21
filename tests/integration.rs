@@ -1228,3 +1228,79 @@ fn log_shows_indented_commits_with_id_prefixes() {
     let ptext = String::from_utf8_lossy(&plain.get_output().stdout).to_string();
     assert!(!ptext.contains("add a1"), "{ptext}");
 }
+
+#[test]
+fn move_accepts_queued_commit_ids() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f1.txt", "f1");
+    queue(dir)
+        .args(["commit", "-m", "add f1"])
+        .assert()
+        .success();
+    let id1 = queue_id_of(dir, "HEAD");
+    stage(dir, "f2.txt", "f2");
+    queue(dir)
+        .args(["commit", "-m", "add f2"])
+        .assert()
+        .success();
+    let id2 = queue_id_of(dir, "HEAD");
+    stage(dir, "f3.txt", "f3");
+    queue(dir)
+        .args(["commit", "-m", "add f3"])
+        .assert()
+        .success();
+    let id3 = queue_id_of(dir, "HEAD");
+
+    // Range of abbreviated id .. full id, new parent by full id.
+    let abbrev1: String = id1.chars().take(10).collect();
+    queue(dir)
+        .args(["move", &format!("{abbrev1}..{id2}"), "--new-parent", &id3])
+        .assert()
+        .success();
+    assert_eq!(subjects(dir, "main..a"), vec!["add f3", "add f1", "add f2"]);
+
+    // Unknown and ambiguous ids fail cleanly.
+    queue(dir)
+        .args(["move", "q-zzzzzzzz", "--new-parent", &id3])
+        .assert()
+        .failure();
+    queue(dir)
+        .args(["move", "q-", "--new-parent", &id3])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn reword_accepts_queued_commit_ids() {
+    if skip_below(HISTORY, "git history") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f1.txt", "f1");
+    queue(dir)
+        .args(["commit", "-m", "add f1"])
+        .assert()
+        .success();
+    let id1 = queue_id_of(dir, "HEAD");
+    stage(dir, "f2.txt", "f2");
+    queue(dir)
+        .args(["commit", "-m", "add f2"])
+        .assert()
+        .success();
+
+    // Reword the first commit, addressed by its id; GIT_EDITOR=true keeps the
+    // message as-is — success proves the id resolved to the right commit.
+    queue(dir)
+        .env("GIT_EDITOR", "true")
+        .args(["reword", &id1])
+        .assert()
+        .success();
+    assert_eq!(queue_id_of(dir, "a~1"), id1, "id must survive the reword");
+    assert_eq!(subjects(dir, "main..a"), vec!["add f1", "add f2"]);
+}

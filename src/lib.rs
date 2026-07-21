@@ -89,16 +89,18 @@ enum Command {
     Amend,
     /// Rewrite a commit message and update all descendants (defaults to HEAD).
     Reword {
-        /// Commit to reword.
+        /// Commit to reword: a revision or a Queued-Commit-Id (unique prefix ok).
         commit: Option<String>,
     },
     /// Move a commit (or inclusive <first>..<last> range) elsewhere in the queue.
     Move {
         /// The commit to move, or an inclusive range `<first>..<last>` of
-        /// consecutive commits. Must be commits of this queue.
+        /// consecutive commits. Each may be a revision or a Queued-Commit-Id
+        /// (unique prefix ok). Must be commits of this queue.
         commit: String,
-        /// The queue commit the moved commits should directly follow. Pass the
-        /// base branch's tip commit to move them to the front of the queue.
+        /// The queue commit the moved commits should directly follow — a
+        /// revision or a Queued-Commit-Id. Pass the base branch's tip commit
+        /// to move them to the front of the queue.
         #[arg(long)]
         new_parent: String,
     },

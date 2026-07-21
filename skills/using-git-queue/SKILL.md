@@ -53,6 +53,7 @@ below own that propagation.
 | Give commits stable identity across rewrites | `git queue hooks install`, `git queue commit`, or `git queue track --stamp-ids` for existing commits | Stamps a `Queued-Commit-Id:` trailer; powers safe sync (no self-conflicts) and squash-merge detection; coverage shown in `git queue status` as `id ✓` |
 | Move around the queue | `git queue up` / `down`, `git queue status` | Navigate / view |
 | See every commit in the queue with its Queued-Commit-Id | `git queue log` | Status tree + indented per-branch commits, newest first |
+| Address a commit by its id | `git queue move q-3zz02424 --new-parent <rev>`, `git queue reword q-…` | Any commit argument accepts a `Queued-Commit-Id` (unique prefix ok), as shown by `git queue log` |
 
 ### commit vs amend — the key distinction
 
