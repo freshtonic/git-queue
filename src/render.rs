@@ -228,6 +228,9 @@ pub fn status_tree(
     base_is_trunk: bool,
     fork_note: Option<&str>,
     color: bool,
+    // `Some(repo url)` when the terminal renders OSC 8 hyperlinks: PR numbers
+    // become clickable links to their PRs.
+    link_base: Option<&str>,
 ) -> String {
     let paint = |code: &str, s: &str| -> String {
         if color {
@@ -246,11 +249,19 @@ pub fn status_tree(
         };
         let node = if is_current { "◉" } else { "◯" };
         let name = paint("1", &e.branch);
+        let link = |n: u64| -> String {
+            match link_base {
+                Some(base_url) => {
+                    format!("\u{1b}]8;;{base_url}/pull/{n}\u{1b}\\#{n}\u{1b}]8;;\u{1b}\\")
+                }
+                None => format!("#{n}"),
+            }
+        };
         let pr = match &e.pr {
             // status/log never touch the network: the number is cached
             // locally, but the live state is only known after submit/sync —
             // show just the number rather than a cryptic placeholder.
-            Some(p) if p.state == "?" => format!("  #{}", p.number),
+            Some(p) if p.state == "?" => format!("  {}", link(p.number)),
             Some(p) => {
                 let state = match p.state.as_str() {
                     "OPEN" => paint("32", "OPEN"),
@@ -258,7 +269,7 @@ pub fn status_tree(
                     "CLOSED" => paint("31", "CLOSED"),
                     other => other.to_string(),
                 };
-                format!("  #{} [{state}]", p.number)
+                format!("  {} [{state}]", link(p.number))
             }
             None => String::new(),
         };

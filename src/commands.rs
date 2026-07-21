@@ -721,8 +721,13 @@ fn show_tree(with_commits: bool) -> Result<()> {
         }
     }
     let fork = line.fork_at.as_deref();
-    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
-        && std::env::var_os("NO_COLOR").is_none();
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let color = tty && std::env::var_os("NO_COLOR").is_none();
+    let repo_url = if tty && terminal_renders_hyperlinks() {
+        git::github_repo_url(&meta::remote())
+    } else {
+        None
+    };
     print!(
         "{}",
         render::status_tree(
@@ -731,10 +736,43 @@ fn show_tree(with_commits: bool) -> Result<()> {
             &line.base,
             line.base == queue.trunk,
             fork,
-            color
+            color,
+            repo_url.as_deref()
         )
     );
     Ok(())
+}
+
+/// Best-effort detection of OSC 8 hyperlink support — there is no capability
+/// query, so this is the allowlist heuristic other CLIs use.
+fn terminal_renders_hyperlinks() -> bool {
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let term_program = var("TERM_PROGRAM");
+    if matches!(
+        term_program.as_str(),
+        "iTerm.app" | "WezTerm" | "ghostty" | "Hyper" | "vscode" | "Tabby"
+    ) {
+        return true;
+    }
+    if !var("KITTY_WINDOW_ID").is_empty() || !var("WT_SESSION").is_empty() {
+        return true;
+    }
+    if var("VTE_VERSION")
+        .parse::<u32>()
+        .map(|v| v >= 5000)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    if var("KONSOLE_VERSION")
+        .parse::<u32>()
+        .map(|v| v >= 201100)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    let term = var("TERM");
+    term.contains("kitty") || term.contains("wezterm") || term.contains("foot")
 }
 
 /// `git queue prev` / `down` — check out the parent branch.

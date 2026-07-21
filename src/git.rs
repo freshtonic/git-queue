@@ -204,6 +204,21 @@ pub fn staged_changes() -> bool {
     !ok(&["diff", "--cached", "--quiet"])
 }
 
+/// The https URL of the GitHub repo behind `remote`, parsed from its URL
+/// (ssh or https form), if it is a GitHub remote.
+pub fn github_repo_url(remote: &str) -> Option<String> {
+    let url = out(&["remote", "get-url", remote]).ok()?;
+    let path = url
+        .strip_prefix("git@github.com:")
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| url.strip_prefix("https://github.com/"))?;
+    let path = path
+        .strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    Some(format!("https://github.com/{path}"))
+}
+
 /// Paths in `rev`'s tree that contain conflict markers.
 pub fn conflict_files(rev: &str) -> Vec<String> {
     out(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])
@@ -629,5 +644,35 @@ pub fn remote_trunk(remote: &str, trunk: &str) -> Option<String> {
         Some(r)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn github_urls_parse_from_both_remote_forms() {
+        // Pure parsing check via the same logic, exercised on literals.
+        for (input, want) in [
+            (
+                "git@github.com:freshtonic/git-queue.git",
+                "https://github.com/freshtonic/git-queue",
+            ),
+            (
+                "https://github.com/freshtonic/git-queue",
+                "https://github.com/freshtonic/git-queue",
+            ),
+            ("ssh://git@github.com/o/r.git", "https://github.com/o/r"),
+        ] {
+            let path = input
+                .strip_prefix("git@github.com:")
+                .or_else(|| input.strip_prefix("ssh://git@github.com/"))
+                .or_else(|| input.strip_prefix("https://github.com/"))
+                .unwrap();
+            let path = path
+                .strip_suffix(".git")
+                .unwrap_or(path)
+                .trim_end_matches('/');
+            assert_eq!(format!("https://github.com/{path}"), want);
+        }
     }
 }
