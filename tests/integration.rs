@@ -1217,11 +1217,7 @@ fn log_shows_indented_commits_with_id_prefixes() {
     assert!(lines[ai + 1].contains("add a2"), "newest first: {text}");
     assert!(lines[ai + 2].contains("add a1"), "{text}");
     // Abbreviated: the id prefix column is 10 chars, not the full 28.
-    let id_col = lines[ai + 1]
-        .trim_start()
-        .split_whitespace()
-        .next()
-        .unwrap();
+    let id_col = lines[ai + 1].split_whitespace().next().unwrap();
     assert_eq!(id_col.len(), 10, "{id_col}");
     // status stays commit-free.
     let plain = queue(dir).arg("status").assert().success();
