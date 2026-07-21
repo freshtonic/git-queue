@@ -692,6 +692,15 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
     if local_sha == remote_sha {
         return Ok(None);
     }
+    // If the remote tip is a position this local branch has already been at
+    // (it's in the branch's reflog), the remote holds nothing we haven't
+    // seen — it's just stale relative to a local rewrite (amend, move, an
+    // unpushed requeue). Pulling it back in would re-apply our own commits
+    // on top of their old selves and manufacture self-conflicts; the rewrite
+    // is authoritative and `--force-with-lease` replaces the remote at push.
+    if git::was_previous_position(branch, &remote_sha) {
+        return Ok(None);
+    }
     if git::is_ancestor(&remote_sha, &local_sha) {
         return Ok(None); // we're ahead; nothing to pull
     }

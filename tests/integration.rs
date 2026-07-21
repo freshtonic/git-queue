@@ -375,12 +375,20 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
     commit(dir, "b.txt");
     git(dir, &["push", "-q", "-u", "origin", "a", "b"]);
 
-    // Simulate a teammate pushing a commit to `a`, then rewind our local `a`
-    // so the remote is strictly ahead of us.
-    git(dir, &["checkout", "-q", "a"]);
-    commit(dir, "teammate.txt");
-    git(dir, &["push", "-q", "origin", "a"]);
-    git(dir, &["reset", "-q", "--hard", "HEAD~1"]);
+    // A teammate pushes a commit to `a` from their own clone: the commit is
+    // genuinely new to us (never in our reflog), and the remote is strictly
+    // ahead of our local `a`.
+    let mate = TempDir::new().unwrap();
+    let mate_dir = mate.path();
+    git(
+        mate_dir,
+        &["clone", "-q", _remote.path().to_str().unwrap(), "."],
+    );
+    git(mate_dir, &["config", "user.email", "mate@example.com"]);
+    git(mate_dir, &["config", "user.name", "Mate"]);
+    git(mate_dir, &["checkout", "-q", "a"]);
+    commit(mate_dir, "teammate.txt");
+    git(mate_dir, &["push", "-q", "origin", "a"]);
 
     git(dir, &["checkout", "-q", "b"]);
     queue(dir).arg("sync").assert().success();
@@ -922,4 +930,38 @@ fn move_rejects_commits_outside_the_queue() {
         .args(["move", &format!("{x}..{y}"), "--new-parent", &y])
         .assert()
         .failure();
+}
+
+#[test]
+fn sync_does_not_pull_back_our_own_stale_remote_state() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let (tmp, _remote) = new_repo_with_remote();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    std::fs::write(dir.join("f.txt"), "v1\n").unwrap();
+    git(dir, &["add", "f.txt"]);
+    git(dir, &["commit", "-q", "-m", "add f"]);
+    git(dir, &["push", "-q", "-u", "origin", "a"]);
+
+    // Rewrite the commit locally (as amend/move/an unpushed requeue would);
+    // the remote now holds only our stale pre-rewrite state.
+    std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
+    git(dir, &["add", "f.txt"]);
+    git(dir, &["commit", "-q", "--amend", "-m", "add f (amended)"]);
+
+    // Two no-push syncs in a row: neither may re-apply the old remote commit
+    // on top of the rewrite.
+    for _ in 0..2 {
+        queue(dir).args(["sync", "--no-push"]).assert().success();
+    }
+
+    assert_eq!(subjects(dir, "main..a"), vec!["add f (amended)"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.txt")).unwrap(),
+        "v2\n",
+        "rewrite lost or conflicted"
+    );
 }

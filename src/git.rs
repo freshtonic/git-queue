@@ -405,6 +405,20 @@ fn drive_rebase_to_completion(what: &str) -> Result<()> {
     Ok(())
 }
 
+/// True if `sha` is a position `branch` has previously been at, per the
+/// branch's reflog. Used to tell "the remote has new work" apart from "the
+/// remote is just our own stale, pre-rewrite state".
+pub fn was_previous_position(branch: &str, sha: &str) -> bool {
+    out(&[
+        "reflog",
+        "show",
+        "--format=%H",
+        &format!("refs/heads/{branch}"),
+    ])
+    .map(|log| log.lines().any(|l| l == sha))
+    .unwrap_or(false)
+}
+
 /// The remote-tracking ref for the trunk, e.g. `origin/main`, if it exists.
 pub fn remote_trunk(remote: &str, trunk: &str) -> Option<String> {
     let r = format!("{remote}/{trunk}");
