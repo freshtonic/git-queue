@@ -807,7 +807,11 @@ fn sync_prunes_tracking_refs_of_branches_deleted_on_the_remote() {
     let (tmp, _remote) = new_repo_with_remote();
     let dir = tmp.path();
     queue(dir).args(["create", "a"]).assert().success();
-    commit(dir, "a.txt");
+    stage(dir, "a.txt", "a");
+    queue(dir)
+        .args(["commit", "-m", "add a"])
+        .assert()
+        .success();
     git(dir, &["push", "-q", "-u", "origin", "a"]);
 
     // The branch disappears from the remote (e.g. auto-deleted when its PR
@@ -1612,4 +1616,33 @@ fn man_page_documents_real_commands_in_detail() {
         "long_about content missing (requeue)"
     );
     assert!(roff.contains("(required)") && roff.contains("(optional)"));
+}
+
+#[test]
+fn sync_stamps_missing_stable_commit_ids() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    // Plain git commits (no hooks): no ids at first.
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a1.txt");
+    commit(dir, "a2.txt");
+    queue(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b1.txt");
+    assert_eq!(queue_id_of(dir, "b"), "");
+
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+
+    // Every queue commit is stamped, across both branches.
+    for rev in ["a", "a~1", "b"] {
+        let id = queue_id_of(dir, rev);
+        assert!(id.starts_with("q-"), "{rev} unstamped: {id:?}");
+    }
+    assert!(is_ancestor(dir, "a", "b"), "refs must ride the rewrite");
+    // Idempotent: a second sync leaves the hashes alone.
+    let tip = sha(dir, "b");
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+    assert_eq!(sha(dir, "b"), tip, "second sync must not rewrite");
 }

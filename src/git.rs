@@ -455,7 +455,7 @@ pub fn rebase_stamp_ids(upstream: &str, branch: &str, shas: &[String]) -> Result
     let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
     let exe = exe.display();
     let mut initial = Command::new("git");
-    initial.args(["rebase", "-i", upstream, branch]);
+    initial.args(["rebase", "-i", "--update-refs", upstream, branch]);
     initial
         .stdout(Stdio::null())
         .stderr(Stdio::null())

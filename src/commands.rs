@@ -835,6 +835,39 @@ pub fn sync(no_push: bool) -> Result<()> {
         queue = prune_merged(queue)?;
     }
 
+    // Stamp Stable-Commit-Ids onto any queue commits that lack them: identity
+    // is one of the invariants sync converges. Message-only rewrites, so no
+    // conflicts are possible; --update-refs carries branch refs along.
+    for leaf in queue.leaves() {
+        let Ok(line) = queue.line_through(&leaf) else {
+            continue;
+        };
+        let top = line.branches.last().unwrap().clone();
+        let Ok(ids) = git::queue_ids(&format!("{}..{top}", line.base)) else {
+            continue;
+        };
+        let missing: Vec<String> = ids
+            .into_iter()
+            .filter(|(_, id)| id.is_none())
+            .map(|(sha, _)| sha)
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        let n = missing.len();
+        git::rebase_stamp_ids(&line.base, &top, &missing)?;
+        for (i, br) in line.branches.iter().enumerate() {
+            let parent = if i == 0 {
+                line.base.clone()
+            } else {
+                line.branches[i - 1].clone()
+            };
+            meta::set_parent_sha(br, &git::rev_parse(&parent)?)?;
+        }
+        println!("Stamped {n} commit(s) with Stable-Commit-Ids (queue ending at `{top}`).");
+    }
+    git::checkout_quiet(&original)?;
+
     // Pull in commits teammates pushed to our queue branches (bottom-up).
     for branch in queue.topo_order() {
         match incorporate_remote(&branch, &remote, &original)? {

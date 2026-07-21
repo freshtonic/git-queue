@@ -209,7 +209,7 @@ enum Command {
     },
     /// Pull remote commits, requeue onto the latest base branch, and push (with lease).
     #[command(
-        long_about = "The converge-with-reality command. Fetches with `--prune`, fast-forwards each queue's base branch, drops branches whose work has landed (merged PRs, and squash-merges detected by Stable-Commit-Id), pulls genuinely new teammate commits (id correspondence guarantees your own rewrites are never re-applied over themselves), requeues the whole forest onto its bases, pushes everything back with `--force-with-lease`, and reconciles the PRs of every published queue — opening missing ones, reviving closed ones, refreshing bases, titles and queue maps. `--no-push` stops after the local requeue. It never pushes a branch that would make GitHub mislabel an open child PR as merged."
+        long_about = "The converge-with-reality command. Fetches with `--prune`, fast-forwards each queue's base branch, stamps Stable-Commit-Ids onto any queue commits missing them, drops branches whose work has landed (merged PRs, and squash-merges detected by Stable-Commit-Id), pulls genuinely new teammate commits (id correspondence guarantees your own rewrites are never re-applied over themselves), requeues the whole forest onto its bases, pushes everything back with `--force-with-lease`, and reconciles the PRs of every published queue — opening missing ones, reviving closed ones, refreshing bases, titles and queue maps. `--no-push` stops after the local requeue. It never pushes a branch that would make GitHub mislabel an open child PR as merged."
     )]
     Sync {
         /// Skip pushing the branches back to the remote.
