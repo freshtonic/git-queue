@@ -363,6 +363,56 @@ pub fn rebase_reorder_persist(
     drive_rebase_to_completion(top_branch)
 }
 
+/// Apply `shas` (front-first) on top of `branch` with conflict markers
+/// persisted, leaving HEAD on `branch`. The cherry-pick analogue of
+/// [`rebase_persist`].
+pub fn cherry_pick_persist(branch: &str, shas: &[String]) -> Result<()> {
+    run(&["checkout", "-q", branch])?;
+    for sha in shas {
+        let mut pick = Command::new("git");
+        pick.args(["cherry-pick", "--allow-empty", sha]);
+        quiet_git(&mut pick);
+        let _ = pick.status().context("failed to spawn `git cherry-pick`")?;
+        drive_cherry_pick_to_completion(branch)?;
+    }
+    Ok(())
+}
+
+fn cherry_pick_in_progress() -> bool {
+    out(&["rev-parse", "--git-path", "CHERRY_PICK_HEAD"])
+        .map(|p| std::path::Path::new(&p).exists())
+        .unwrap_or(false)
+}
+
+fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
+    let mut guard = 0;
+    while cherry_pick_in_progress() {
+        guard += 1;
+        if guard > 5000 {
+            let _ = Command::new("git")
+                .args(["cherry-pick", "--abort"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            bail!("cherry-pick onto `{what}` did not converge; aborted");
+        }
+        let mut add = Command::new("git");
+        add.args(["add", "-A"]);
+        quiet_git(&mut add);
+        let _ = add.status();
+        let sub: &[&str] = if staged_changes() {
+            &["cherry-pick", "--continue"]
+        } else {
+            &["cherry-pick", "--skip"]
+        };
+        let mut step = Command::new("git");
+        step.args(sub);
+        quiet_git(&mut step);
+        let _ = step.status();
+    }
+    Ok(())
+}
+
 /// Silence git's rebase chatter (conflict hints etc.) — it would contradict
 /// the "it succeeded" outcome. Our loud banner is the user-facing signal.
 fn quiet_git(c: &mut Command) {
@@ -403,6 +453,92 @@ fn drive_rebase_to_completion(what: &str) -> Result<()> {
         let _ = step.status();
     }
     Ok(())
+}
+
+/// Concatenated commit messages (`%B`) of `range` — used to find Queue-Ids
+/// embedded in squash-merge bodies.
+pub fn log_messages(range: &str) -> Result<String> {
+    out(&["log", "--format=%B", range])
+}
+
+/// Append a `Queue-Id` trailer to the commit-message file at `path`, unless
+/// one is already present. `git interpret-trailers` handles placement.
+pub fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
+    run(&[
+        "interpret-trailers",
+        "--if-exists",
+        "doNothing",
+        "--trailer",
+        &format!("{}: {id}", crate::ident::TRAILER),
+        "--in-place",
+        &path.to_string_lossy(),
+    ])
+}
+
+/// The `Queue-Id` of each commit in `range`, front-first: `(sha, id?)`.
+pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
+    let raw = out(&[
+        "log",
+        "--reverse",
+        &format!(
+            "--format=%H%x09%(trailers:key={},valueonly,separator=%x20)",
+            crate::ident::TRAILER
+        ),
+        range,
+    ])?;
+    Ok(raw
+        .lines()
+        .map(|l| {
+            let (sha, id) = l.split_once('\t').unwrap_or((l, ""));
+            let id = id.split_whitespace().next().map(str::to_string);
+            (sha.to_string(), id)
+        })
+        .collect())
+}
+
+/// The `Queue-Id` of `rev`'s commit message, if any.
+pub fn queue_id_of(rev: &str) -> Option<String> {
+    out(&[
+        "log",
+        "-1",
+        &format!(
+            "--format=%(trailers:key={},valueonly,separator=%x20)",
+            crate::ident::TRAILER
+        ),
+        rev,
+    ])
+    .ok()
+    .and_then(|s| s.split_whitespace().next().map(str::to_string))
+}
+
+/// Rewrite HEAD's message to add a `Queue-Id` trailer (content untouched).
+pub fn amend_head_add_queue_id(id: &str) -> Result<()> {
+    let msg = out(&["log", "-1", "--format=%B", "HEAD"])?;
+    let tmp = std::env::temp_dir().join(format!("git-queue-msg-{}", std::process::id()));
+    std::fs::write(&tmp, msg + "\n").context("writing temp commit message")?;
+    add_trailer_to_file(&tmp, id)?;
+    let res = run(&[
+        "commit",
+        "--amend",
+        "--no-verify",
+        "--allow-empty",
+        "-q",
+        "-F",
+        &tmp.to_string_lossy(),
+    ]);
+    let _ = std::fs::remove_file(&tmp);
+    res
+}
+
+/// Patch-equivalence of `head` commits against `upstream`, via `git cherry`:
+/// the SHAs (front-first) of commits in `head` whose patch is NOT already
+/// present in `upstream`.
+pub fn cherry_fresh(upstream: &str, head: &str) -> Result<Vec<String>> {
+    let raw = out(&["cherry", upstream, head])?;
+    Ok(raw
+        .lines()
+        .filter_map(|l| l.strip_prefix("+ ").map(str::to_string))
+        .collect())
 }
 
 /// True if `sha` is a position `branch` has previously been at, per the

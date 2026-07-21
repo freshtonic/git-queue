@@ -11,6 +11,8 @@ pub struct Entry {
     pub pr: Option<PrRef>,
     /// The branch currently holds persisted conflict markers.
     pub conflicted: bool,
+    /// Change-identity coverage: (commits with a Queue-Id, total commits).
+    pub ids: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -230,7 +232,15 @@ pub fn status_tree(
         } else {
             ""
         };
-        out.push_str(&format!("{node} {}{pr}{warn}{here}\n", e.branch));
+        // Change-identity coverage: ✓ when every commit carries a Queue-Id,
+        // a quiet fraction when only some do, and nothing at all when none do
+        // (a queue that hasn't adopted ids yet isn't an anomaly).
+        let ids = match e.ids {
+            Some((h, t)) if t > 0 && h == t => "  id ✓".to_string(),
+            Some((h, t)) if h > 0 => format!("  id {h}/{t}"),
+            _ => String::new(),
+        };
+        out.push_str(&format!("{node} {}{pr}{ids}{warn}{here}\n", e.branch));
     }
     out.push_str("┴\n");
     let label = if base_is_trunk { "trunk" } else { "base" };
@@ -282,6 +292,7 @@ mod tests {
                 review: review.map(|s| s.to_string()),
             }),
             conflicted: false,
+            ids: None,
         }
     }
 
@@ -333,6 +344,7 @@ mod tests {
             branch: "ui".to_string(),
             pr: None,
             conflicted: false,
+            ids: None,
         });
         let plan = gate_plan(&line);
         assert_eq!(plan.len(), 1);

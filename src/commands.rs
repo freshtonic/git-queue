@@ -2,7 +2,7 @@
 
 use crate::queue::{Line, Queue};
 use crate::render::{self, Entry, PrRef};
-use crate::{gh, git, meta, requeue};
+use crate::{gh, git, ident, meta, requeue};
 use anyhow::{bail, Context, Result};
 
 /// Advertise merge order with commit statuses: the bottom-most open PR's head
@@ -417,7 +417,18 @@ pub fn status() -> Result<()> {
     };
 
     let line = queue.line_through(&anchor)?;
-    let entries = build_entries(&line.branches)?;
+    let mut entries = build_entries(&line.branches)?;
+    for (i, e) in entries.iter_mut().enumerate() {
+        let parent = if i == 0 {
+            line.base.clone()
+        } else {
+            line.branches[i - 1].clone()
+        };
+        if let Ok(ids) = git::queue_ids(&format!("{parent}..{}", e.branch)) {
+            let have = ids.iter().filter(|(_, id)| id.is_some()).count();
+            e.ids = Some((have, ids.len()));
+        }
+    }
     let fork = line.fork_at.as_deref();
     print!(
         "{}",
@@ -503,6 +514,7 @@ pub fn sync(no_push: bool) -> Result<()> {
     // Prune branches whose PRs have merged: reparent their children onto the
     // nearest surviving ancestor (trunk, once the bottom lands) and drop them
     // from the queue. The requeue below then rebases the survivors onto trunk.
+    queue = prune_landed_by_id(queue)?;
     if gh::ready() {
         queue = prune_merged(queue)?;
     }
@@ -513,8 +525,8 @@ pub fn sync(no_push: bool) -> Result<()> {
             Some(RemoteAction::FastForwarded) => {
                 println!("Pulled remote commits into `{branch}` (fast-forward).")
             }
-            Some(RemoteAction::Rebased) => {
-                println!("Merged your local commits on top of remote `{branch}`.")
+            Some(RemoteAction::Pulled(n)) => {
+                println!("Pulled {n} teammate commit(s) into `{branch}`.")
             }
             None => {}
         }
@@ -647,17 +659,60 @@ fn prune_merged(queue: Queue) -> Result<Queue> {
             }
         }
     }
-    if merged.is_empty() {
+    drop_from_queue(queue, &merged, "has merged")
+}
+
+/// Drop branches whose every commit already landed on trunk, detected by
+/// Queue-Id correspondence — which survives squash merges that destroy both
+/// SHAs and patch-ids. Only branches where *all* commits carry an id are
+/// considered (no guessing). Pure git; needs no GitHub access.
+fn prune_landed_by_id(queue: Queue) -> Result<Queue> {
+    use std::collections::HashSet;
+    let mut landed: HashSet<String> = HashSet::new();
+    for b in queue.topo_order() {
+        let parent = queue.parent_of(&b).unwrap().to_string();
+        let (Ok(pb), Ok(tb)) = (
+            git::merge_base(&parent, &b),
+            git::merge_base(&queue.trunk, &b),
+        ) else {
+            continue;
+        };
+        let Ok(ids) = git::queue_ids(&format!("{pb}..{b}")) else {
+            continue;
+        };
+        if ids.is_empty() || ids.iter().any(|(_, id)| id.is_none()) {
+            continue;
+        }
+        let Ok(trunk_text) = git::log_messages(&format!("{tb}..{}", queue.trunk)) else {
+            continue;
+        };
+        if ids
+            .iter()
+            .all(|(_, id)| trunk_text.contains(id.as_deref().unwrap()))
+        {
+            landed.insert(b);
+        }
+    }
+    drop_from_queue(queue, &landed, "has landed on trunk (Queue-Ids found)")
+}
+
+/// Untrack every branch in `gone`, reparenting survivors onto their nearest
+/// surviving ancestor, and return the reloaded queue.
+fn drop_from_queue(
+    queue: Queue,
+    gone: &std::collections::HashSet<String>,
+    why: &str,
+) -> Result<Queue> {
+    if gone.is_empty() {
         return Ok(queue);
     }
-    // Reparent survivors whose parent has merged (walk up past merged ancestors).
     for b in queue.topo_order() {
-        if merged.contains(&b) {
+        if gone.contains(&b) {
             continue;
         }
         let current_parent = queue.parent_of(&b).unwrap().to_string();
         let mut new_parent = current_parent.clone();
-        while merged.contains(&new_parent) {
+        while gone.contains(&new_parent) {
             new_parent = queue
                 .parent_of(&new_parent)
                 .map(|s| s.to_string())
@@ -667,16 +722,16 @@ fn prune_merged(queue: Queue) -> Result<Queue> {
             meta::set_parent(&b, &new_parent)?;
         }
     }
-    for b in &merged {
+    for b in gone {
         meta::untrack(b);
-        println!("`{b}` has merged — dropped from the queue, children reparented.");
+        println!("`{b}` {why} — dropped from the queue, children reparented.");
     }
     Queue::load()
 }
 
 enum RemoteAction {
     FastForwarded,
-    Rebased,
+    Pulled(usize),
 }
 
 /// Integrate `origin/<branch>` into the local branch, if the remote has commits
@@ -713,10 +768,31 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
         }
         return Ok(Some(RemoteAction::FastForwarded));
     }
-    // Diverged: replay our unique commits onto the remote tip.
-    let base = git::merge_base(&format!("{remote}/{branch}"), branch)?;
-    git::rebase_persist(&remote_sha, &base, branch)?;
-    Ok(Some(RemoteAction::Rebased))
+    // Diverged: pull in only what is genuinely new. Queue-Id correspondence
+    // separates teammate work from stale copies of our own rewritten commits;
+    // id-less commits fall back to patch-equivalence (`git cherry`).
+    let mb = git::merge_base(&format!("{remote}/{branch}"), branch)?;
+    let local_ids: std::collections::HashSet<String> = git::queue_ids(&format!("{mb}..{branch}"))?
+        .into_iter()
+        .filter_map(|(_, id)| id)
+        .collect();
+    let patch_fresh: std::collections::HashSet<String> = git::cherry_fresh(branch, &remote_sha)?
+        .into_iter()
+        .collect();
+    let fresh: Vec<String> = git::queue_ids(&format!("{mb}..{remote_sha}"))?
+        .into_iter()
+        .filter(|(sha, id)| match id {
+            Some(id) => !local_ids.contains(id),
+            None => patch_fresh.contains(sha),
+        })
+        .map(|(sha, _)| sha)
+        .collect();
+    if fresh.is_empty() {
+        return Ok(None); // the remote only has stale copies of our own commits
+    }
+    let n = fresh.len();
+    git::cherry_pick_persist(branch, &fresh)?;
+    Ok(Some(RemoteAction::Pulled(n)))
 }
 
 /// The outcome of reconciling one line's PRs.
@@ -836,6 +912,7 @@ fn reconcile_line_prs(
             branch: b.clone(),
             pr: prs[i].clone(),
             conflicted: git::has_conflict_markers(b),
+            ids: None,
         })
         .collect();
 
@@ -1133,6 +1210,30 @@ pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Hidden `add-queue-id` subcommand: the commit-msg hook body. Stamps a
+/// `Queue-Id` trailer on the message being committed, but only on tracked
+/// queue branches and only for non-empty messages. Silent otherwise — it runs
+/// on every commit in a hooked repo.
+pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
+    if git::ensure_repo().is_err() {
+        return Ok(());
+    }
+    let Ok(branch) = git::current_branch() else {
+        return Ok(());
+    };
+    if meta::parent(&branch).is_none() {
+        return Ok(());
+    }
+    let msg = std::fs::read_to_string(path).unwrap_or_default();
+    let has_content = msg
+        .lines()
+        .any(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'));
+    if !has_content {
+        return Ok(());
+    }
+    git::add_trailer_to_file(path, &ident::new_id())
+}
+
 /// `git queue yank` — close every open (non-merged) PR in the current queue.
 /// Merged PRs are left alone; local branches and metadata are untouched.
 pub fn yank() -> Result<()> {
@@ -1177,6 +1278,11 @@ pub fn commit(message: Option<String>) -> Result<()> {
 
     if !queue.is_tracked(&current) {
         return Ok(()); // not a queue branch; just a normal commit
+    }
+    // Change identity from birth: if the commit-msg hook isn't installed,
+    // stamp the Queue-Id trailer here (before descendants requeue).
+    if git::queue_id_of("HEAD").is_none() {
+        git::amend_head_add_queue_id(&ident::new_id())?;
     }
     let report = requeue::propagate(&queue, &current)?;
     finish_requeue(&report, &current);
@@ -1291,6 +1397,16 @@ fn hook_snippet(only_amend: bool) -> String {
     )
 }
 
+/// The commit-msg hook: stamp a `Queue-Id` trailer on commits made on queue
+/// branches, so every change has a stable identity from birth.
+fn id_hook_snippet() -> String {
+    format!(
+        "{HOOK_BEGIN}\n\
+         command -v git-queue >/dev/null 2>&1 && git-queue add-queue-id \"$1\" || true\n\
+         {HOOK_END}\n"
+    )
+}
+
 /// `git queue hooks install` — make plain `git commit`/amend auto-requeue.
 pub fn hooks_install() -> Result<()> {
     git::ensure_repo()?;
@@ -1298,6 +1414,7 @@ pub fn hooks_install() -> Result<()> {
     std::fs::create_dir_all(&dir)?;
     install_hook(&dir.join("post-commit"), &hook_snippet(false))?;
     install_hook(&dir.join("post-rewrite"), &hook_snippet(true))?;
+    install_hook(&dir.join("commit-msg"), &id_hook_snippet())?;
     println!("Installed git-queue hooks. Plain `git commit` and `git commit --amend` on a");
     println!("queue branch will now auto-requeue descendants.");
     Ok(())
@@ -1307,7 +1424,7 @@ pub fn hooks_install() -> Result<()> {
 pub fn hooks_uninstall() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
-    for name in ["post-commit", "post-rewrite"] {
+    for name in ["post-commit", "post-rewrite", "commit-msg"] {
         remove_hook(&dir.join(name))?;
     }
     println!("Removed git-queue hooks.");
@@ -1383,6 +1500,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             pr,
             // Detect markers live so `status` can never go stale.
             conflicted: git::has_conflict_markers(b),
+            ids: None,
         });
     }
     Ok(entries)

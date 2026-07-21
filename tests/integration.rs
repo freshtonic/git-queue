@@ -965,3 +965,170 @@ fn sync_does_not_pull_back_our_own_stale_remote_state() {
         "rewrite lost or conflicted"
     );
 }
+
+fn queue_id_of(dir: &Path, rev: &str) -> String {
+    git_out(
+        dir,
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Queue-Id,valueonly)",
+            rev,
+        ],
+    )
+    .trim()
+    .to_string()
+}
+
+#[test]
+fn commit_msg_hook_stamps_queue_ids_on_queue_branches_only() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue(dir).args(["hooks", "install"]).assert().success();
+
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    let plain_commit = |dir: &Path, file: &str, msg: &str| {
+        stage(dir, file, file);
+        assert!(StdCommand::new("git")
+            .args(["commit", "-q", "-m", msg])
+            .current_dir(dir)
+            .env("PATH", &path)
+            .status()
+            .unwrap()
+            .success());
+    };
+
+    // On a queue branch: the hook stamps a Queue-Id.
+    plain_commit(dir, "on-queue.txt", "queue work");
+    let id = queue_id_of(dir, "HEAD");
+    assert!(id.starts_with("q-") && id.len() == 28, "bad id: {id:?}");
+
+    // On trunk (untracked): no trailer.
+    git(dir, &["checkout", "-q", "main"]);
+    plain_commit(dir, "on-main.txt", "trunk work");
+    assert_eq!(queue_id_of(dir, "HEAD"), "");
+}
+
+#[test]
+fn queue_commit_stamps_an_id_without_hooks() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "a.txt", "a");
+    queue(dir)
+        .args(["commit", "-m", "add a"])
+        .assert()
+        .success();
+
+    let id = queue_id_of(dir, "HEAD");
+    assert!(id.starts_with("q-"), "no Queue-Id injected: {id:?}");
+    // The id survives a requeue (message is carried through the rewrite).
+    git(dir, &["checkout", "-q", "main"]);
+    commit(dir, "trunk.txt");
+    git(dir, &["checkout", "-q", "a"]);
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+    assert_eq!(queue_id_of(dir, "a"), id, "id lost in requeue");
+}
+
+#[test]
+fn sync_pulls_teammate_commits_but_not_stale_copies_of_ours() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let (tmp, _remote) = new_repo_with_remote();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f.txt", "v1\n");
+    queue(dir)
+        .args(["commit", "-m", "add f"])
+        .assert()
+        .success();
+    git(dir, &["push", "-q", "-u", "origin", "a"]);
+
+    // A teammate adds a commit on top of the remote's copy...
+    let mate = TempDir::new().unwrap();
+    let mate_dir = mate.path();
+    git(
+        mate_dir,
+        &["clone", "-q", _remote.path().to_str().unwrap(), "."],
+    );
+    git(mate_dir, &["config", "user.email", "mate@example.com"]);
+    git(mate_dir, &["config", "user.name", "Mate"]);
+    git(mate_dir, &["checkout", "-q", "a"]);
+    commit(mate_dir, "teammate.txt");
+    git(mate_dir, &["push", "-q", "origin", "a"]);
+
+    // ...while we rewrite our commit locally (same Queue-Id, new content).
+    std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
+    git(dir, &["add", "f.txt"]);
+    git(dir, &["commit", "-q", "--amend", "--no-edit"]);
+
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+
+    // The teammate's commit came in exactly once; our stale copy did not.
+    assert_eq!(
+        subjects(dir, "main..a"),
+        vec!["add f", "add teammate.txt"],
+        "wrong commits after mixed-divergence sync"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).unwrap(), "v2\n");
+    assert!(dir.join("teammate.txt").exists());
+}
+
+#[test]
+fn sync_drops_branches_whose_ids_landed_on_trunk() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "a.txt", "a");
+    queue(dir)
+        .args(["commit", "-m", "add a"])
+        .assert()
+        .success();
+    let id = queue_id_of(dir, "HEAD");
+    queue(dir).args(["create", "b"]).assert().success();
+    stage(dir, "b.txt", "b");
+    queue(dir)
+        .args(["commit", "-m", "add b"])
+        .assert()
+        .success();
+
+    // Simulate a GitHub squash-merge of `a`'s PR: one new trunk commit whose
+    // body carries the constituent Queue-Id (as GitHub's default template does).
+    git(dir, &["checkout", "-q", "main"]);
+    stage(dir, "a.txt", "a");
+    git(
+        dir,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            &format!("add a (#1)\n\nQueue-Id: {id}"),
+        ],
+    );
+
+    git(dir, &["checkout", "-q", "b"]);
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+
+    // `a` was detected as landed and dropped; `b` reparented onto trunk.
+    let gone = StdCommand::new("git")
+        .args(["config", "--local", "--get", "branch.a.queueParent"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!gone.status.success(), "a should have been dropped");
+    assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "main");
+    assert!(dir.join("b.txt").exists());
+}

@@ -3,6 +3,7 @@
 mod commands;
 mod gh;
 mod git;
+mod ident;
 mod meta;
 mod queue;
 mod render;
@@ -124,6 +125,12 @@ enum Command {
     Doctor,
     /// Enable merge-order signalling: submit posts a red/green commit status per PR.
     Protect,
+    /// Internal: commit-msg hook adding a `Queue-Id` trailer on queue branches.
+    #[command(hide = true, name = "add-queue-id")]
+    AddQueueId {
+        /// Path to the commit-message file (passed by git).
+        file: PathBuf,
+    },
     /// Internal: GIT_SEQUENCE_EDITOR for `git queue move` (rewrites a rebase todo).
     #[command(hide = true, name = "reorder-todo")]
     ReorderTodo {
@@ -189,6 +196,7 @@ pub fn run() {
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),
         Command::Move { commit, new_parent } => commands::move_commits(&commit, &new_parent),
+        Command::AddQueueId { file } => commands::add_queue_id(&file),
         Command::ReorderTodo { file } => commands::reorder_todo(&file),
         Command::Requeue { auto } => commands::requeue(auto),
         Command::Hooks { action } => match action {
