@@ -1332,3 +1332,59 @@ fn track_split_divides_an_adopted_branch() {
     git(dir, &["checkout", "-q", "ui"]);
     assert!(dir.join("c3.txt").exists());
 }
+
+#[test]
+fn split_cleans_up_an_unreused_original_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    git(dir, &["checkout", "-q", "-b", "big"]);
+    commit(dir, "c1.txt");
+    commit(dir, "c2.txt");
+
+    // Neither segment reuses `big`; --delete-original removes it.
+    let editor = "perl -i -pe 's/^big /api / if $. == 1; s/^big /ui / if $. == 2'";
+    queue(dir)
+        .env("GIT_EDITOR", editor)
+        .args(["track", "--no-stamp-ids", "--split", "--delete-original"])
+        .assert()
+        .success();
+
+    assert!(!git_out(dir, &["branch", "--list", "big"]).contains("big"));
+    // Its queue config went with it (no phantom fork from track's adoption).
+    let cfg = StdCommand::new("git")
+        .args(["config", "--local", "--get", "branch.big.queueParent"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!cfg.status.success(), "big's queue config must be gone");
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
+    assert_eq!(git_out(dir, &["config", "branch.ui.queueParent"]), "api");
+}
+
+#[test]
+fn split_keeps_the_original_by_default_when_not_a_tty() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    git(dir, &["checkout", "-q", "-b", "big"]);
+    commit(dir, "c1.txt");
+    commit(dir, "c2.txt");
+    let tip = sha(dir, "big");
+
+    let editor = "perl -i -pe 's/^big /api / if $. == 1; s/^big /ui / if $. == 2'";
+    queue(dir)
+        .env("GIT_EDITOR", editor)
+        .arg("split")
+        .assert()
+        .success();
+
+    // Kept (stdin is not a TTY), still at the old tip, and untracked.
+    assert_eq!(sha(dir, "big"), tip);
+    let cfg = StdCommand::new("git")
+        .args(["config", "--local", "--get", "branch.big.queueParent"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!cfg.status.success());
+}

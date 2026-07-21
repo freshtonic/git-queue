@@ -140,7 +140,7 @@ pub fn create(name: &str, base: Option<&str>) -> Result<()> {
 /// branches. Opens a `rebase -i`-style editor where each commit is prefixed
 /// with the branch it should belong to; consecutive commits sharing a name
 /// become one branch, and the groups queue in order (file order = merge order).
-pub fn split() -> Result<()> {
+pub fn split(delete_original: bool) -> Result<()> {
     git::ensure_repo()?;
     if !git::worktree_clean() {
         bail!("working tree has uncommitted changes; commit or stash them before splitting");
@@ -190,17 +190,43 @@ pub fn split() -> Result<()> {
     let top = segments.last().unwrap().0.clone();
     git::checkout(&top)?;
 
-    // If the original branch wasn't reused as a segment, it still points at the
-    // old tip; leave it but tell the user.
-    let reused = segments.iter().any(|(n, _)| n == &branch);
     println!("Split `{branch}` into {} queued branches:", segments.len());
     let mut p = base.clone();
     for (name, _) in &segments {
         println!("  {p} ← {name}");
         p = name.clone();
     }
+
+    // If the original branch wasn't reused as a segment name, it's now fully
+    // redundant: the last segment's tip IS the old tip, so the old ref merely
+    // duplicates it (and any queue config it carried would read as a phantom
+    // fork). Untrack it, and offer to delete it.
+    let reused = segments.iter().any(|(n, _)| n == &branch);
     if !reused {
-        println!("note: `{branch}` still points at the old tip; delete it if you don't need it.");
+        meta::untrack(&branch);
+        let delete = delete_original
+            || (std::io::IsTerminal::is_terminal(&std::io::stdin()) && {
+                print!(
+                    "`{branch}` is now fully covered by `{top}` — delete the old branch? [Y/n] "
+                );
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer).ok();
+                matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
+            });
+        if delete {
+            git::run(&["branch", "-q", "-D", &branch])?;
+            println!("Deleted `{branch}`.");
+            if git::remote_branch(&meta::remote(), &branch).is_some() {
+                println!(
+                    "note: it still exists on the remote; remove it with `git push {} --delete {branch}`.",
+                    meta::remote()
+                );
+            }
+        } else {
+            println!("note: `{branch}` kept; it duplicates `{top}` — delete it whenever with `git branch -D {branch}`.");
+        }
     }
     println!("Now on `{top}`. Run `git queue submit` to open the PRs.");
     Ok(())
@@ -306,6 +332,7 @@ pub fn track(
     stamp_ids: bool,
     no_stamp_ids: bool,
     split_after: bool,
+    delete_original: bool,
 ) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
@@ -340,7 +367,7 @@ pub fn track(
         .map(|(sha, _)| sha)
         .collect();
     if missing.is_empty() {
-        return split_if_requested(split_after, &base, &branch);
+        return split_if_requested(split_after, delete_original, &base, &branch);
     }
     let n = missing.len();
     let stamp = if stamp_ids {
@@ -369,21 +396,26 @@ pub fn track(
         false
     };
     if !stamp {
-        return split_if_requested(split_after, &base, &branch);
+        return split_if_requested(split_after, delete_original, &base, &branch);
     }
     if !git::worktree_clean() {
         eprintln!("note: working tree has uncommitted changes; skipping id stamping. Commit or");
         eprintln!("stash, then re-run `git queue track --stamp-ids`.");
-        return split_if_requested(split_after, &base, &branch);
+        return split_if_requested(split_after, delete_original, &base, &branch);
     }
     git::rebase_stamp_ids(&base, &branch, &missing)?;
     println!("Stamped {n} commit(s) with Queued-Commit-Ids (their hashes changed).");
-    split_if_requested(split_after, &base, &branch)
+    split_if_requested(split_after, delete_original, &base, &branch)
 }
 
 /// The `--split` tail of `track`: hand off to the split editor, unless the
 /// adopted branch is too small to divide.
-fn split_if_requested(requested: bool, base: &str, branch: &str) -> Result<()> {
+fn split_if_requested(
+    requested: bool,
+    delete_original: bool,
+    base: &str,
+    branch: &str,
+) -> Result<()> {
     if !requested {
         return Ok(());
     }
@@ -391,7 +423,7 @@ fn split_if_requested(requested: bool, base: &str, branch: &str) -> Result<()> {
         println!("`{branch}` has fewer than 2 commits — nothing to split.");
         return Ok(());
     }
-    split()
+    split(delete_original)
 }
 
 /// `git queue untrack` — forget the current branch's queue metadata.

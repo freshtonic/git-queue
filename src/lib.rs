@@ -52,7 +52,11 @@ enum Command {
     /// The status tree with each branch's commits (and their Queued-Commit-Ids) shown.
     Log,
     /// Split the current branch's commits into a queue of branches.
-    Split,
+    Split {
+        /// If the original branch isn't reused as a segment, delete it without asking.
+        #[arg(long)]
+        delete_original: bool,
+    },
     /// Describe what the current branch/PR is about (becomes the PR body).
     Describe {
         /// Description text (opens $EDITOR if omitted).
@@ -74,6 +78,10 @@ enum Command {
         /// multiple queued branches.
         #[arg(long)]
         split: bool,
+        /// With --split: delete the original branch without asking if it isn't
+        /// reused as a segment.
+        #[arg(long, requires = "split")]
+        delete_original: bool,
     },
     /// Forget the current branch's queue metadata.
     Untrack,
@@ -202,14 +210,15 @@ pub fn run() {
         Command::Create { name, base } => commands::create(&name, base.as_deref()),
         Command::Status => commands::status(),
         Command::Log => commands::log(),
-        Command::Split => commands::split(),
+        Command::Split { delete_original } => commands::split(delete_original),
         Command::Describe { message } => commands::describe(message),
         Command::Track {
             parent,
             stamp_ids,
             no_stamp_ids,
             split,
-        } => commands::track(parent, stamp_ids, no_stamp_ids, split),
+            delete_original,
+        } => commands::track(parent, stamp_ids, no_stamp_ids, split, delete_original),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),
