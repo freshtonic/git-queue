@@ -299,7 +299,7 @@ fn parse_segments(
 }
 
 /// `git queue track [--parent <branch>]` — adopt the current branch. Offers
-/// to stamp `Queue-Id` trailers onto the adopted commits (a history rewrite,
+/// to stamp `Queued-Commit-Id` trailers onto the adopted commits (a history rewrite,
 /// so it asks first; `--stamp-ids`/`--no-stamp-ids` decide non-interactively).
 pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Result<()> {
     git::ensure_repo()?;
@@ -341,7 +341,7 @@ pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Res
         false
     } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         println!();
-        println!("`{branch}` has {n} commit(s) without a Queue-Id (stable change identity");
+        println!("`{branch}` has {n} commit(s) without a Queued-Commit-Id (stable change identity");
         println!("that survives rebases; used for safe syncing and squash-merge detection).");
         println!("Stamping rewrites those commits — their hashes change. If the branch is");
         println!("already pushed, the next `git queue sync`/`submit` will force-push it (with");
@@ -355,7 +355,7 @@ pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Res
         matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
     } else {
         eprintln!(
-            "note: {n} commit(s) have no Queue-Id; re-run `git queue track --stamp-ids` to \
+            "note: {n} commit(s) have no Queued-Commit-Id; re-run `git queue track --stamp-ids` to \
              stamp them (rewrites their hashes)."
         );
         false
@@ -369,7 +369,7 @@ pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Res
         return Ok(());
     }
     git::rebase_stamp_ids(&base, &branch, &missing)?;
-    println!("Stamped {n} commit(s) with Queue-Ids (their hashes changed).");
+    println!("Stamped {n} commit(s) with Queued-Commit-Ids (their hashes changed).");
     Ok(())
 }
 
@@ -445,7 +445,7 @@ pub fn status() -> Result<()> {
 }
 
 /// `git queue log` — the status tree, with each branch's commits indented one
-/// level beneath it, newest first, each prefixed by its abbreviated Queue-Id.
+/// level beneath it, newest first, each prefixed by its abbreviated Queued-Commit-Id.
 pub fn log() -> Result<()> {
     show_tree(true)
 }
@@ -726,7 +726,7 @@ fn prune_merged(queue: Queue) -> Result<Queue> {
 }
 
 /// Drop branches whose every commit already landed on trunk, detected by
-/// Queue-Id correspondence — which survives squash merges that destroy both
+/// Queued-Commit-Id correspondence — which survives squash merges that destroy both
 /// SHAs and patch-ids. Only branches where *all* commits carry an id are
 /// considered (no guessing). Pure git; needs no GitHub access.
 fn prune_landed_by_id(queue: Queue) -> Result<Queue> {
@@ -756,7 +756,11 @@ fn prune_landed_by_id(queue: Queue) -> Result<Queue> {
             landed.insert(b);
         }
     }
-    drop_from_queue(queue, &landed, "has landed on trunk (Queue-Ids found)")
+    drop_from_queue(
+        queue,
+        &landed,
+        "has landed on trunk (Queued-Commit-Ids found)",
+    )
 }
 
 /// Untrack every branch in `gone`, reparenting survivors onto their nearest
@@ -831,7 +835,7 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
         }
         return Ok(Some(RemoteAction::FastForwarded));
     }
-    // Diverged: pull in only what is genuinely new. Queue-Id correspondence
+    // Diverged: pull in only what is genuinely new. Queued-Commit-Id correspondence
     // separates teammate work from stale copies of our own rewritten commits;
     // id-less commits fall back to patch-equivalence (`git cherry`).
     let mb = git::merge_base(&format!("{remote}/{branch}"), branch)?;
@@ -1312,7 +1316,7 @@ pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
 }
 
 /// Hidden `add-queue-id` subcommand: the commit-msg hook body. Stamps a
-/// `Queue-Id` trailer on the message being committed, but only on tracked
+/// `Queued-Commit-Id` trailer on the message being committed, but only on tracked
 /// queue branches and only for non-empty messages. Silent otherwise — it runs
 /// on every commit in a hooked repo.
 pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
@@ -1386,7 +1390,7 @@ pub fn commit(message: Option<String>) -> Result<()> {
         return Ok(()); // not a queue branch; just a normal commit
     }
     // Change identity from birth: if the commit-msg hook isn't installed,
-    // stamp the Queue-Id trailer here (before descendants requeue).
+    // stamp the Queued-Commit-Id trailer here (before descendants requeue).
     if git::queue_id_of("HEAD").is_none() {
         git::amend_head_add_queue_id(&ident::new_id())?;
     }
@@ -1503,7 +1507,7 @@ fn hook_snippet(only_amend: bool) -> String {
     )
 }
 
-/// The commit-msg hook: stamp a `Queue-Id` trailer on commits made on queue
+/// The commit-msg hook: stamp a `Queued-Commit-Id` trailer on commits made on queue
 /// branches, so every change has a stable identity from birth.
 fn id_hook_snippet() -> String {
     format!(

@@ -11,9 +11,9 @@ pub struct Entry {
     pub pr: Option<PrRef>,
     /// The branch currently holds persisted conflict markers.
     pub conflicted: bool,
-    /// Change-identity coverage: (commits with a Queue-Id, total commits).
+    /// Change-identity coverage: (commits with a Queued-Commit-Id, total commits).
     pub ids: Option<(usize, usize)>,
-    /// Commits to render beneath the branch (newest first): `(Queue-Id?,
+    /// Commits to render beneath the branch (newest first): `(Queued-Commit-Id?,
     /// subject)`. Empty for `status`; filled by `log`.
     pub commits: Vec<(Option<String>, String)>,
 }
@@ -235,7 +235,7 @@ pub fn status_tree(
         } else {
             ""
         };
-        // Change-identity coverage: ✓ when every commit carries a Queue-Id,
+        // Change-identity coverage: ✓ when every commit carries a Queued-Commit-Id,
         // a quiet fraction when only some do, and nothing at all when none do
         // (a queue that hasn't adopted ids yet isn't an anomaly).
         let ids = match e.ids {

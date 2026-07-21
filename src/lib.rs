@@ -49,7 +49,7 @@ enum Command {
     /// Show the current queue and its PR status.
     #[command(visible_aliases = ["ls", "list"])]
     Status,
-    /// The status tree with each branch's commits (and their Queue-Ids) shown.
+    /// The status tree with each branch's commits (and their Queued-Commit-Ids) shown.
     Log,
     /// Split the current branch's commits into a queue of branches.
     Split,
@@ -64,10 +64,10 @@ enum Command {
         /// Parent branch (defaults to trunk).
         #[arg(long)]
         parent: Option<String>,
-        /// Stamp Queue-Ids onto existing commits without asking (rewrites them).
+        /// Stamp Queued-Commit-Ids onto existing commits without asking (rewrites them).
         #[arg(long, conflicts_with = "no_stamp_ids")]
         stamp_ids: bool,
-        /// Never stamp Queue-Ids onto existing commits.
+        /// Never stamp Queued-Commit-Ids onto existing commits.
         #[arg(long)]
         no_stamp_ids: bool,
     },
@@ -139,7 +139,7 @@ enum Command {
         /// Path to the rebase todo file (passed by git).
         file: PathBuf,
     },
-    /// Internal: commit-msg hook adding a `Queue-Id` trailer on queue branches.
+    /// Internal: commit-msg hook adding a `Queued-Commit-Id` trailer on queue branches.
     #[command(hide = true, name = "add-queue-id")]
     AddQueueId {
         /// Path to the commit-message file (passed by git).

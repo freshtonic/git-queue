@@ -972,7 +972,7 @@ fn queue_id_of(dir: &Path, rev: &str) -> String {
         &[
             "log",
             "-1",
-            "--format=%(trailers:key=Queue-Id,valueonly)",
+            "--format=%(trailers:key=Queued-Commit-Id,valueonly)",
             rev,
         ],
     )
@@ -1001,7 +1001,7 @@ fn commit_msg_hook_stamps_queue_ids_on_queue_branches_only() {
             .success());
     };
 
-    // On a queue branch: the hook stamps a Queue-Id.
+    // On a queue branch: the hook stamps a Queued-Commit-Id.
     plain_commit(dir, "on-queue.txt", "queue work");
     let id = queue_id_of(dir, "HEAD");
     assert!(id.starts_with("q-") && id.len() == 28, "bad id: {id:?}");
@@ -1028,7 +1028,7 @@ fn queue_commit_stamps_an_id_without_hooks() {
         .success();
 
     let id = queue_id_of(dir, "HEAD");
-    assert!(id.starts_with("q-"), "no Queue-Id injected: {id:?}");
+    assert!(id.starts_with("q-"), "no Queued-Commit-Id injected: {id:?}");
     // The id survives a requeue (message is carried through the rewrite).
     git(dir, &["checkout", "-q", "main"]);
     commit(dir, "trunk.txt");
@@ -1066,7 +1066,7 @@ fn sync_pulls_teammate_commits_but_not_stale_copies_of_ours() {
     commit(mate_dir, "teammate.txt");
     git(mate_dir, &["push", "-q", "origin", "a"]);
 
-    // ...while we rewrite our commit locally (same Queue-Id, new content).
+    // ...while we rewrite our commit locally (same Queued-Commit-Id, new content).
     std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
     git(dir, &["add", "f.txt"]);
     git(dir, &["commit", "-q", "--amend", "--no-edit"]);
@@ -1106,7 +1106,7 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
         .success();
 
     // Simulate a GitHub squash-merge of `a`'s PR: one new trunk commit whose
-    // body carries the constituent Queue-Id (as GitHub's default template does).
+    // body carries the constituent Queued-Commit-Id (as GitHub's default template does).
     git(dir, &["checkout", "-q", "main"]);
     stage(dir, "a.txt", "a");
     git(
@@ -1115,7 +1115,7 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
             "commit",
             "-q",
             "-m",
-            &format!("add a (#1)\n\nQueue-Id: {id}"),
+            &format!("add a (#1)\n\nQueued-Commit-Id: {id}"),
         ],
     );
 

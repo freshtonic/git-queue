@@ -413,7 +413,7 @@ fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rewrite `upstream..branch` in place, stamping a `Queue-Id` trailer onto
+/// Rewrite `upstream..branch` in place, stamping a `Queued-Commit-Id` trailer onto
 /// the commits in `shas`: an interactive rebase whose todo marks those picks
 /// as `reword`, with our own binary as the message editor (it appends the
 /// trailer and exits). Content is untouched, so no conflicts can arise.
@@ -476,13 +476,13 @@ fn drive_rebase_to_completion(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Concatenated commit messages (`%B`) of `range` — used to find Queue-Ids
+/// Concatenated commit messages (`%B`) of `range` — used to find Queued-Commit-Ids
 /// embedded in squash-merge bodies.
 pub fn log_messages(range: &str) -> Result<String> {
     out(&["log", "--format=%B", range])
 }
 
-/// Append a `Queue-Id` trailer to the commit-message file at `path`, unless
+/// Append a `Queued-Commit-Id` trailer to the commit-message file at `path`, unless
 /// one is already present. `git interpret-trailers` handles placement.
 pub fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
     run(&[
@@ -496,7 +496,7 @@ pub fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
     ])
 }
 
-/// The `Queue-Id` of each commit in `range`, front-first: `(sha, id?)`.
+/// The `Queued-Commit-Id` of each commit in `range`, front-first: `(sha, id?)`.
 pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
     let raw = out(&[
         "log",
@@ -517,7 +517,7 @@ pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
         .collect())
 }
 
-/// Commits in `range`, NEWEST first, as `(Queue-Id?, subject)` pairs.
+/// Commits in `range`, NEWEST first, as `(Queued-Commit-Id?, subject)` pairs.
 pub fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
     // The leading `|` anchors each record: `out()` trims the whole capture,
     // which would otherwise eat the leading tab of an id-less first commit.
@@ -539,7 +539,7 @@ pub fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
         .collect())
 }
 
-/// The `Queue-Id` of `rev`'s commit message, if any.
+/// The `Queued-Commit-Id` of `rev`'s commit message, if any.
 pub fn queue_id_of(rev: &str) -> Option<String> {
     out(&[
         "log",
@@ -554,7 +554,7 @@ pub fn queue_id_of(rev: &str) -> Option<String> {
     .and_then(|s| s.split_whitespace().next().map(str::to_string))
 }
 
-/// Rewrite HEAD's message to add a `Queue-Id` trailer (content untouched).
+/// Rewrite HEAD's message to add a `Queued-Commit-Id` trailer (content untouched).
 pub fn amend_head_add_queue_id(id: &str) -> Result<()> {
     let msg = out(&["log", "-1", "--format=%B", "HEAD"])?;
     let tmp = std::env::temp_dir().join(format!("git-queue-msg-{}", std::process::id()));
