@@ -309,16 +309,6 @@ pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
 /// branch refs in the rebased range. Detect persisted markers afterwards with
 /// [`has_conflict_markers`].
 pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
-    // Silence git's rebase chatter (conflict hints etc.) — it would contradict
-    // the "it succeeded" outcome. Our loud banner is the user-facing signal.
-    let quiet = |c: &mut Command| {
-        c.stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .env("GIT_EDITOR", "true")
-            .env("GIT_SEQUENCE_EDITOR", "true")
-            .env(GUARD_ENV, "1");
-    };
-
     let mut initial = Command::new("git");
     initial.args([
         "-c",
@@ -330,9 +320,61 @@ pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
         upstream,
         branch,
     ]);
-    quiet(&mut initial);
+    quiet_git(&mut initial);
     let _ = initial.status().context("failed to spawn `git rebase`")?;
+    drive_rebase_to_completion(branch)
+}
 
+/// Rewrite the whole line `base..top_branch` in place via an interactive
+/// rebase whose todo we edit programmatically: the picks for `move_shas` are
+/// relocated to directly follow `after` (or to the very front when `None`).
+/// `--update-refs` carries every intermediate branch ref along, and conflicts
+/// are persisted as markers exactly like [`rebase_persist`].
+pub fn rebase_reorder_persist(
+    base: &str,
+    top_branch: &str,
+    move_shas: &[String],
+    after: Option<&str>,
+) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
+    let mut initial = Command::new("git");
+    initial.args([
+        "-c",
+        "core.editor=true",
+        "rebase",
+        "-i",
+        "--update-refs",
+        "--empty=keep",
+        "--onto",
+        base,
+        base,
+        top_branch,
+    ]);
+    quiet_git(&mut initial);
+    // Our own binary rewrites the todo; the spec travels via the environment.
+    initial
+        .env(
+            "GIT_SEQUENCE_EDITOR",
+            format!("\"{}\" reorder-todo", exe.display()),
+        )
+        .env("GIT_QUEUE_MOVE_SHAS", move_shas.join(" "))
+        .env("GIT_QUEUE_MOVE_AFTER", after.unwrap_or(""));
+    let _ = initial.status().context("failed to spawn `git rebase`")?;
+    drive_rebase_to_completion(top_branch)
+}
+
+/// Silence git's rebase chatter (conflict hints etc.) — it would contradict
+/// the "it succeeded" outcome. Our loud banner is the user-facing signal.
+fn quiet_git(c: &mut Command) {
+    c.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("GIT_EDITOR", "true")
+        .env(GUARD_ENV, "1");
+}
+
+/// Keep stepping an in-progress rebase, staging conflict markers as the
+/// "resolution" of each stop, until it finishes.
+fn drive_rebase_to_completion(what: &str) -> Result<()> {
     let mut guard = 0;
     while rebase_in_progress() {
         guard += 1;
@@ -342,12 +384,12 @@ pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            bail!("requeue of `{branch}` did not converge; aborted the rebase");
+            bail!("requeue of `{what}` did not converge; aborted the rebase");
         }
         // Stage the conflict markers as the "resolution".
         let mut add = Command::new("git");
         add.args(["add", "-A"]);
-        quiet(&mut add);
+        quiet_git(&mut add);
         let _ = add.status();
 
         let sub: &[&str] = if staged_changes() {
@@ -357,7 +399,7 @@ pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
         };
         let mut step = Command::new("git");
         step.args(sub);
-        quiet(&mut step);
+        quiet_git(&mut step);
         let _ = step.status();
     }
     Ok(())

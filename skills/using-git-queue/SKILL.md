@@ -41,6 +41,7 @@ below own that propagation.
 | Add **new** work to a branch that has descendants | `git queue commit [-m …]` | New commit, then requeues all descendants |
 | **Change an existing commit** on a mid-queue branch | `git add …` then `git queue amend` | Folds staged changes in, updates descendants |
 | Fix a commit **message** | `git queue reword [<commit>]` | Rewrites message, updates descendants |
+| **Move** a commit (or inclusive range `<a>..<b>`) elsewhere in the queue | `git queue move <commit> --new-parent <commit>` | Works within a PR or across PRs; both commits must be in the queue; the rest is requeued, conflicts persist as markers |
 | Trunk moved / a teammate pushed / branches drifted | `git queue sync` | Pulls remote commits, requeues on the base, pushes back, reconciles published PRs |
 | Open or refresh the PRs | `git queue submit` | Pushes + numbered, cross-linked PRs |
 | Turn an existing PR into a queue | `git queue track`, then `create` more, then `sync`/`submit` | The existing PR is adopted: title kept (numbered), body preserved under the queue map; missing PRs are opened |

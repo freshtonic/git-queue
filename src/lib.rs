@@ -83,6 +83,16 @@ enum Command {
         /// Commit to reword.
         commit: Option<String>,
     },
+    /// Move a commit (or inclusive <first>..<last> range) elsewhere in the queue.
+    Move {
+        /// The commit to move, or an inclusive range `<first>..<last>` of
+        /// consecutive commits. Must be commits of this queue.
+        commit: String,
+        /// The queue commit the moved commits should directly follow. Pass the
+        /// base branch's tip commit to move them to the front of the queue.
+        #[arg(long)]
+        new_parent: String,
+    },
     /// Requeue the current branch's descendants onto its tip.
     #[command(visible_alias = "restack")]
     Requeue {
@@ -114,6 +124,12 @@ enum Command {
     Doctor,
     /// Enable merge-order signalling: submit posts a red/green commit status per PR.
     Protect,
+    /// Internal: GIT_SEQUENCE_EDITOR for `git queue move` (rewrites a rebase todo).
+    #[command(hide = true, name = "reorder-todo")]
+    ReorderTodo {
+        /// Path to the rebase todo file (passed by git).
+        file: PathBuf,
+    },
     /// Generate the roff man page (used by install.sh; also enables `git queue --help`).
     #[command(hide = true)]
     Man {
@@ -172,6 +188,8 @@ pub fn run() {
         Command::Commit { message } => commands::commit(message),
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),
+        Command::Move { commit, new_parent } => commands::move_commits(&commit, &new_parent),
+        Command::ReorderTodo { file } => commands::reorder_todo(&file),
         Command::Requeue { auto } => commands::requeue(auto),
         Command::Hooks { action } => match action {
             HooksAction::Install => commands::hooks_install(),

@@ -786,3 +786,140 @@ fn sync_prunes_tracking_refs_of_branches_deleted_on_the_remote() {
         "local branch mangled"
     );
 }
+
+fn sha(dir: &Path, rev: &str) -> String {
+    git_out(dir, &["rev-parse", rev])
+}
+
+fn subjects(dir: &Path, range: &str) -> Vec<String> {
+    git_out(dir, &["log", "--reverse", "--format=%s", range])
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn move_reorders_commits_within_a_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "one.txt");
+    let c1 = sha(dir, "HEAD");
+    commit(dir, "two.txt");
+    let c2 = sha(dir, "HEAD");
+
+    queue(dir)
+        .args(["move", &c1, "--new-parent", &c2])
+        .assert()
+        .success();
+
+    assert_eq!(subjects(dir, "main..a"), vec!["add two.txt", "add one.txt"]);
+    for f in ["one.txt", "two.txt"] {
+        assert!(dir.join(f).exists(), "{f} missing after move");
+    }
+}
+
+#[test]
+fn move_commit_to_a_different_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a1.txt");
+    let a1 = sha(dir, "HEAD");
+    queue(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b1.txt");
+    commit(dir, "b2.txt");
+    let b2 = sha(dir, "HEAD");
+
+    // Move b's tip commit into branch `a` (directly after a's tip commit).
+    queue(dir)
+        .args(["move", &b2, "--new-parent", &a1])
+        .assert()
+        .success();
+
+    assert_eq!(subjects(dir, "main..a"), vec!["add a1.txt", "add b2.txt"]);
+    assert_eq!(subjects(dir, "a..b"), vec!["add b1.txt"]);
+    assert!(is_ancestor(dir, "a", "b"), "b must still build on a");
+    git(dir, &["checkout", "-q", "a"]);
+    assert!(dir.join("b2.txt").exists() && !dir.join("b1.txt").exists());
+}
+
+#[test]
+fn move_an_inclusive_range_of_commits() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "f1.txt");
+    let f1 = sha(dir, "HEAD");
+    commit(dir, "f2.txt");
+    let f2 = sha(dir, "HEAD");
+    commit(dir, "f3.txt");
+    let f3 = sha(dir, "HEAD");
+
+    // Move [f1..f2] (inclusive) after f3.
+    queue(dir)
+        .args(["move", &format!("{f1}..{f2}"), "--new-parent", &f3])
+        .assert()
+        .success();
+
+    assert_eq!(
+        subjects(dir, "main..a"),
+        vec!["add f3.txt", "add f1.txt", "add f2.txt"]
+    );
+}
+
+#[test]
+fn move_persists_conflict_markers() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    std::fs::write(dir.join("c.txt"), "one\n").unwrap();
+    git(dir, &["add", "c.txt"]);
+    git(dir, &["commit", "-q", "-m", "write one"]);
+    std::fs::write(dir.join("c.txt"), "two\n").unwrap();
+    git(dir, &["add", "c.txt"]);
+    git(dir, &["commit", "-q", "-m", "write two"]);
+    let second = sha(dir, "HEAD");
+    let base_tip = sha(dir, "main");
+
+    // Moving "write two" to the front makes it apply before "write one":
+    // a conflict, persisted as markers.
+    queue(dir)
+        .args(["move", &second, "--new-parent", &base_tip])
+        .assert()
+        .success();
+
+    let content = std::fs::read_to_string(dir.join("c.txt")).unwrap();
+    assert!(
+        content.contains("<<<<<<<"),
+        "markers not persisted: {content}"
+    );
+}
+
+#[test]
+fn move_rejects_commits_outside_the_queue() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    let seed = sha(dir, "main");
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "x.txt");
+    let x = sha(dir, "HEAD");
+    commit(dir, "y.txt");
+    let y = sha(dir, "HEAD");
+
+    // A trunk commit is not part of the queue.
+    queue(dir)
+        .args(["move", &seed, "--new-parent", &x])
+        .assert()
+        .failure();
+    // --new-parent inside the moved range is rejected.
+    queue(dir)
+        .args(["move", &format!("{x}..{y}"), "--new-parent", &y])
+        .assert()
+        .failure();
+}

@@ -929,6 +929,201 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
     }
 }
 
+/// `git queue move <commit>[..<commit>] --new-parent <commit>` — relocate a
+/// commit (or an inclusive range of consecutive commits) to directly follow
+/// `--new-parent`, within one PR or across PRs. The whole line is rewritten in
+/// place: everything after the removal and insertion points is rebased, branch
+/// refs ride along (`--update-refs`), and conflicts are persisted as markers.
+/// The moved commits join the branch segment that `--new-parent` belongs to.
+pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
+    git::ensure_repo()?;
+    if git::rebase_in_progress() {
+        bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git queue move`");
+    }
+    if !git::worktree_clean() {
+        bail!("working tree has uncommitted changes; commit or stash them before moving commits");
+    }
+    std::env::set_var(git::GUARD_ENV, "1");
+    let queue = Queue::load()?;
+    let original = git::current_branch()?;
+    if !queue.is_tracked(&original) {
+        bail!("`{original}` is not a queue branch");
+    }
+    let line = queue.line_through(&original)?;
+    if let Some(fork) = &line.fork_at {
+        eprintln!("warning: `{fork}` has multiple children; moving within this line only (other lines requeue on the next sync).");
+    }
+    let top = line.branches.last().unwrap().clone();
+
+    // The line's commits, front-first, and their positions.
+    let commits = git::commits_between(&line.base, &top)?;
+    let pos: std::collections::HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, (sha, _))| (sha.as_str(), i))
+        .collect();
+    let resolve = |rev: &str| -> Result<String> {
+        git::rev_parse(rev.trim()).with_context(|| format!("`{rev}` is not a commit"))
+    };
+
+    // <commit> or an inclusive <first>..<last> range.
+    let (first, last) = match spec.split_once("..") {
+        Some((a, b)) => (resolve(a)?, resolve(b)?),
+        None => {
+            let one = resolve(spec)?;
+            (one.clone(), one)
+        }
+    };
+    let in_line = |sha: &String, what: &str| -> Result<usize> {
+        pos.get(sha.as_str()).copied().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{what} `{}` is not part of this queue (`{}`..`{top}`)",
+                &sha[..8],
+                line.base
+            )
+        })
+    };
+    let (mut ia, mut ib) = (in_line(&first, "commit")?, in_line(&last, "commit")?);
+    if ia > ib {
+        std::mem::swap(&mut ia, &mut ib);
+    }
+
+    // --new-parent: a queue commit outside the moved range, or the base tip
+    // (which moves the range to the very front of the queue).
+    let p = resolve(new_parent)?;
+    let after = if p == git::rev_parse(&line.base)? {
+        None
+    } else {
+        let ip = in_line(&p, "--new-parent")?;
+        if (ia..=ib).contains(&ip) {
+            bail!("--new-parent is inside the range being moved");
+        }
+        Some(ip)
+    };
+
+    let already = match after {
+        None => ia == 0,
+        Some(ip) => ip + 1 == ia,
+    };
+    if already {
+        println!("Nothing to move: the commits already follow `{new_parent}`.");
+        return Ok(());
+    }
+
+    let move_shas: Vec<String> = commits[ia..=ib].iter().map(|(s, _)| s.clone()).collect();
+    let after_sha = after.map(|ip| commits[ip].0.clone());
+    let tip_before = git::rev_parse(&top)?;
+
+    git::rebase_reorder_persist(&line.base, &top, &move_shas, after_sha.as_deref())?;
+
+    if git::rev_parse(&top)? == tip_before {
+        bail!("the move did not apply (the rebase was aborted); the queue is unchanged");
+    }
+
+    // Refresh every branch's rebase anchor to its parent's new tip.
+    for (i, br) in line.branches.iter().enumerate() {
+        let parent = if i == 0 {
+            line.base.clone()
+        } else {
+            line.branches[i - 1].clone()
+        };
+        meta::set_parent_sha(br, &git::rev_parse(&parent)?)?;
+    }
+
+    // The rebase leaves HEAD on the top branch; go back and refresh the
+    // worktree (we required a clean tree above, so this is safe).
+    git::checkout_quiet(&original)?;
+    git::reset_hard_head()?;
+
+    let dest = match &after {
+        None => format!("the front of the queue (directly on `{}`)", line.base),
+        Some(ip) => {
+            let (sha, subject) = &commits[*ip];
+            format!("directly after {} ({subject})", &sha[..8])
+        }
+    };
+    println!("Moved {} commit(s) to {dest}.", move_shas.len());
+
+    let mut conflicted = Vec::new();
+    for (i, br) in line.branches.iter().enumerate() {
+        if git::has_conflict_markers(br) {
+            conflicted.push(br.clone());
+        }
+        let parent = if i == 0 {
+            line.base.clone()
+        } else {
+            line.branches[i - 1].clone()
+        };
+        if git::rev_parse(br)? == git::rev_parse(&parent)? {
+            eprintln!("note: `{br}` no longer has any commits of its own.");
+        }
+    }
+    if conflicted.is_empty() {
+        println!(
+            "Run `git queue sync` (or `submit`) to push the rewritten queue and refresh its PRs."
+        );
+    } else {
+        requeue::warn_conflicts(&conflicted);
+    }
+    Ok(())
+}
+
+/// Hidden `reorder-todo` subcommand: the GIT_SEQUENCE_EDITOR used by
+/// [`git::rebase_reorder_persist`]. Relocates the pick lines named by
+/// GIT_QUEUE_MOVE_SHAS to directly follow the pick for GIT_QUEUE_MOVE_AFTER
+/// (or to the top of the todo when it is empty). `update-ref` lines stay put,
+/// which is what carries branch membership.
+pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
+    let shas: Vec<String> = std::env::var("GIT_QUEUE_MOVE_SHAS")
+        .context("GIT_QUEUE_MOVE_SHAS is not set")?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let after = std::env::var("GIT_QUEUE_MOVE_AFTER").unwrap_or_default();
+
+    let todo = std::fs::read_to_string(path)?;
+    let pick_sha = |line: &str| -> Option<String> {
+        let mut it = line.split_whitespace();
+        (it.next() == Some("pick")).then(|| it.next().unwrap_or("").to_string())
+    };
+    // Todo picks use abbreviated SHAs of the original commits.
+    let matches = |abbrev: &str, full: &str| !abbrev.is_empty() && full.starts_with(abbrev);
+
+    let mut moved = Vec::new();
+    let mut rest = Vec::new();
+    for line in todo.lines() {
+        let is_moved = pick_sha(line)
+            .map(|a| shas.iter().any(|f| matches(&a, f)))
+            .unwrap_or(false);
+        if is_moved {
+            moved.push(line.to_string());
+        } else {
+            rest.push(line.to_string());
+        }
+    }
+    if moved.len() != shas.len() {
+        bail!(
+            "todo mismatch: expected {} pick(s) to move, found {}",
+            shas.len(),
+            moved.len()
+        );
+    }
+    let idx = if after.is_empty() {
+        0
+    } else {
+        match rest
+            .iter()
+            .position(|l| pick_sha(l).map(|a| matches(&a, &after)).unwrap_or(false))
+        {
+            Some(i) => i + 1,
+            None => bail!("todo mismatch: --new-parent pick not found"),
+        }
+    };
+    rest.splice(idx..idx, moved);
+    std::fs::write(path, rest.join("\n") + "\n")?;
+    Ok(())
+}
+
 /// `git queue yank` — close every open (non-merged) PR in the current queue.
 /// Merged PRs are left alone; local branches and metadata are untouched.
 pub fn yank() -> Result<()> {

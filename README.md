@@ -123,6 +123,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |
 | `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
+| `git queue move <c>[..<c>] --new-parent <c>` | Move a commit (or an inclusive range) elsewhere in the queue — within one PR or across PRs. Everything after the removal and insertion points is requeued; conflicts persist as markers. |
 | `git queue requeue` (`restack`) | Requeue the current branch's descendants onto its tip. |
 | `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants. |
 | `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest base, push back with `--force-with-lease`, and reconcile the PRs of every published queue (open missing ones, revive closed ones, fix bases/titles/queue maps). |
@@ -189,6 +190,7 @@ what you're doing:
 | Add **new** work | `git queue commit` | `git replay --contained` (whole subtree, one atomic ref update) | conflict markers are **persisted** into the committed files so it always finishes, and the affected branches are flagged with a loud warning |
 | **Amend** a commit | `git queue amend` | `git history fixup` (atomic, worktree-free) | **aborts cleanly**, nothing changes, loud warning — `git history` cannot leave markers |
 | **Reword** a message | `git queue reword` | `git history reword` | aborts cleanly |
+| **Move** a commit / range | `git queue move <c>[..<c>] --new-parent <c>` | `git rebase -i --update-refs` with a scripted todo (whole line rewritten, branch refs ride along) | conflict markers are **persisted** and the affected branches flagged |
 
 Branches left holding persisted conflict markers are shown with `⚠ conflict
 markers` in `git queue status`. Search for `<<<<<<<`, resolve, and commit.
