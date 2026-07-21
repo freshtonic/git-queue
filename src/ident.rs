@@ -15,24 +15,19 @@ pub const TRAILER: &str = "Queue-Id";
 
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
-/// Mint a new id: `q-` + 26 base32 chars (48-bit millisecond timestamp +
-/// 80 random bits, ULID-style). Sortable, unique, and dependency-free.
+/// Mint a new id: `q-` + 26 base32 chars of pure randomness (128 bits).
+/// Uniform from the first character, so prefix abbreviations (as shown by
+/// `git queue log`) are high-entropy, like git's own hash abbreviations.
+/// Identity is the only job — git already records when a commit was made.
 pub fn new_id() -> String {
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let mut bits: Vec<u8> = Vec::with_capacity(16);
-    bits.extend_from_slice(&ms.to_be_bytes()[2..]); // low 48 bits of the time
-    bits.extend_from_slice(&random_bytes());
-    encode(&bits)
+    encode(&random_bytes())
 }
 
-/// 80 bits of randomness: the OS pool when available, else a hash of
+/// 128 bits of randomness: the OS pool when available, else a hash of
 /// high-resolution time, pid and a counter (uniqueness, not secrecy).
-fn random_bytes() -> [u8; 10] {
+fn random_bytes() -> [u8; 16] {
     use std::io::Read;
-    let mut out = [0u8; 10];
+    let mut out = [0u8; 16];
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         if f.read_exact(&mut out).is_ok() {
             return out;
@@ -41,7 +36,7 @@ fn random_bytes() -> [u8; 10] {
     fallback_random()
 }
 
-fn fallback_random() -> [u8; 10] {
+fn fallback_random() -> [u8; 16] {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -58,9 +53,9 @@ fn fallback_random() -> [u8; 10] {
     let a = h.finish();
     h.write_u64(a);
     let b = h.finish();
-    let mut out = [0u8; 10];
+    let mut out = [0u8; 16];
     out[..8].copy_from_slice(&a.to_be_bytes());
-    out[8..].copy_from_slice(&b.to_be_bytes()[..2]);
+    out[8..].copy_from_slice(&b.to_be_bytes());
     out
 }
 
@@ -83,17 +78,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ids_are_unique_wellformed_and_sortable() {
-        let a = new_id();
-        let b = new_id();
-        assert_ne!(a, b);
-        for id in [&a, &b] {
+    fn ids_are_unique_wellformed_and_prefix_diverse() {
+        let ids: Vec<String> = (0..64).map(|_| new_id()).collect();
+        for id in &ids {
             assert_eq!(id.len(), 28, "{id}");
             assert!(id.starts_with("q-"));
             assert!(id[2..].bytes().all(|c| CROCKFORD.contains(&c)), "{id}");
         }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        let c = new_id();
-        assert!(c > a, "ids must sort by creation time: {a} !< {c}");
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "ids must be unique");
+        // The abbreviated display prefix (q- + 8 chars) must be high-entropy:
+        // no collisions among 64 ids is overwhelmingly likely at 40 bits.
+        let prefixes: std::collections::HashSet<&str> = ids.iter().map(|i| &i[..10]).collect();
+        assert_eq!(prefixes.len(), ids.len(), "prefixes collided: {ids:?}");
     }
 }
