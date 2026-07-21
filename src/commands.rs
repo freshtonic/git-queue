@@ -542,11 +542,26 @@ pub fn sync(no_push: bool) -> Result<()> {
         );
     }
 
-    // Push every branch back, with lease, unless asked not to.
+    // Push every branch back, with lease, unless asked not to. A push can
+    // legitimately fail mid-sync — e.g. GitHub marks queued PRs merged and
+    // auto-deletes their branches the moment an earlier push makes their
+    // commits reachable from the base — so keep going and say so instead of
+    // dying half-way through.
+    let mut push_failures = 0usize;
     if !no_push {
         for branch in queue.topo_order() {
             println!("Pushing `{branch}`...");
-            git::push(&remote, &branch)?;
+            if let Err(e) = git::push(&remote, &branch) {
+                eprintln!("warning: push of `{branch}` failed: {e:#}");
+                push_failures += 1;
+            }
+        }
+        if push_failures > 0 {
+            eprintln!(
+                "note: {push_failures} push(es) failed. If a PR merged or its branch was \
+                 deleted on the remote mid-sync, re-run `git queue sync` — it will prune \
+                 merged branches and settle the rest."
+            );
         }
     }
 

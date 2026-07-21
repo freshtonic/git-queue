@@ -752,3 +752,37 @@ fn create_with_explicit_base_flag() {
         .assert()
         .failure();
 }
+
+#[test]
+fn sync_prunes_tracking_refs_of_branches_deleted_on_the_remote() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let (tmp, _remote) = new_repo_with_remote();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "a.txt");
+    git(dir, &["push", "-q", "-u", "origin", "a"]);
+
+    // The branch disappears from the remote (e.g. auto-deleted when its PR
+    // merged), leaving a stale origin/a tracking ref behind.
+    git(dir, &["push", "-q", "origin", "--delete", "a"]);
+    let tip_before = git_out(dir, &["rev-parse", "a"]);
+
+    queue(dir).args(["sync", "--no-push"]).assert().success();
+
+    // The stale tracking ref is pruned, and the ghost branch must not have
+    // been "pulled" into the local branch.
+    let stale = StdCommand::new("git")
+        .args(["rev-parse", "--verify", "origin/a"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!stale.status.success(), "origin/a should have been pruned");
+    assert_eq!(
+        git_out(dir, &["rev-parse", "a"]),
+        tip_before,
+        "local branch mangled"
+    );
+}

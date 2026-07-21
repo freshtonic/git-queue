@@ -159,8 +159,11 @@ pub fn rebase_in_progress() -> bool {
     dir.join("rebase-merge").exists() || dir.join("rebase-apply").exists()
 }
 
+/// Fetch with `--prune`: stale remote-tracking refs for branches deleted on
+/// the remote (e.g. auto-deleted when their PR merged) must not survive, or
+/// sync would "pull" from ghost branches and push with dead leases.
 pub fn fetch(remote: &str) -> Result<()> {
-    run(&["fetch", remote])
+    run(&["fetch", "--prune", remote])
 }
 
 /// SHA of a remote-tracking branch `<remote>/<branch>`, if it exists.
