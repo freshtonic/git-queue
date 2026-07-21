@@ -118,14 +118,14 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue track [--parent <b>]` | Adopt the current branch into a queue (parent defaults to trunk). |
 | `git queue untrack` | Forget the current branch's queue metadata. |
 | `git queue describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
-| `git queue status` (`ls`, `list`) | Show the queue tree with PR numbers/states. |
+| `git queue status` (`ls`, `list`) | Show the queue tree with PR numbers/states and `Queue-Id` coverage. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |
 | `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
 | `git queue move <c>[..<c>] --new-parent <c>` | Move a commit (or an inclusive range) elsewhere in the queue — within one PR or across PRs. Everything after the removal and insertion points is requeued; conflicts persist as markers. |
 | `git queue requeue` (`restack`) | Requeue the current branch's descendants onto its tip. |
-| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants. |
+| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants and stamp `Queue-Id` trailers on new queue commits. |
 | `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest base, push back with `--force-with-lease`, and reconcile the PRs of every published queue (open missing ones, revive closed ones, fix bases/titles/queue maps). |
 | `git queue submit [--draft]` (`push`) | Push the current queue line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
 | `git queue yank` | Close every open (non-merged) PR in the current queue. |
@@ -163,6 +163,31 @@ reconcile the whole line: missing PRs are opened, and an existing PR is
 adopted rather than overwritten — its hand-written title is kept (just
 numbered `[k/n]`) and its body is preserved below the queue map. A queue with
 no PRs at all is never auto-published; run `git queue submit` for that.
+
+### Change identity: the `Queue-Id` trailer
+
+Commit SHAs are useless identifiers in a rewrite-heavy workflow — every amend,
+move and requeue mints new ones. git-queue therefore gives each *change* a
+stable identity: a `Queue-Id:` trailer in the commit message (the same idea as
+Gerrit's `Change-Id`), minted once and carried by git itself through every
+rebase, cherry-pick, replay and amend.
+
+- `git queue commit` stamps one automatically, and `git queue hooks install`
+  adds a `commit-msg` hook so plain `git commit` on a queue branch does too.
+  Commits off the queue are never touched.
+- `git queue status` shows coverage per branch: `id ✓` when every commit
+  carries one, `id 2/3` when only some do (nothing is shown for queues that
+  haven't adopted ids).
+- `sync` uses id correspondence to tell teammate work apart from stale copies
+  of your own rewritten commits: only genuinely new commits are pulled, so a
+  local amend or move can never conflict with its own pre-rewrite self on the
+  remote. Id-less commits fall back to patch-equivalence.
+- `sync` also drops branches whose every id already appears on trunk — which
+  detects **squash-merges**, where SHAs and patch-ids are destroyed but
+  GitHub's default squash message preserves the constituent trailers.
+
+Ids are optional and incremental: old commits without them keep working via
+the previous heuristics, and new commits pick them up as they're made.
 
 ### Landing a queue
 
