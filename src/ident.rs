@@ -1,4 +1,4 @@
-//! Change identity: a stable `Queued-Commit-Id:` trailer carried in commit messages.
+//! Change identity: a stable `Stable-Commit-Id:` trailer carried in commit messages.
 //!
 //! Commit SHAs are worthless identifiers in a rewrite-heavy workflow — every
 //! amend, move and requeue mints new ones. The message, however, is carried
@@ -10,8 +10,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The trailer key, as it appears in commit messages: `Queued-Commit-Id: q-...`.
-pub const TRAILER: &str = "Queued-Commit-Id";
+/// The trailer key, as it appears in commit messages: `Stable-Commit-Id: q-...`.
+pub const TRAILER: &str = "Stable-Commit-Id";
 
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 

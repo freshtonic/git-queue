@@ -136,22 +136,22 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue init [--trunk <b>]` | Record the trunk branch for this repo. |
 | `git queue create <name> [--base <b>]` | Create `<name>` queued after the current branch (or on base `<b>`) and track it. |
 | `git queue split [--queue <n>] [--delete-original]` | Split the current branch's commits into a queue (editor assigns commits to branches; they are created as `queue/<name>/<segment>`). If no segment reuses the original branch name, offers to delete the now-redundant old branch. |
-| `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Queued-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
+| `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Stable-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
 | `git queue untrack` | Forget the current branch's queue metadata. |
 | `git queue describe [-m <text>]` | Describe the current **queue**; shows under "About this queue" in every PR of the queue (opens `$EDITOR` without `-m`). |
 | `git queue describe-branch [-m <text>]` | Describe the current **branch**; shows under "About this branch" in its PR. |
 | `git queue name [<name>]` | Show or set the current queue's name. |
 | `git queue ls` (`list`) | List every queue, most recently touched first. |
-| `git queue status` | Show the queue tree with PR numbers/states and `Queued-Commit-Id` coverage. |
-| `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Queued-Commit-Id`. |
+| `git queue status` | Show the queue tree with PR numbers/states and `Stable-Commit-Id` coverage. |
+| `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Stable-Commit-Id`. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
-| `git queue checkout <commit>` | Detach HEAD on a queue commit (SHA or `Queued-Commit-Id`) to edit it in place: `git commit` inserts a new commit after it, `git commit --amend` revises it (id preserved) — the rest of the queue rebases on top via the hooks or `git queue requeue`. |
+| `git queue checkout <commit>` | Detach HEAD on a queue commit (SHA or `Stable-Commit-Id`) to edit it in place: `git commit` inserts a new commit after it, `git commit --amend` revises it (id preserved) — the rest of the queue rebases on top via the hooks or `git queue requeue`. |
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |
 | `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
-| `git queue move <c>[..<c>] --new-parent <c>` | Move a commit (or an inclusive range) elsewhere in the queue — within one PR or across PRs. Commits can be named by revision or `Queued-Commit-Id` (unique prefix ok). Everything after the removal and insertion points is requeued; conflicts persist as markers. |
+| `git queue move <c>[..<c>] --new-parent <c>` | Move a commit (or an inclusive range) elsewhere in the queue — within one PR or across PRs. Commits can be named by revision or `Stable-Commit-Id` (unique prefix ok). Everything after the removal and insertion points is requeued; conflicts persist as markers. |
 | `git queue requeue` (`restack`) | Requeue the current branch's descendants onto its tip. |
-| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants and stamp `Queued-Commit-Id` trailers on new queue commits. |
+| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants and stamp `Stable-Commit-Id` trailers on new queue commits. |
 | `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest base, push back with `--force-with-lease`, and reconcile the PRs of every published queue (open missing ones, revive closed ones, fix bases/titles/queue maps). |
 | `git queue submit [--draft]` (`push`) | Push the current queue line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
 | `git queue yank` | Close every open (non-merged) PR in the current queue. |
@@ -190,11 +190,11 @@ adopted rather than overwritten — its hand-written title is kept (just
 numbered `[k/n]`) and its body is preserved below the queue map. A queue with
 no PRs at all is never auto-published; run `git queue submit` for that.
 
-### Change identity: the `Queued-Commit-Id` trailer
+### Change identity: the `Stable-Commit-Id` trailer
 
 Commit SHAs are useless identifiers in a rewrite-heavy workflow — every amend,
 move and requeue mints new ones. git-queue therefore gives each *change* a
-stable identity: a `Queued-Commit-Id:` trailer in the commit message (the same idea as
+stable identity: a `Stable-Commit-Id:` trailer in the commit message (the same idea as
 Gerrit's `Change-Id`), minted once and carried by git itself through every
 rebase, cherry-pick, replay and amend.
 
@@ -217,7 +217,7 @@ rebase, cherry-pick, replay and amend.
   GitHub's default squash message preserves the constituent trailers.
 
 Anywhere a command takes a commit — `move` (including ranges and
-`--new-parent`) and `reword` — you can pass a `Queued-Commit-Id` instead of a
+`--new-parent`) and `reword` — you can pass a `Stable-Commit-Id` instead of a
 revision: the full id or any unique prefix, exactly as `git queue log` shows
 them.
 

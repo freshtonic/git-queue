@@ -995,7 +995,7 @@ fn queue_id_of(dir: &Path, rev: &str) -> String {
         &[
             "log",
             "-1",
-            "--format=%(trailers:key=Queued-Commit-Id,valueonly)",
+            "--format=%(trailers:key=Stable-Commit-Id,valueonly)",
             rev,
         ],
     )
@@ -1024,7 +1024,7 @@ fn commit_msg_hook_stamps_queue_ids_on_queue_branches_only() {
             .success());
     };
 
-    // On a queue branch: the hook stamps a Queued-Commit-Id.
+    // On a queue branch: the hook stamps a Stable-Commit-Id.
     plain_commit(dir, "on-queue.txt", "queue work");
     let id = queue_id_of(dir, "HEAD");
     assert!(id.starts_with("q-") && id.len() == 28, "bad id: {id:?}");
@@ -1051,7 +1051,7 @@ fn queue_commit_stamps_an_id_without_hooks() {
         .success();
 
     let id = queue_id_of(dir, "HEAD");
-    assert!(id.starts_with("q-"), "no Queued-Commit-Id injected: {id:?}");
+    assert!(id.starts_with("q-"), "no Stable-Commit-Id injected: {id:?}");
     // The id survives a requeue (message is carried through the rewrite).
     git(dir, &["checkout", "-q", "main"]);
     commit(dir, "trunk.txt");
@@ -1089,7 +1089,7 @@ fn sync_pulls_teammate_commits_but_not_stale_copies_of_ours() {
     commit(mate_dir, "teammate.txt");
     git(mate_dir, &["push", "-q", "origin", "a"]);
 
-    // ...while we rewrite our commit locally (same Queued-Commit-Id, new content).
+    // ...while we rewrite our commit locally (same Stable-Commit-Id, new content).
     std::fs::write(dir.join("f.txt"), "v2\n").unwrap();
     git(dir, &["add", "f.txt"]);
     git(dir, &["commit", "-q", "--amend", "--no-edit"]);
@@ -1129,7 +1129,7 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
         .success();
 
     // Simulate a GitHub squash-merge of `a`'s PR: one new trunk commit whose
-    // body carries the constituent Queued-Commit-Id (as GitHub's default template does).
+    // body carries the constituent Stable-Commit-Id (as GitHub's default template does).
     git(dir, &["checkout", "-q", "main"]);
     stage(dir, "a.txt", "a");
     git(
@@ -1138,7 +1138,7 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
             "commit",
             "-q",
             "-m",
-            &format!("add a (#1)\n\nQueued-Commit-Id: {id}"),
+            &format!("add a (#1)\n\nStable-Commit-Id: {id}"),
         ],
     );
 
@@ -1508,7 +1508,7 @@ fn checkout_amend_preserves_id_and_rebases_the_rest() {
         .assert()
         .success();
 
-    // Checkout the first commit by its Queued-Commit-Id and amend it.
+    // Checkout the first commit by its Stable-Commit-Id and amend it.
     queue(dir).args(["checkout", &id1]).assert().success();
     assert!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]) == "HEAD");
     std::fs::write(dir.join("f1.txt"), "v2\n").unwrap();

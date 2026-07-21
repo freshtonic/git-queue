@@ -57,7 +57,7 @@ enum Command {
     },
     /// Show the current queue and its PR status.
     #[command(
-        long_about = "Read-only view of the current line: one row per branch, front of the queue at the bottom, with PR number and state, Queued-Commit-Id coverage (`id ✓`, or `id 2/3` when partial), persisted-conflict warnings, and a marker for the checked-out branch. Conflict markers are detected live from each tip, so the warning can never be stale."
+        long_about = "Read-only view of the current line: one row per branch, front of the queue at the bottom, with PR number and state, Stable-Commit-Id coverage (`id ✓`, or `id 2/3` when partial), persisted-conflict warnings, and a marker for the checked-out branch. Conflict markers are detected live from each tip, so the warning can never be stale."
     )]
     Status,
     /// List every queue in the repo, most recently touched first.
@@ -74,14 +74,14 @@ enum Command {
         /// New name for the queue (shows the current name when omitted).
         name: Option<String>,
     },
-    /// The status tree with each branch's commits (and their Queued-Commit-Ids) shown.
+    /// The status tree with each branch's commits (and their Stable-Commit-Ids) shown.
     #[command(
-        long_about = "`status` with one more level of depth: each branch's commits are listed beneath it, newest first, prefixed with the abbreviated Queued-Commit-Id (`(no id)` for unstamped commits). Those abbreviations are accepted by every command that takes a commit, so `log` is the natural way to find the argument for `move`, `checkout` or `reword`."
+        long_about = "`status` with one more level of depth: each branch's commits are listed beneath it, newest first, prefixed with the abbreviated Stable-Commit-Id (`(no id)` for unstamped commits). Those abbreviations are accepted by every command that takes a commit, so `log` is the natural way to find the argument for `move`, `checkout` or `reword`."
     )]
     Log,
-    /// Detach HEAD on a queue commit (SHA or Queued-Commit-Id) to edit it in place.
+    /// Detach HEAD on a queue commit (SHA or Stable-Commit-Id) to edit it in place.
     #[command(
-        long_about = "Detaches HEAD on a commit of the current queue — named by SHA or Queued-Commit-Id — after validating membership and a clean stage. From there, edit and `git add`, then: plain `git commit` INSERTS a new commit right after it, while `git commit --amend` REVISES it (the message carries over, so its Queued-Commit-Id is preserved). Either way everything that followed rebases onto the new commit, automatically with hooks installed or via `git queue requeue`. HEAD stays detached at the edited commit so you can keep going; `git queue checkout <branch>` reattaches and ends the session."
+        long_about = "Detaches HEAD on a commit of the current queue — named by SHA or Stable-Commit-Id — after validating membership and a clean stage. From there, edit and `git add`, then: plain `git commit` INSERTS a new commit right after it, while `git commit --amend` REVISES it (the message carries over, so its Stable-Commit-Id is preserved). Either way everything that followed rebases onto the new commit, automatically with hooks installed or via `git queue requeue`. HEAD stays detached at the edited commit so you can keep going; `git queue checkout <branch>` reattaches and ends the session."
     )]
     Checkout {
         /// A commit of the current queue, or one of its branches to reattach.
@@ -120,16 +120,16 @@ enum Command {
     },
     /// Adopt the current branch into a queue.
     #[command(
-        long_about = "Adopts an existing branch into a queue: records its parent (trunk by default, or `--parent`), asks for a queue name when starting a new one, and offers to stamp Queued-Commit-Ids onto the adopted commits — asking first because stamping rewrites them (hashes change; an already-pushed branch will be force-pushed with lease on the next sync). `--stamp-ids`/`--no-stamp-ids` decide non-interactively, and `--split` continues straight into the split editor to divide the adopted commits into multiple branches."
+        long_about = "Adopts an existing branch into a queue: records its parent (trunk by default, or `--parent`), asks for a queue name when starting a new one, and offers to stamp Stable-Commit-Ids onto the adopted commits — asking first because stamping rewrites them (hashes change; an already-pushed branch will be force-pushed with lease on the next sync). `--stamp-ids`/`--no-stamp-ids` decide non-interactively, and `--split` continues straight into the split editor to divide the adopted commits into multiple branches."
     )]
     Track {
         /// Parent branch (defaults to trunk).
         #[arg(long)]
         parent: Option<String>,
-        /// Stamp Queued-Commit-Ids onto existing commits without asking (rewrites them).
+        /// Stamp Stable-Commit-Ids onto existing commits without asking (rewrites them).
         #[arg(long, conflicts_with = "no_stamp_ids")]
         stamp_ids: bool,
-        /// Never stamp Queued-Commit-Ids onto existing commits.
+        /// Never stamp Stable-Commit-Ids onto existing commits.
         #[arg(long)]
         no_stamp_ids: bool,
         /// After adopting, open the split editor to divide the commits into
@@ -163,7 +163,7 @@ enum Command {
     Prev,
     /// Make a new commit on the current branch and requeue its descendants.
     #[command(
-        long_about = "Commits like `git commit`, then requeues every descendant branch onto the new tip in one atomic pass (engine: `git replay`), so the branches behind yours never go stale. Stamps a Queued-Commit-Id if the commit-msg hook didn't. With hooks installed, plain `git commit` behaves the same — this command exists for hookless repositories and for scripting."
+        long_about = "Commits like `git commit`, then requeues every descendant branch onto the new tip in one atomic pass (engine: `git replay`), so the branches behind yours never go stale. Stamps a Stable-Commit-Id if the commit-msg hook didn't. With hooks installed, plain `git commit` behaves the same — this command exists for hookless repositories and for scripting."
     )]
     Commit {
         /// Commit message (opens the editor if omitted).
@@ -172,28 +172,28 @@ enum Command {
     },
     /// Fold STAGED changes into the current commit and update all descendants.
     #[command(
-        long_about = "Folds the STAGED changes into the current branch's tip commit and updates every descendant, atomically (engine: `git history fixup`): if propagating would conflict with a descendant, it aborts and changes nothing — it cannot leave conflict markers. This is the everyday tool for addressing review feedback on a PR that has others queued behind it. The commit message, and with it the Queued-Commit-Id, is preserved."
+        long_about = "Folds the STAGED changes into the current branch's tip commit and updates every descendant, atomically (engine: `git history fixup`): if propagating would conflict with a descendant, it aborts and changes nothing — it cannot leave conflict markers. This is the everyday tool for addressing review feedback on a PR that has others queued behind it. The commit message, and with it the Stable-Commit-Id, is preserved."
     )]
     Amend,
     /// Rewrite a commit message and update all descendants (defaults to HEAD).
     #[command(
-        long_about = "Rewrites a commit's message — HEAD by default, or any queue commit named by SHA or Queued-Commit-Id — and updates every descendant (engine: `git history reword`; atomic, aborts cleanly on conflict). Content is untouched."
+        long_about = "Rewrites a commit's message — HEAD by default, or any queue commit named by SHA or Stable-Commit-Id — and updates every descendant (engine: `git history reword`; atomic, aborts cleanly on conflict). Content is untouched."
     )]
     Reword {
-        /// Commit to reword: a revision or a Queued-Commit-Id (unique prefix ok).
+        /// Commit to reword: a revision or a Stable-Commit-Id (unique prefix ok).
         commit: Option<String>,
     },
     /// Move a commit (or inclusive <first>..<last> range) elsewhere in the queue.
     #[command(
-        long_about = "Relocates a commit, or an inclusive `<first>..<last>` range of consecutive commits, to directly follow `--new-parent` — reordering within one PR or moving work to a different PR (the commits join the branch segment their new parent belongs to). All arguments accept SHAs or Queued-Commit-Ids. The whole line is rewritten in one `git rebase --update-refs` pass: branch refs ride along, conflicts are persisted as markers and flagged, and passing the base branch's tip as `--new-parent` moves commits to the very front of the queue."
+        long_about = "Relocates a commit, or an inclusive `<first>..<last>` range of consecutive commits, to directly follow `--new-parent` — reordering within one PR or moving work to a different PR (the commits join the branch segment their new parent belongs to). All arguments accept SHAs or Stable-Commit-Ids. The whole line is rewritten in one `git rebase --update-refs` pass: branch refs ride along, conflicts are persisted as markers and flagged, and passing the base branch's tip as `--new-parent` moves commits to the very front of the queue."
     )]
     Move {
         /// The commit to move, or an inclusive range `<first>..<last>` of
-        /// consecutive commits. Each may be a revision or a Queued-Commit-Id
+        /// consecutive commits. Each may be a revision or a Stable-Commit-Id
         /// (unique prefix ok). Must be commits of this queue.
         commit: String,
         /// The queue commit the moved commits should directly follow — a
-        /// revision or a Queued-Commit-Id. Pass the base branch's tip commit
+        /// revision or a Stable-Commit-Id. Pass the base branch's tip commit
         /// to move them to the front of the queue.
         #[arg(long)]
         new_parent: String,
@@ -210,7 +210,7 @@ enum Command {
     },
     /// Install or remove hooks that auto-requeue after plain commits.
     #[command(
-        long_about = "Installs (or removes) three per-repository hooks: post-commit and post-rewrite auto-requeue descendants after plain `git commit`/`--amend` on a queue branch — making the plumbing invisible — and commit-msg stamps a Queued-Commit-Id trailer on every new queue commit. Guarded against recursion; no-ops on branches outside any queue."
+        long_about = "Installs (or removes) three per-repository hooks: post-commit and post-rewrite auto-requeue descendants after plain `git commit`/`--amend` on a queue branch — making the plumbing invisible — and commit-msg stamps a Stable-Commit-Id trailer on every new queue commit. Guarded against recursion; no-ops on branches outside any queue."
     )]
     Hooks {
         #[command(subcommand)]
@@ -218,7 +218,7 @@ enum Command {
     },
     /// Pull remote commits, requeue onto the latest base branch, and push (with lease).
     #[command(
-        long_about = "The converge-with-reality command. Fetches with `--prune`, fast-forwards each queue's base branch, drops branches whose work has landed (merged PRs, and squash-merges detected by Queued-Commit-Id), pulls genuinely new teammate commits (id correspondence guarantees your own rewrites are never re-applied over themselves), requeues the whole forest onto its bases, pushes everything back with `--force-with-lease`, and reconciles the PRs of every published queue — opening missing ones, reviving closed ones, refreshing bases, titles and queue maps. `--no-push` stops after the local requeue. It never pushes a branch that would make GitHub mislabel an open child PR as merged."
+        long_about = "The converge-with-reality command. Fetches with `--prune`, fast-forwards each queue's base branch, drops branches whose work has landed (merged PRs, and squash-merges detected by Stable-Commit-Id), pulls genuinely new teammate commits (id correspondence guarantees your own rewrites are never re-applied over themselves), requeues the whole forest onto its bases, pushes everything back with `--force-with-lease`, and reconciles the PRs of every published queue — opening missing ones, reviving closed ones, refreshing bases, titles and queue maps. `--no-push` stops after the local requeue. It never pushes a branch that would make GitHub mislabel an open child PR as merged."
     )]
     Sync {
         /// Skip pushing the branches back to the remote.
@@ -256,7 +256,7 @@ enum Command {
         /// Path to the rebase todo file (passed by git).
         file: PathBuf,
     },
-    /// Internal: commit-msg hook adding a `Queued-Commit-Id` trailer on queue branches.
+    /// Internal: commit-msg hook adding a `Stable-Commit-Id` trailer on queue branches.
     #[command(hide = true, name = "add-queue-id")]
     AddQueueId {
         /// Path to the commit-message file (passed by git).
