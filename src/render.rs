@@ -13,6 +13,9 @@ pub struct Entry {
     pub conflicted: bool,
     /// Change-identity coverage: (commits with a Queue-Id, total commits).
     pub ids: Option<(usize, usize)>,
+    /// Commits to render beneath the branch (newest first): `(Queue-Id?,
+    /// subject)`. Empty for `status`; filled by `log`.
+    pub commits: Vec<(Option<String>, String)>,
 }
 
 #[derive(Clone)]
@@ -241,6 +244,15 @@ pub fn status_tree(
             _ => String::new(),
         };
         out.push_str(&format!("{node} {}{pr}{ids}{warn}{here}\n", e.branch));
+        for (id, subject) in &e.commits {
+            // Abbreviate the id to `q-` + 8 chars; ULID time bits make that
+            // distinct for commits made more than a moment apart.
+            let abbrev = match id {
+                Some(id) => id.chars().take(10).collect::<String>(),
+                None => "(no id)".to_string(),
+            };
+            out.push_str(&format!("    {abbrev:<10}  {subject}\n"));
+        }
     }
     out.push_str("┴\n");
     let label = if base_is_trunk { "trunk" } else { "base" };
@@ -293,6 +305,7 @@ mod tests {
             }),
             conflicted: false,
             ids: None,
+            commits: Vec::new(),
         }
     }
 
@@ -345,6 +358,7 @@ mod tests {
             pr: None,
             conflicted: false,
             ids: None,
+            commits: Vec::new(),
         });
         let plan = gate_plan(&line);
         assert_eq!(plan.len(), 1);

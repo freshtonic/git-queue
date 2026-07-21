@@ -441,6 +441,16 @@ fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
 
 /// `git queue status`
 pub fn status() -> Result<()> {
+    show_tree(false)
+}
+
+/// `git queue log` — the status tree, with each branch's commits indented one
+/// level beneath it, newest first, each prefixed by its abbreviated Queue-Id.
+pub fn log() -> Result<()> {
+    show_tree(true)
+}
+
+fn show_tree(with_commits: bool) -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let current = git::current_branch()?;
@@ -475,6 +485,11 @@ pub fn status() -> Result<()> {
         if let Ok(ids) = git::queue_ids(&format!("{parent}..{}", e.branch)) {
             let have = ids.iter().filter(|(_, id)| id.is_some()).count();
             e.ids = Some((have, ids.len()));
+        }
+        if with_commits {
+            if let Ok(commits) = git::commits_with_ids(&format!("{parent}..{}", e.branch)) {
+                e.commits = commits;
+            }
         }
     }
     let fork = line.fork_at.as_deref();
@@ -961,6 +976,7 @@ fn reconcile_line_prs(
             pr: prs[i].clone(),
             conflicted: git::has_conflict_markers(b),
             ids: None,
+            commits: Vec::new(),
         })
         .collect();
 
@@ -1591,6 +1607,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             // Detect markers live so `status` can never go stale.
             conflicted: git::has_conflict_markers(b),
             ids: None,
+            commits: Vec::new(),
         });
     }
     Ok(entries)

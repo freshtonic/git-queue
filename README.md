@@ -119,6 +119,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue untrack` | Forget the current branch's queue metadata. |
 | `git queue describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
 | `git queue status` (`ls`, `list`) | Show the queue tree with PR numbers/states and `Queue-Id` coverage. |
+| `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Queue-Id`. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |
 | `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |

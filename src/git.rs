@@ -517,6 +517,28 @@ pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
         .collect())
 }
 
+/// Commits in `range`, NEWEST first, as `(Queue-Id?, subject)` pairs.
+pub fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
+    // The leading `|` anchors each record: `out()` trims the whole capture,
+    // which would otherwise eat the leading tab of an id-less first commit.
+    let raw = out(&[
+        "log",
+        &format!(
+            "--format=|%(trailers:key={},valueonly,separator=%x20)%x09%s",
+            crate::ident::TRAILER
+        ),
+        range,
+    ])?;
+    Ok(raw
+        .lines()
+        .filter_map(|l| {
+            let (id, subject) = l.strip_prefix('|')?.split_once('\t')?;
+            let id = id.split_whitespace().next().map(str::to_string);
+            Some((id, subject.to_string()))
+        })
+        .collect())
+}
+
 /// The `Queue-Id` of `rev`'s commit message, if any.
 pub fn queue_id_of(rev: &str) -> Option<String> {
     out(&[

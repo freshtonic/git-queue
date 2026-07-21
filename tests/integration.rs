@@ -1179,3 +1179,52 @@ fn track_without_stamping_keeps_hashes() {
     assert_eq!(sha(dir, "adopted"), before);
     assert_eq!(queue_id_of(dir, "adopted"), "");
 }
+
+#[test]
+fn log_shows_indented_commits_with_id_prefixes() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "a1.txt", "a1");
+    queue(dir)
+        .args(["commit", "-m", "add a1"])
+        .assert()
+        .success();
+    stage(dir, "a2.txt", "a2");
+    queue(dir)
+        .args(["commit", "-m", "add a2"])
+        .assert()
+        .success();
+    queue(dir).args(["create", "b"]).assert().success();
+    // One commit WITHOUT an id (plain git, no hooks installed).
+    stage(dir, "b1.txt", "b1");
+    git(dir, &["commit", "-q", "-m", "add b1 plain"]);
+
+    let out = queue(dir).arg("log").assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Branch lines with commits indented beneath, newest first.
+    let bi = lines.iter().position(|l| l.starts_with("◉ b")).unwrap();
+    assert!(lines[bi + 1].starts_with("    (no id)"), "{text}");
+    assert!(lines[bi + 1].contains("add b1 plain"), "{text}");
+    let ai = lines.iter().position(|l| l.starts_with("◯ a")).unwrap();
+    assert!(lines[ai + 1].starts_with("    q-"), "{text}");
+    assert!(lines[ai + 1].contains("add a2"), "newest first: {text}");
+    assert!(lines[ai + 2].contains("add a1"), "{text}");
+    // Abbreviated: the id prefix column is 10 chars, not the full 28.
+    let id_col = lines[ai + 1]
+        .trim_start()
+        .split_whitespace()
+        .next()
+        .unwrap();
+    assert_eq!(id_col.len(), 10, "{id_col}");
+    // status stays commit-free.
+    let plain = queue(dir).arg("status").assert().success();
+    let ptext = String::from_utf8_lossy(&plain.get_output().stdout).to_string();
+    assert!(!ptext.contains("add a1"), "{ptext}");
+}

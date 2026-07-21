@@ -49,6 +49,8 @@ enum Command {
     /// Show the current queue and its PR status.
     #[command(visible_aliases = ["ls", "list"])]
     Status,
+    /// The status tree with each branch's commits (and their Queue-Ids) shown.
+    Log,
     /// Split the current branch's commits into a queue of branches.
     Split,
     /// Describe what the current branch/PR is about (becomes the PR body).
@@ -193,6 +195,7 @@ pub fn run() {
         Command::Init { trunk } => commands::init(trunk),
         Command::Create { name, base } => commands::create(&name, base.as_deref()),
         Command::Status => commands::status(),
+        Command::Log => commands::log(),
         Command::Split => commands::split(),
         Command::Describe { message } => commands::describe(message),
         Command::Track {
