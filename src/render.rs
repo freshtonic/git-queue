@@ -11,8 +11,8 @@ pub struct Entry {
     pub pr: Option<PrRef>,
     /// The branch currently holds persisted conflict markers.
     pub conflicted: bool,
-    /// Change-identity coverage: (commits with a Stable-Commit-Id, total commits).
-    pub ids: Option<(usize, usize)>,
+    /// Paths of the files holding those markers (filled by status/log).
+    pub conflicts: Vec<String>,
     /// Commits to render beneath the branch (newest first): `(Stable-Commit-Id?,
     /// subject)`. Empty for `status`; filled by `log`.
     pub commits: Vec<(Option<String>, String)>,
@@ -216,55 +216,72 @@ pub fn strip_block(body: &str) -> String {
     }
 }
 
-/// Render the status tree, top of queue first, marking `current`.
-/// `entries` is bottom-first; `base` is the branch the line merges into
-/// (labelled "trunk" when it is the trunk, "base" otherwise).
+/// Render the status tree, top of queue first. `entries` is bottom-first;
+/// `base` is the branch the line merges into (labelled "trunk" when it is the
+/// trunk). The current branch gets a `❯` marker in the left margin. With
+/// `color`: bold branch names, tinted PR states and warnings, and a distinct
+/// colour for commit ids.
 pub fn status_tree(
     entries: &[Entry],
     current: &str,
     base: &str,
     base_is_trunk: bool,
     fork_note: Option<&str>,
+    color: bool,
 ) -> String {
+    let paint = |code: &str, s: &str| -> String {
+        if color {
+            format!("\u{1b}[{code}m{s}\u{1b}[0m")
+        } else {
+            s.to_string()
+        }
+    };
     let mut out = String::new();
     for e in entries.iter().rev() {
-        let node = if e.branch == current { "◉" } else { "◯" };
+        let is_current = e.branch == current;
+        let margin = if is_current {
+            paint("1;32", "❯ ")
+        } else {
+            "  ".to_string()
+        };
+        let node = if is_current { "◉" } else { "◯" };
+        let name = paint("1", &e.branch);
         let pr = match &e.pr {
-            Some(p) => format!("  #{} [{}]", p.number, p.state),
+            Some(p) => {
+                let state = match p.state.as_str() {
+                    "OPEN" => paint("32", "OPEN"),
+                    "MERGED" => paint("35", "MERGED"),
+                    "CLOSED" => paint("31", "CLOSED"),
+                    other => other.to_string(),
+                };
+                format!("  #{} [{state}]", p.number)
+            }
             None => String::new(),
         };
-        let here = if e.branch == current {
-            "  ← current"
-        } else {
-            ""
-        };
         let warn = if e.conflicted {
-            "  ⚠ conflict markers"
+            paint("33", "  ⚠ conflicts")
         } else {
-            ""
+            String::new()
         };
-        // Change-identity coverage: ✓ when every commit carries a Stable-Commit-Id,
-        // a quiet fraction when only some do, and nothing at all when none do
-        // (a queue that hasn't adopted ids yet isn't an anomaly).
-        let ids = match e.ids {
-            Some((h, t)) if t > 0 && h == t => "  id ✓".to_string(),
-            Some((h, t)) if h > 0 => format!("  id {h}/{t}"),
-            _ => String::new(),
-        };
-        out.push_str(&format!("{node} {}{pr}{ids}{warn}{here}\n", e.branch));
+        out.push_str(&format!("{margin}{node} {name}{pr}{warn}\n"));
+        for path in &e.conflicts {
+            out.push_str(&format!("      {}\n", paint("33", &format!("⚠ {path}"))));
+        }
         for (id, subject) in &e.commits {
-            // Abbreviate the id to `q-` + 8 chars; ULID time bits make that
-            // distinct for commits made more than a moment apart.
+            // Abbreviate the id to `q-` + 8 chars.
             let abbrev = match id {
-                Some(id) => id.chars().take(10).collect::<String>(),
-                None => "(no id)".to_string(),
+                Some(id) => {
+                    let short: String = id.chars().take(10).collect();
+                    paint("36", &format!("{short:<10}"))
+                }
+                None => paint("2", "(no id)   "),
             };
-            out.push_str(&format!("    {abbrev:<10}  {subject}\n"));
+            out.push_str(&format!("      {abbrev}  {subject}\n"));
         }
     }
-    out.push_str("┴\n");
+    out.push_str("  ┴\n");
     let label = if base_is_trunk { "trunk" } else { "base" };
-    out.push_str(&format!("  {base} ({label})\n"));
+    out.push_str(&format!("    {base} ({label})\n"));
     if let Some(f) = fork_note {
         out.push_str(&format!("\nnote: `{f}` has multiple children; showing one line. Use `git queue status` from another branch to see the others.\n"));
     }
@@ -315,7 +332,7 @@ mod tests {
                 review: review.map(|s| s.to_string()),
             }),
             conflicted: false,
-            ids: None,
+            conflicts: Vec::new(),
             commits: Vec::new(),
         }
     }
@@ -368,7 +385,7 @@ mod tests {
             branch: "ui".to_string(),
             pr: None,
             conflicted: false,
-            ids: None,
+            conflicts: Vec::new(),
             commits: Vec::new(),
         });
         let plan = gate_plan(&line);

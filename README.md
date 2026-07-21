@@ -142,7 +142,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue describe-branch [-m <text>]` | Describe the current **branch**; shows under "About this branch" in its PR. |
 | `git queue name [<name>]` | Show or set the current queue's name. |
 | `git queue ls` (`list`) | List every queue, most recently touched first. |
-| `git queue status` | Show the queue tree with PR numbers/states and `Stable-Commit-Id` coverage. |
+| `git queue status` | Show the queue tree: PR numbers/states, a margin marker on the current branch, and any conflicting files. Colourised on a terminal. |
 | `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Stable-Commit-Id`. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
 | `git queue checkout <commit>` | Detach HEAD on a queue commit (SHA or `Stable-Commit-Id`) to edit it in place: `git commit` inserts a new commit after it, `git commit --amend` revises it (id preserved) — the rest of the queue rebases on top via the hooks or `git queue requeue`. |
@@ -205,9 +205,6 @@ rebase, cherry-pick, replay and amend.
   confirmation — stamping rewrites those commits, so their hashes change and
   an already-pushed branch will be force-pushed on the next sync/submit).
   Use `--stamp-ids` / `--no-stamp-ids` to decide non-interactively.
-- `git queue status` shows coverage per branch: `id ✓` when every commit
-  carries one, `id 2/3` when only some do (nothing is shown for queues that
-  haven't adopted ids).
 - `sync` uses id correspondence to tell teammate work apart from stale copies
   of your own rewritten commits: only genuinely new commits are pulled, so a
   local amend or move can never conflict with its own pre-rewrite self on the

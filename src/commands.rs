@@ -711,9 +711,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
         } else {
             line.branches[i - 1].clone()
         };
-        if let Ok(ids) = git::queue_ids(&format!("{parent}..{}", e.branch)) {
-            let have = ids.iter().filter(|(_, id)| id.is_some()).count();
-            e.ids = Some((have, ids.len()));
+        if e.conflicted {
+            e.conflicts = git::conflict_files(&e.branch);
         }
         if with_commits {
             if let Ok(commits) = git::commits_with_ids(&format!("{parent}..{}", e.branch)) {
@@ -722,6 +721,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
         }
     }
     let fork = line.fork_at.as_deref();
+    let color = std::io::IsTerminal::is_terminal(&std::io::stdout())
+        && std::env::var_os("NO_COLOR").is_none();
     print!(
         "{}",
         render::status_tree(
@@ -729,7 +730,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
             &current,
             &line.base,
             line.base == queue.trunk,
-            fork
+            fork,
+            color
         )
     );
     Ok(())
@@ -1320,7 +1322,7 @@ fn reconcile_line_prs(
             branch: b.clone(),
             pr: prs[i].clone(),
             conflicted: git::has_conflict_markers(b),
-            ids: None,
+            conflicts: Vec::new(),
             commits: Vec::new(),
         })
         .collect();
@@ -2124,7 +2126,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             pr,
             // Detect markers live so `status` can never go stale.
             conflicted: git::has_conflict_markers(b),
-            ids: None,
+            conflicts: Vec::new(),
             commits: Vec::new(),
         });
     }

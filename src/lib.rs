@@ -57,7 +57,7 @@ enum Command {
     },
     /// Show the current queue and its PR status.
     #[command(
-        long_about = "Read-only view of the current line: one row per branch, front of the queue at the bottom, with PR number and state, Stable-Commit-Id coverage (`id ✓`, or `id 2/3` when partial), persisted-conflict warnings, and a marker for the checked-out branch. Conflict markers are detected live from each tip, so the warning can never be stale."
+        long_about = "Read-only view of the current line: one row per branch, front of the queue at the bottom, with PR number and state, a left-margin marker on the checked-out branch, and — when a branch holds persisted conflict markers — a warning listing the conflicting files. Markers are detected live from each tip, so the warning can never be stale. Output is colourised on a terminal (set NO_COLOR to disable)."
     )]
     Status,
     /// List every queue in the repo, most recently touched first.

@@ -204,6 +204,17 @@ pub fn staged_changes() -> bool {
     !ok(&["diff", "--cached", "--quiet"])
 }
 
+/// Paths in `rev`'s tree that contain conflict markers.
+pub fn conflict_files(rev: &str) -> Vec<String> {
+    out(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])
+        .map(|raw| {
+            raw.lines()
+                .filter_map(|l| l.split_once(':').map(|(_, p)| p.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// True if the tree at `rev` contains textual conflict markers.
 pub fn has_conflict_markers(rev: &str) -> bool {
     ok(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])

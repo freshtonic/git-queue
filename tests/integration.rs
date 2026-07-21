@@ -288,6 +288,11 @@ fn resolving_markers_clears_the_status_warning() {
         String::from_utf8_lossy(&flagged.stdout).contains("⚠"),
         "status should warn while markers exist"
     );
+    assert!(
+        String::from_utf8_lossy(&flagged.stdout).contains("⚠ f.txt"),
+        "status should list the conflicting file:\n{}",
+        String::from_utf8_lossy(&flagged.stdout)
+    );
 
     // Resolve on ui and amend; status must stop warning (no stale flag).
     git(dir, &["checkout", "-q", "ui"]);
@@ -572,8 +577,8 @@ fn create_builds_a_tracked_chain() {
     assert!(text.contains("feat-a"), "status missing feat-a:\n{text}");
     assert!(text.contains("feat-b"), "status missing feat-b:\n{text}");
     assert!(
-        text.contains("← current"),
-        "status missing current marker:\n{text}"
+        text.lines().any(|l| l.starts_with("❯ ◉")),
+        "status missing current margin marker:\n{text}"
     );
 }
 
@@ -1231,12 +1236,13 @@ fn log_shows_indented_commits_with_id_prefixes() {
     let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
     let lines: Vec<&str> = text.lines().collect();
 
-    // Branch lines with commits indented beneath, newest first.
-    let bi = lines.iter().position(|l| l.starts_with("◉ b")).unwrap();
-    assert!(lines[bi + 1].starts_with("    (no id)"), "{text}");
+    // Branch lines with commits indented beneath, newest first; the current
+    // branch is marked in the left margin.
+    let bi = lines.iter().position(|l| l.starts_with("❯ ◉ b")).unwrap();
+    assert!(lines[bi + 1].starts_with("      (no id)"), "{text}");
     assert!(lines[bi + 1].contains("add b1 plain"), "{text}");
-    let ai = lines.iter().position(|l| l.starts_with("◯ a")).unwrap();
-    assert!(lines[ai + 1].starts_with("    q-"), "{text}");
+    let ai = lines.iter().position(|l| l.starts_with("  ◯ a")).unwrap();
+    assert!(lines[ai + 1].starts_with("      q-"), "{text}");
     assert!(lines[ai + 1].contains("add a2"), "newest first: {text}");
     assert!(lines[ai + 2].contains("add a1"), "{text}");
     // Abbreviated: the id prefix column is 10 chars, not the full 28.
