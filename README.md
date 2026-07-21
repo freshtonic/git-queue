@@ -214,6 +214,17 @@ orphaned children onto the queue's base, and — because GitHub closes a PR whos
 was deleted — `submit` revives that child PR (reopening it, or opening a fresh
 one retargeted to trunk).
 
+### Why GitHub must never see a "collapsed" queue
+
+GitHub permanently marks a PR **merged** the moment a push makes its head tip
+reachable from its base branch — no button required. In a healthy queue that
+never happens (each branch *extends* its parent; parents never contain their
+children), but a collapsed state — a parent force-set to a child's tip, or a
+branch whose commits were all `move`d away — would trip it, mislabelling a
+mid-queue PR as merged while the front of the queue is still open. `sync` and
+`submit` therefore refuse to push any branch whose tip contains an open child
+PR's head, and tell you how to untangle it instead.
+
 ### Editing a branch in the middle of a queue
 
 When you change a branch that has descendants, git-queue propagates the change

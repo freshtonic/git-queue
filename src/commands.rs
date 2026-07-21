@@ -625,6 +625,10 @@ pub fn sync(no_push: bool) -> Result<()> {
     let mut push_failures = 0usize;
     if !no_push {
         for branch in queue.topo_order() {
+            if push_would_mislabel_child(&queue, &branch) {
+                push_failures += 1;
+                continue;
+            }
             println!("Pushing `{branch}`...");
             if let Err(e) = git::push(&remote, &branch) {
                 eprintln!("warning: push of `{branch}` failed: {e:#}");
@@ -707,6 +711,37 @@ fn heal_dangling_parents(queue: Queue) -> Result<Queue> {
     } else {
         Ok(queue)
     }
+}
+
+/// Refuse to push a branch whose tip contains an OPEN child PR's head tip.
+/// GitHub marks a PR merged the instant its base branch contains its head —
+/// permanently — so pushing a collapsed parent (or the parent of a branch
+/// whose commits were all moved away) would mislabel a mid-queue PR as merged
+/// while the front of the queue is still open. Returns true if pushing is safe.
+fn push_would_mislabel_child(queue: &Queue, branch: &str) -> bool {
+    for child in queue.children(branch) {
+        let (Ok(ct), Ok(bt)) = (git::rev_parse(&child), git::rev_parse(branch)) else {
+            continue;
+        };
+        if !git::is_ancestor(&ct, &bt) {
+            continue; // normal queue shape: child extends parent
+        }
+        let open_pr = gh::find(&child)
+            .ok()
+            .flatten()
+            .map(|pr| pr.state == "OPEN")
+            .unwrap_or(false);
+        if open_pr {
+            eprintln!(
+                "warning: not pushing `{branch}` — its tip contains the head of `{child}`'s \
+                 OPEN PR, and GitHub would permanently mark that PR as merged. The queue \
+                 looks collapsed (or `{child}` has no commits of its own); untangle it with \
+                 `git queue move`, or close the child PR first."
+            );
+            return true;
+        }
+    }
+    false
 }
 
 /// Reparent the children of any MERGED-PR branch onto their nearest surviving
@@ -934,8 +969,29 @@ fn reconcile_line_prs(
         }
         let base = base_of(i);
         if let Some(remote) = push {
-            println!("Pushing `{b}`...");
-            git::push(remote, b)?;
+            // Don't hand GitHub a reason to mislabel the next PR as merged:
+            // pushing a branch whose tip contains an open child PR's head
+            // makes that permanent.
+            let collapsed_child = branches.get(i + 1).is_some_and(|child| {
+                existing[i + 1]
+                    .as_ref()
+                    .map(|pr| pr.state == "OPEN")
+                    .unwrap_or(false)
+                    && match (git::rev_parse(child), git::rev_parse(b)) {
+                        (Ok(ct), Ok(bt)) => git::is_ancestor(&ct, &bt),
+                        _ => false,
+                    }
+            });
+            if collapsed_child {
+                eprintln!(
+                    "warning: not pushing `{b}` — its tip contains the head of the next \
+                     PR in the queue, and GitHub would permanently mark that PR as merged. \
+                     Untangle with `git queue move`, or close the child PR first."
+                );
+            } else {
+                println!("Pushing `{b}`...");
+                git::push(remote, b)?;
+            }
         }
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
