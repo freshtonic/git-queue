@@ -1132,3 +1132,50 @@ fn sync_drops_branches_whose_ids_landed_on_trunk() {
     assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "main");
     assert!(dir.join("b.txt").exists());
 }
+
+#[test]
+fn track_stamp_ids_flag_stamps_adopted_commits() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    git(dir, &["checkout", "-q", "-b", "adopted"]);
+    commit(dir, "one.txt");
+    commit(dir, "two.txt");
+
+    queue(dir).args(["track", "--stamp-ids"]).assert().success();
+
+    for rev in ["adopted", "adopted~1"] {
+        let id = queue_id_of(dir, rev);
+        assert!(id.starts_with("q-"), "{rev} not stamped: {id:?}");
+    }
+    // Content intact, trunk untouched.
+    assert!(dir.join("one.txt").exists() && dir.join("two.txt").exists());
+    assert_eq!(
+        git_out(dir, &["config", "branch.adopted.queueParent"]),
+        "main"
+    );
+    assert_eq!(queue_id_of(dir, "main"), "");
+}
+
+#[test]
+fn track_without_stamping_keeps_hashes() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    git(dir, &["checkout", "-q", "-b", "adopted"]);
+    commit(dir, "one.txt");
+    let before = sha(dir, "adopted");
+
+    // --no-stamp-ids, and also the non-TTY default (no flag): both keep SHAs.
+    queue(dir)
+        .args(["track", "--no-stamp-ids"])
+        .assert()
+        .success();
+    assert_eq!(sha(dir, "adopted"), before);
+    assert_eq!(queue_id_of(dir, "adopted"), "");
+
+    queue(dir).arg("untrack").assert().success();
+    queue(dir).arg("track").assert().success(); // stdin is not a TTY here
+    assert_eq!(sha(dir, "adopted"), before);
+    assert_eq!(queue_id_of(dir, "adopted"), "");
+}

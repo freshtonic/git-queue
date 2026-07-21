@@ -62,6 +62,12 @@ enum Command {
         /// Parent branch (defaults to trunk).
         #[arg(long)]
         parent: Option<String>,
+        /// Stamp Queue-Ids onto existing commits without asking (rewrites them).
+        #[arg(long, conflicts_with = "no_stamp_ids")]
+        stamp_ids: bool,
+        /// Never stamp Queue-Ids onto existing commits.
+        #[arg(long)]
+        no_stamp_ids: bool,
     },
     /// Forget the current branch's queue metadata.
     Untrack,
@@ -125,6 +131,12 @@ enum Command {
     Doctor,
     /// Enable merge-order signalling: submit posts a red/green commit status per PR.
     Protect,
+    /// Internal: GIT_SEQUENCE_EDITOR for id stamping (marks picks as reword).
+    #[command(hide = true, name = "stamp-todo")]
+    StampTodo {
+        /// Path to the rebase todo file (passed by git).
+        file: PathBuf,
+    },
     /// Internal: commit-msg hook adding a `Queue-Id` trailer on queue branches.
     #[command(hide = true, name = "add-queue-id")]
     AddQueueId {
@@ -183,7 +195,11 @@ pub fn run() {
         Command::Status => commands::status(),
         Command::Split => commands::split(),
         Command::Describe { message } => commands::describe(message),
-        Command::Track { parent } => commands::track(parent),
+        Command::Track {
+            parent,
+            stamp_ids,
+            no_stamp_ids,
+        } => commands::track(parent, stamp_ids, no_stamp_ids),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),
@@ -196,6 +212,7 @@ pub fn run() {
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),
         Command::Move { commit, new_parent } => commands::move_commits(&commit, &new_parent),
+        Command::StampTodo { file } => commands::stamp_todo(&file),
         Command::AddQueueId { file } => commands::add_queue_id(&file),
         Command::ReorderTodo { file } => commands::reorder_todo(&file),
         Command::Requeue { auto } => commands::requeue(auto),

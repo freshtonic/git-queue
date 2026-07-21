@@ -50,7 +50,7 @@ below own that propagation.
 | Abandon a queue's open PRs | `git queue yank` | Closes every open (non-merged) PR in the queue |
 | Stop PRs merging out of order | `git queue protect` | Enables merge-order statuses on each PR (one-time) |
 | Check enforcement is on | `git queue doctor` | Read-only report of the gate status |
-| Give commits stable identity across rewrites | `git queue hooks install` (or just use `git queue commit`) | Stamps a `Queue-Id:` trailer; powers safe sync (no self-conflicts) and squash-merge detection; coverage shown in `git queue status` as `id ✓` |
+| Give commits stable identity across rewrites | `git queue hooks install`, `git queue commit`, or `git queue track --stamp-ids` for existing commits | Stamps a `Queue-Id:` trailer; powers safe sync (no self-conflicts) and squash-merge detection; coverage shown in `git queue status` as `id ✓` |
 | Move around the queue | `git queue up` / `down`, `git queue status` | Navigate / view |
 
 ### commit vs amend — the key distinction

@@ -298,8 +298,10 @@ fn parse_segments(
     Ok(segments)
 }
 
-/// `git queue track [--parent <branch>]` — adopt the current branch.
-pub fn track(parent: Option<String>) -> Result<()> {
+/// `git queue track [--parent <branch>]` — adopt the current branch. Offers
+/// to stamp `Queue-Id` trailers onto the adopted commits (a history rewrite,
+/// so it asks first; `--stamp-ids`/`--no-stamp-ids` decide non-interactively).
+pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
     let branch = git::current_branch()?;
@@ -322,6 +324,52 @@ pub fn track(parent: Option<String>) -> Result<()> {
     meta::set_parent(&branch, &parent)?;
     meta::set_parent_sha(&branch, &base)?;
     println!("Tracking `{branch}` with parent `{parent}`.");
+
+    // Offer stable change identity to the adopted commits.
+    let missing: Vec<String> = git::queue_ids(&format!("{base}..{branch}"))?
+        .into_iter()
+        .filter(|(_, id)| id.is_none())
+        .map(|(sha, _)| sha)
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let n = missing.len();
+    let stamp = if stamp_ids {
+        true
+    } else if no_stamp_ids {
+        false
+    } else if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        println!();
+        println!("`{branch}` has {n} commit(s) without a Queue-Id (stable change identity");
+        println!("that survives rebases; used for safe syncing and squash-merge detection).");
+        println!("Stamping rewrites those commits — their hashes change. If the branch is");
+        println!("already pushed, the next `git queue sync`/`submit` will force-push it (with");
+        println!("lease), and anyone who fetched the old hashes will need to reset onto the");
+        println!("new ones. Any open PR keeps working.");
+        print!("Stamp them now? [Y/n] ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok();
+        matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
+    } else {
+        eprintln!(
+            "note: {n} commit(s) have no Queue-Id; re-run `git queue track --stamp-ids` to \
+             stamp them (rewrites their hashes)."
+        );
+        false
+    };
+    if !stamp {
+        return Ok(());
+    }
+    if !git::worktree_clean() {
+        eprintln!("note: working tree has uncommitted changes; skipping id stamping. Commit or");
+        eprintln!("stash, then re-run `git queue track --stamp-ids`.");
+        return Ok(());
+    }
+    git::rebase_stamp_ids(&base, &branch, &missing)?;
+    println!("Stamped {n} commit(s) with Queue-Ids (their hashes changed).");
     Ok(())
 }
 
@@ -1154,6 +1202,43 @@ pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hidden `stamp-todo` subcommand: GIT_SEQUENCE_EDITOR for id stamping.
+/// Marks the picks named by GIT_QUEUE_REWORD_SHAS as `reword`, so git stops
+/// at each one and our GIT_EDITOR (add-queue-id) appends the trailer.
+/// Untouched picks keep their SHAs where possible.
+pub fn stamp_todo(path: &std::path::Path) -> Result<()> {
+    let shas: Vec<String> = std::env::var("GIT_QUEUE_REWORD_SHAS")
+        .context("GIT_QUEUE_REWORD_SHAS is not set")?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let todo = std::fs::read_to_string(path)?;
+    let mut rewritten = Vec::new();
+    let mut marked = 0usize;
+    for line in todo.lines() {
+        let mut it = line.split_whitespace();
+        let is_target = it.next() == Some("pick")
+            && it
+                .next()
+                .map(|abbrev| shas.iter().any(|f| f.starts_with(abbrev)))
+                .unwrap_or(false);
+        if is_target {
+            marked += 1;
+            rewritten.push(format!("reword{}", &line[4..]));
+        } else {
+            rewritten.push(line.to_string());
+        }
+    }
+    if marked != shas.len() {
+        bail!(
+            "todo mismatch: expected {} pick(s) to reword, found {marked}",
+            shas.len()
+        );
+    }
+    std::fs::write(path, rewritten.join("\n") + "\n")?;
+    Ok(())
+}
+
 /// Hidden `reorder-todo` subcommand: the GIT_SEQUENCE_EDITOR used by
 /// [`git::rebase_reorder_persist`]. Relocates the pick lines named by
 /// GIT_QUEUE_MOVE_SHAS to directly follow the pick for GIT_QUEUE_MOVE_AFTER
@@ -1218,11 +1303,16 @@ pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
     if git::ensure_repo().is_err() {
         return Ok(());
     }
-    let Ok(branch) = git::current_branch() else {
-        return Ok(());
-    };
-    if meta::parent(&branch).is_none() {
-        return Ok(());
+    // During an id-stamping rebase HEAD is detached; the driver vouches for
+    // the commits instead of the branch check.
+    let stamping = std::env::var("GIT_QUEUE_STAMP_ALL").is_ok();
+    if !stamping {
+        let Ok(branch) = git::current_branch() else {
+            return Ok(());
+        };
+        if meta::parent(&branch).is_none() {
+            return Ok(());
+        }
     }
     let msg = std::fs::read_to_string(path).unwrap_or_default();
     let has_content = msg

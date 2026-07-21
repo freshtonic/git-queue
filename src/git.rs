@@ -413,6 +413,27 @@ fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite `upstream..branch` in place, stamping a `Queue-Id` trailer onto
+/// the commits in `shas`: an interactive rebase whose todo marks those picks
+/// as `reword`, with our own binary as the message editor (it appends the
+/// trailer and exits). Content is untouched, so no conflicts can arise.
+pub fn rebase_stamp_ids(upstream: &str, branch: &str, shas: &[String]) -> Result<()> {
+    let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
+    let exe = exe.display();
+    let mut initial = Command::new("git");
+    initial.args(["rebase", "-i", upstream, branch]);
+    initial
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(GUARD_ENV, "1")
+        .env("GIT_SEQUENCE_EDITOR", format!("\"{exe}\" stamp-todo"))
+        .env("GIT_EDITOR", format!("\"{exe}\" add-queue-id"))
+        .env("GIT_QUEUE_REWORD_SHAS", shas.join(" "))
+        .env("GIT_QUEUE_STAMP_ALL", "1");
+    let _ = initial.status().context("failed to spawn `git rebase`")?;
+    drive_rebase_to_completion(branch)
+}
+
 /// Silence git's rebase chatter (conflict hints etc.) — it would contradict
 /// the "it succeeded" outcome. Our loud banner is the user-facing signal.
 fn quiet_git(c: &mut Command) {
