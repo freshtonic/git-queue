@@ -70,6 +70,10 @@ enum Command {
         /// Never stamp Queued-Commit-Ids onto existing commits.
         #[arg(long)]
         no_stamp_ids: bool,
+        /// After adopting, open the split editor to divide the commits into
+        /// multiple queued branches.
+        #[arg(long)]
+        split: bool,
     },
     /// Forget the current branch's queue metadata.
     Untrack,
@@ -204,7 +208,8 @@ pub fn run() {
             parent,
             stamp_ids,
             no_stamp_ids,
-        } => commands::track(parent, stamp_ids, no_stamp_ids),
+            split,
+        } => commands::track(parent, stamp_ids, no_stamp_ids, split),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),

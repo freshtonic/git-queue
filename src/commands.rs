@@ -301,12 +301,20 @@ fn parse_segments(
 /// `git queue track [--parent <branch>]` — adopt the current branch. Offers
 /// to stamp `Queued-Commit-Id` trailers onto the adopted commits (a history rewrite,
 /// so it asks first; `--stamp-ids`/`--no-stamp-ids` decide non-interactively).
-pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Result<()> {
+pub fn track(
+    parent: Option<String>,
+    stamp_ids: bool,
+    no_stamp_ids: bool,
+    split_after: bool,
+) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
     let branch = git::current_branch()?;
     if branch == trunk {
         bail!("cannot track the trunk branch itself");
+    }
+    if split_after && !git::worktree_clean() {
+        bail!("working tree has uncommitted changes; commit or stash them before `track --split`");
     }
     let parent = match parent {
         Some(p) => p,
@@ -332,7 +340,7 @@ pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Res
         .map(|(sha, _)| sha)
         .collect();
     if missing.is_empty() {
-        return Ok(());
+        return split_if_requested(split_after, &base, &branch);
     }
     let n = missing.len();
     let stamp = if stamp_ids {
@@ -361,16 +369,29 @@ pub fn track(parent: Option<String>, stamp_ids: bool, no_stamp_ids: bool) -> Res
         false
     };
     if !stamp {
-        return Ok(());
+        return split_if_requested(split_after, &base, &branch);
     }
     if !git::worktree_clean() {
         eprintln!("note: working tree has uncommitted changes; skipping id stamping. Commit or");
         eprintln!("stash, then re-run `git queue track --stamp-ids`.");
-        return Ok(());
+        return split_if_requested(split_after, &base, &branch);
     }
     git::rebase_stamp_ids(&base, &branch, &missing)?;
     println!("Stamped {n} commit(s) with Queued-Commit-Ids (their hashes changed).");
-    Ok(())
+    split_if_requested(split_after, &base, &branch)
+}
+
+/// The `--split` tail of `track`: hand off to the split editor, unless the
+/// adopted branch is too small to divide.
+fn split_if_requested(requested: bool, base: &str, branch: &str) -> Result<()> {
+    if !requested {
+        return Ok(());
+    }
+    if git::ahead_count(base, branch)? < 2 {
+        println!("`{branch}` has fewer than 2 commits — nothing to split.");
+        return Ok(());
+    }
+    split()
 }
 
 /// `git queue untrack` — forget the current branch's queue metadata.

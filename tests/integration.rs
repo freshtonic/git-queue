@@ -1300,3 +1300,35 @@ fn reword_accepts_queued_commit_ids() {
     assert_eq!(queue_id_of(dir, "a~1"), id1, "id must survive the reword");
     assert_eq!(subjects(dir, "main..a"), vec!["add f1", "add f2"]);
 }
+
+#[test]
+fn track_split_divides_an_adopted_branch() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    git(dir, &["checkout", "-q", "-b", "big"]);
+    commit(dir, "c1.txt");
+    commit(dir, "c2.txt");
+    commit(dir, "c3.txt");
+
+    // Adopt + stamp + split in one go: first two commits -> `api`, third -> `ui`.
+    let editor = "perl -i -pe 's/^big /api / if $. <= 2; s/^big /ui / if $. == 3'";
+    queue(dir)
+        .env("GIT_EDITOR", editor)
+        .args(["track", "--stamp-ids", "--split"])
+        .assert()
+        .success();
+
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
+    assert_eq!(git_out(dir, &["config", "branch.ui.queueParent"]), "api");
+    // Stamping ran before the split, so every segment tip carries an id.
+    for rev in ["api", "ui"] {
+        let id = queue_id_of(dir, rev);
+        assert!(id.starts_with("q-"), "{rev} unstamped: {id:?}");
+    }
+    // Segment contents are right.
+    git(dir, &["checkout", "-q", "api"]);
+    assert!(dir.join("c2.txt").exists() && !dir.join("c3.txt").exists());
+    git(dir, &["checkout", "-q", "ui"]);
+    assert!(dir.join("c3.txt").exists());
+}

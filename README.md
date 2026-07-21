@@ -115,7 +115,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue init [--trunk <b>]` | Record the trunk branch for this repo. |
 | `git queue create <name> [--base <b>]` | Create `<name>` queued after the current branch (or on base `<b>`) and track it. |
 | `git queue split` | Split the current branch's commits into a queue (editor assigns commits to branches). |
-| `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Queued-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. |
+| `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Queued-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
 | `git queue untrack` | Forget the current branch's queue metadata. |
 | `git queue describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
 | `git queue status` (`ls`, `list`) | Show the queue tree with PR numbers/states and `Queued-Commit-Id` coverage. |
