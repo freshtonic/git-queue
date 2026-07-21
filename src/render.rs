@@ -247,6 +247,10 @@ pub fn status_tree(
         let node = if is_current { "◉" } else { "◯" };
         let name = paint("1", &e.branch);
         let pr = match &e.pr {
+            // status/log never touch the network: the number is cached
+            // locally, but the live state is only known after submit/sync —
+            // show just the number rather than a cryptic placeholder.
+            Some(p) if p.state == "?" => format!("  #{}", p.number),
             Some(p) => {
                 let state = match p.state.as_str() {
                     "OPEN" => paint("32", "OPEN"),
