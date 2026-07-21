@@ -16,6 +16,8 @@ pub struct Pr {
     /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null
     #[serde(rename = "reviewDecision", default)]
     pub review_decision: Option<String>,
+    #[serde(default)]
+    pub body: String,
 }
 
 fn gh(args: &[&str]) -> Result<String> {
@@ -56,7 +58,7 @@ pub fn find(branch: &str) -> Result<Option<Pr>> {
         "--limit",
         "1",
         "--json",
-        "number,title,url,state,baseRefName,reviewDecision",
+        "number,title,url,state,baseRefName,reviewDecision,body",
     ])?;
     let mut prs: Vec<Pr> = serde_json::from_str(&json).context("parsing gh pr list output")?;
     Ok(prs.pop())

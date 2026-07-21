@@ -125,7 +125,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
 | `git queue requeue` (`restack`) | Requeue the current branch's descendants onto its tip. |
 | `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants. |
-| `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest trunk, and push back with `--force-with-lease`. |
+| `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest base, push back with `--force-with-lease`, and reconcile the PRs of every published queue (open missing ones, revive closed ones, fix bases/titles/queue maps). |
 | `git queue submit [--draft]` (`push`) | Push the current queue line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
 | `git queue yank` | Close every open (non-merged) PR in the current queue. |
 | `git queue protect` | Enable merge-order signalling (a red/green commit status per PR) for this repo. |
@@ -153,6 +153,15 @@ stay normal, reviewable, non-draft PRs.
 > (and draft PRs, the one PR-level block, read socially as "not ready for
 > review"). A commit status is the strongest signal that leaves PRs normal and
 > pushes unblocked.
+
+### Adopting existing PRs
+
+A queue can form around work that already has a PR — open a PR by hand, later
+`git queue track` the branch and `create` more on top. `sync` (and `submit`)
+reconcile the whole line: missing PRs are opened, and an existing PR is
+adopted rather than overwritten — its hand-written title is kept (just
+numbered `[k/n]`) and its body is preserved below the queue map. A queue with
+no PRs at all is never auto-published; run `git queue submit` for that.
 
 ### Landing a queue
 

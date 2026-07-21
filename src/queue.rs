@@ -63,6 +63,18 @@ impl Queue {
         roots
     }
 
+    /// Tracked branches with no tracked children (tops of lines), sorted.
+    pub fn leaves(&self) -> Vec<String> {
+        let mut leaves: Vec<String> = self
+            .parents
+            .keys()
+            .filter(|b| self.children(b).is_empty())
+            .cloned()
+            .collect();
+        leaves.sort();
+        leaves
+    }
+
     /// Every distinct base branch (untracked parents of tracked branches),
     /// sorted and deduplicated.
     pub fn bases(&self) -> Vec<String> {

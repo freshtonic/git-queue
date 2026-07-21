@@ -1,6 +1,6 @@
 //! Implementations of each `git queue` subcommand.
 
-use crate::queue::Queue;
+use crate::queue::{Line, Queue};
 use crate::render::{self, Entry, PrRef};
 use crate::{gh, git, meta, requeue};
 use anyhow::{bail, Context, Result};
@@ -550,6 +550,29 @@ pub fn sync(no_push: bool) -> Result<()> {
         }
     }
 
+    // Reconcile PRs on every *published* line — one with at least one PR
+    // anywhere in it, including a PR that predates the branch becoming a
+    // queue. Missing PRs are opened; existing ones get their base, numbered
+    // title and nav block rewritten. Lines with no PRs at all stay local:
+    // `git queue submit` publishes those deliberately.
+    if !no_push && gh::ready() {
+        for leaf in queue.leaves() {
+            let line = match queue.line_through(&leaf) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+            let published = line
+                .branches
+                .iter()
+                .any(|b| gh::find(b).ok().flatten().is_some());
+            if !published {
+                continue;
+            }
+            let outcome = reconcile_line_prs(&line, false, None, false)?;
+            report_line(&line, &outcome, "Reconciled")?;
+        }
+    }
+
     if !report.conflicted.is_empty() {
         requeue::warn_conflicts(&report.conflicted);
     } else {
@@ -672,25 +695,27 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
     Ok(Some(RemoteAction::Rebased))
 }
 
-/// `git queue submit [--draft]` — push the current queue line and open/update
-/// its numbered PRs.
-pub fn submit(draft: bool) -> Result<()> {
-    git::ensure_repo()?;
-    if !gh::ready() {
-        bail!("`gh` is not installed or not authenticated; run `gh auth login`");
-    }
-    let queue = Queue::load()?;
-    let current = git::current_branch()?;
-    if !queue.is_tracked(&current) {
-        bail!("`{current}` is not tracked; run `git queue create` or `git queue track` first");
-    }
-    let line = queue.line_through(&current)?;
-    if let Some(fork) = &line.fork_at {
-        eprintln!("warning: `{fork}` has multiple children; submitting only this line.");
-    }
+/// The outcome of reconciling one line's PRs.
+struct LinePrs {
+    entries: Vec<Entry>,
+    prs: Vec<Option<PrRef>>,
+}
+
+/// Reconcile a line's PRs with its branches: revive or create missing PRs,
+/// then rewrite base, numbered title and the shared nav block on every open
+/// one. When `push` names a remote, each active branch is pushed (front-first,
+/// so bases exist) before its PR is touched — submit's path; sync passes
+/// `None` because it already pushed. `strict` bails on branches with no
+/// commits beyond their base (submit); otherwise they are skipped with a note
+/// (sync must not die mid-reconciliation).
+fn reconcile_line_prs(
+    line: &Line,
+    draft: bool,
+    push: Option<&str>,
+    strict: bool,
+) -> Result<LinePrs> {
     let branches = &line.branches;
     let total = branches.len();
-
     let base_of = |i: usize| -> String {
         if i == 0 {
             line.base.clone()
@@ -699,45 +724,52 @@ pub fn submit(draft: bool) -> Result<()> {
         }
     };
 
-    // Look up existing PRs once. A MERGED/CLOSED PR is "frozen": we must not push
-    // to it, recreate it, or edit its base (GitHub rejects a base change on a
-    // closed PR). We still list it (with its merged/closed emoji).
-    let remote = meta::remote();
+    // Look up existing PRs once. A MERGED PR is "frozen": we must not push to
+    // it, recreate it, or edit its base. A CLOSED PR is revived below — GitHub
+    // closes a queued PR when its base branch is deleted (e.g. `--delete-branch`
+    // on the PR below), and we must not skip it.
     let existing: Vec<Option<gh::Pr>> = branches
         .iter()
         .map(|b| gh::find(b))
         .collect::<Result<_>>()?;
-    // Only MERGED PRs are "frozen" (left untouched). A CLOSED PR in the active
-    // line is revived below — GitHub closes a queued PR when its base branch is
-    // deleted (e.g. `--delete-branch` on the PR below), and we must not skip it.
     let frozen: Vec<bool> = existing
         .iter()
         .map(|p| p.as_ref().map(|pr| pr.state.as_str()) == Some("MERGED"))
         .collect();
 
     // Guard: don't open an empty PR (already-landed branches are skipped).
+    let mut empty = vec![false; total];
     for (i, b) in branches.iter().enumerate() {
         if frozen[i] {
             continue;
         }
-        let base = base_of(i);
-        if git::ahead_count(&base, b)? == 0 {
-            bail!("`{b}` has no commits beyond `{base}`; add a commit before submitting");
+        if git::ahead_count(&base_of(i), b)? == 0 {
+            if strict {
+                bail!(
+                    "`{b}` has no commits beyond `{}`; add a commit before submitting",
+                    base_of(i)
+                );
+            }
+            if existing[i].is_none() {
+                eprintln!(
+                    "note: `{b}` has no commits beyond `{}`; not opening a PR for it.",
+                    base_of(i)
+                );
+                empty[i] = true;
+            }
         }
     }
 
-    // Pass 1: push active branches (bottom-first so bases exist) and
-    // create-or-find their PRs.
-    let mut prs: Vec<Option<PrRef>> = vec![None; total];
+    // Pass 1: (optionally push and) create-or-revive each active branch's PR.
     for (i, b) in branches.iter().enumerate() {
-        if frozen[i] {
-            prs[i] = existing[i].as_ref().map(pr_ref); // keep untouched
+        if frozen[i] || empty[i] {
             continue;
         }
         let base = base_of(i);
-        println!("Pushing `{b}`...");
-        git::push(&remote, b)?;
-
+        if let Some(remote) = push {
+            println!("Pushing `{b}`...");
+            git::push(remote, b)?;
+        }
         let subject = git::tip_subject(b)?;
         let title = render::numbered_title(&subject, i, total);
         let number = match &existing[i] {
@@ -748,18 +780,26 @@ pub fn submit(draft: bool) -> Result<()> {
                 Ok(()) => pr.number,
                 Err(_) => gh::create(b, &base, &title, "Opening…", draft)?,
             },
-            None => gh::create(b, &base, &title, "Opening…", draft)?,
+            None => {
+                let n = gh::create(b, &base, &title, "Opening…", draft)?;
+                println!("Opened PR #{n} for `{b}` (base `{base}`).");
+                n
+            }
         };
         meta::set_pr(b, number)?;
     }
 
     // Re-read active PRs now that any new ones exist.
+    let mut full: Vec<Option<gh::Pr>> = vec![None; total];
+    let mut prs: Vec<Option<PrRef>> = vec![None; total];
     for (i, b) in branches.iter().enumerate() {
         if frozen[i] {
+            prs[i] = existing[i].as_ref().map(pr_ref); // keep untouched
             continue;
         }
         if let Some(pr) = gh::find(b)? {
             prs[i] = Some(pr_ref(&pr));
+            full[i] = Some(pr);
         }
     }
 
@@ -783,27 +823,58 @@ pub fn submit(draft: bool) -> Result<()> {
             Some(p) => p.number,
             None => continue,
         };
-        let subject = git::tip_subject(b)?;
+        // Renumber the PR's existing title rather than imposing the commit
+        // subject: titles are review-facing and often hand-written (especially
+        // on PRs that predate the queue). New PRs were just created from the
+        // tip subject, so this is a no-op for them.
+        let subject = match &full[i] {
+            Some(pr) if !pr.title.trim().is_empty() => pr.title.clone(),
+            _ => git::tip_subject(b)?,
+        };
         let title = render::numbered_title(&subject, i, total);
         let nav = render::nav_block(&entries, b, &line.base);
-        let description = meta::description(b).unwrap_or_default();
+        let description = match meta::description(b).filter(|d| !d.trim().is_empty()) {
+            Some(d) => d,
+            None => {
+                // No local description: adopt the PR's existing body (minus any
+                // previous nav block) so updating a PR that predates the queue
+                // never wipes what its author wrote.
+                let adopted = full[i]
+                    .as_ref()
+                    .map(|pr| render::strip_block(&pr.body).trim().to_string())
+                    .unwrap_or_default();
+                let adopted = if adopted == "Opening…" {
+                    String::new()
+                } else {
+                    adopted
+                };
+                if !adopted.is_empty() {
+                    meta::set_description(b, &adopted)?;
+                }
+                adopted
+            }
+        };
         let body = render::compose_body(&description, &nav);
         gh::edit(number, &base_of(i), &title, &body)?;
     }
 
-    // Signal merge order with commit statuses, if enabled.
+    Ok(LinePrs { entries, prs })
+}
+
+/// Apply the status gate (if enabled) and print the line's PR listing.
+fn report_line(line: &Line, outcome: &LinePrs, heading: &str) -> Result<()> {
     let gate = meta::gate();
     let gated = gate.as_deref() == Some("status");
     if let Some(other) = gate.as_deref().filter(|g| *g != "status") {
         eprintln!("warning: unknown queue.gate mode `{other}` — no merge gate applied; run `git queue protect` to enable status mode");
     }
     if gated {
-        apply_status_gate(&entries)?;
+        apply_status_gate(&outcome.entries)?;
     }
-
-    println!("\nSubmitted {total} PR(s):");
-    for (i, b) in branches.iter().enumerate() {
-        if let Some(p) = &prs[i] {
+    let total = line.branches.len();
+    println!("\n{heading} {total} PR(s):");
+    for (i, b) in line.branches.iter().enumerate() {
+        if let Some(p) = &outcome.prs[i] {
             println!("  [{}/{}] {}  {}", i + 1, total, b, p.url);
         }
     }
@@ -811,6 +882,27 @@ pub fn submit(draft: bool) -> Result<()> {
         println!("Merge gate active: the front PR's `{}` status is \u{2713}; the rest are \u{2717} until it lands.", render::GATE_CONTEXT);
     }
     Ok(())
+}
+
+/// `git queue submit [--draft]` — push the current queue line and open/update
+/// its numbered PRs.
+pub fn submit(draft: bool) -> Result<()> {
+    git::ensure_repo()?;
+    if !gh::ready() {
+        bail!("`gh` is not installed or not authenticated; run `gh auth login`");
+    }
+    let queue = Queue::load()?;
+    let current = git::current_branch()?;
+    if !queue.is_tracked(&current) {
+        bail!("`{current}` is not tracked; run `git queue create` or `git queue track` first");
+    }
+    let line = queue.line_through(&current)?;
+    if let Some(fork) = &line.fork_at {
+        eprintln!("warning: `{fork}` has multiple children; submitting only this line.");
+    }
+    let remote = meta::remote();
+    let outcome = reconcile_line_prs(&line, draft, Some(&remote), true)?;
+    report_line(&line, &outcome, "Submitted")
 }
 
 fn pr_ref(pr: &gh::Pr) -> PrRef {
