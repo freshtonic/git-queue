@@ -1595,3 +1595,26 @@ fn checkout_validates_membership_and_cleanliness() {
     let head = sha(dir, "HEAD");
     queue(dir).args(["checkout", &head]).assert().failure();
 }
+
+#[test]
+fn man_page_documents_real_commands_in_detail() {
+    let out = queue(Path::new(".")).arg("man").assert().success();
+    let roff = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    // No phantom per-subcommand pages.
+    assert!(
+        !roff.contains("git\\-queue\\-init(1)"),
+        "phantom subcommand man refs remain"
+    );
+    // Real names, detailed sections, and argument docs.
+    assert!(roff.contains(".SH COMMANDS"), "missing COMMANDS section");
+    assert!(roff.contains("git queue init"), "missing real command name");
+    assert!(
+        roff.contains("\\-\\-new\\-parent <NEW_PARENT>") && !roff.contains("[\\-\\-new\\-parent"),
+        "required option must not render as optional"
+    );
+    assert!(
+        roff.contains("repair primitive"),
+        "long_about content missing (requeue)"
+    );
+    assert!(roff.contains("(required)") && roff.contains("(optional)"));
+}
