@@ -116,11 +116,11 @@ fn strip_prefix(subject: &str) -> &str {
 /// Build the shared queue-navigation block: a formatted, linked list of every
 /// PR in the line in merge order (bottom first), with the current PR bolded and
 /// marked. Each entry links to the PR's URL when known.
-pub fn nav_block(line: &[Entry], current: &str, base: &str) -> String {
+pub fn nav_block(line: &[Entry], current: &str, base: &str, queue_name: &str) -> String {
     let total = line.len();
     let mut lines = vec![
         format!(
-            "### 📚 Queued PR &nbsp;·&nbsp; {} of {}",
+            "### 📚 {queue_name} PR &nbsp;·&nbsp; {} of {}",
             position_of(line, current),
             total
         ),
@@ -157,9 +157,9 @@ pub fn nav_block(line: &[Entry], current: &str, base: &str) -> String {
         };
         let arrow = format!(" → `{target}`");
         let line_str = if is_current {
-            format!("{}. {status}**{label}{arrow}** &nbsp;👈 **this PR**", i + 1)
+            format!("{status}**{label}{arrow}** &nbsp;👈 **this PR**")
         } else {
-            format!("{}. {status}{label}{arrow}", i + 1)
+            format!("{status}{label}{arrow}")
         };
         lines.push(line_str);
     }
@@ -181,17 +181,25 @@ fn position_of(line: &[Entry], current: &str) -> usize {
         .map_or(0, |i| i + 1)
 }
 
-/// Compose a PR body: the queue nav block PREPENDED, then the branch's
-/// description below it. Any previous nav block (BEGIN..END) is stripped first,
-/// so re-submitting is idempotent.
-pub fn compose_body(description: &str, nav: &str) -> String {
-    let desc = strip_block(description);
-    let desc = desc.trim();
-    if desc.is_empty() {
-        format!("{BEGIN}\n{nav}\n{END}")
-    } else {
-        format!("{BEGIN}\n{nav}\n{END}\n\n---\n\n{desc}")
+/// Compose a PR body: the queue map, then optional "About this queue" and
+/// "About this branch" sections, all inside the managed BEGIN..END block —
+/// every part regenerates from config on each submit.
+pub fn compose_body(queue_description: &str, branch_description: &str, nav: &str) -> String {
+    let mut body = format!("{BEGIN}\n{nav}");
+    let qd = queue_description.trim();
+    if !qd.is_empty() {
+        body.push_str(&format!("\n\n# About this queue\n\n{qd}"));
     }
+    let bd = strip_block(branch_description);
+    // Legacy bodies kept the description under a bare `---` divider outside
+    // the managed block; drop that scaffolding if it survived the strip.
+    let bd = bd.trim();
+    let bd = bd.strip_prefix("---").map(str::trim_start).unwrap_or(bd);
+    if !bd.is_empty() {
+        body.push_str(&format!("\n\n# About this branch\n\n{bd}"));
+    }
+    body.push_str(&format!("\n{END}"));
+    body
 }
 
 /// Remove a previously injected BEGIN..END block (inclusive) from `body`.
@@ -276,22 +284,25 @@ mod tests {
     }
 
     #[test]
-    fn compose_prepends_block_and_stays_idempotent() {
-        // A prior render (block already at the top) plus the description below.
-        let body = format!("{BEGIN}\nold\n{END}\n\n---\n\nHello");
-        let composed = compose_body(&body, "new-nav");
-        assert!(composed.starts_with(BEGIN), "nav block must be prepended");
+    fn compose_builds_sections_and_stays_idempotent() {
+        // A branch description that still contains an old managed block.
+        let branch_desc = format!("{BEGIN}\nold\n{END}\n\n---\n\nHello");
+        let composed = compose_body("The plan.", &branch_desc, "new-nav");
+        assert!(composed.starts_with(BEGIN));
+        assert!(composed.ends_with(END));
         assert!(composed.contains("new-nav"));
         assert!(!composed.contains("old"), "old nav must be stripped");
-        assert!(composed.contains("Hello"), "description preserved");
-        // Exactly one block after recomposition (idempotent).
+        assert!(composed.contains("# About this queue\n\nThe plan."));
+        assert!(composed.contains("# About this branch\n\nHello"));
         assert_eq!(composed.matches(BEGIN).count(), 1);
     }
 
     #[test]
-    fn compose_into_empty_description() {
-        let composed = compose_body("", "nav");
+    fn compose_omits_empty_sections() {
+        let composed = compose_body("", "", "nav");
         assert_eq!(composed, format!("{BEGIN}\nnav\n{END}"));
+        let q_only = compose_body("Q.", "", "nav");
+        assert!(q_only.contains("About this queue") && !q_only.contains("About this branch"));
     }
 
     fn entry(branch: &str, number: u64, url: &str, state: &str, review: Option<&str>) -> Entry {
@@ -407,19 +418,20 @@ mod tests {
             ),
             entry("ui", 12, "https://x/pull/12", "OPEN", None),
         ];
-        let nav = nav_block(&line, "service", "main");
+        let nav = nav_block(&line, "service", "main", "payments");
+        assert!(nav.contains("📚 payments PR"), "{nav}");
         // Merged PR: state emoji only (approval no longer meaningful).
         assert!(
-            nav.contains("1. 🟣 [#10 `api`](https://x/pull/10) → `main`"),
+            nav.contains("🟣 [#10 `api`](https://x/pull/10) → `main`"),
             "{nav}"
         );
         // Current PR: emojis, then bolded label targeting the branch below.
         assert!(
-            nav.contains("2. ♻️🟢 **[#11 `service`](https://x/pull/11) → `api`**"),
+            nav.contains("♻️🟢 **[#11 `service`](https://x/pull/11) → `api`**"),
             "{nav}"
         );
         // Not-yet-reviewed open PR.
-        assert!(nav.contains("3. ⏳🟢 [#12 `ui`]"), "{nav}");
+        assert!(nav.contains("⏳🟢 [#12 `ui`]"), "{nav}");
         assert!(nav.contains("👈 **this PR**"));
         assert!(nav.contains("2 of 3"));
         assert!(nav.contains("FIFO"), "merge order described as FIFO");

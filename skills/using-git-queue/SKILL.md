@@ -45,7 +45,10 @@ below own that propagation.
 | Trunk moved / a teammate pushed / branches drifted | `git queue sync` | Pulls remote commits, requeues on the base, pushes back, reconciles published PRs |
 | Open or refresh the PRs | `git queue submit` | Pushes + numbered, cross-linked PRs |
 | Turn an existing PR into a queue | `git queue track`, then `create` more, then `sync`/`submit` | The existing PR is adopted: title kept (numbered), body preserved under the queue map; missing PRs are opened |
-| Say what a PR is about | `git queue describe [-m …]` | Sets the PR body |
+| Name the queue (mandatory; prompted at creation) | `git queue name [<name>]` | Shown in PR headers; keys the queue description |
+| Describe the whole queue | `git queue describe [-m …]` | "About this queue" section in every PR of the queue |
+| Describe one branch | `git queue describe-branch [-m …]` | "About this branch" section in its PR |
+| List all queues | `git queue ls` | Most recently touched first |
 | One big branch → a queue | `git queue split` | Editor assigns commits to branches |
 | Adopt an existing branch AND divide it | `git queue track --split` (add `--stamp-ids` to skip the prompt) | track + stamp + split editor in one step |
 | Abandon a queue's open PRs | `git queue yank` | Closes every open (non-merged) PR in the queue |

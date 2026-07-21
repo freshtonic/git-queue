@@ -96,6 +96,27 @@ git queue sync                 # pull remote commits, requeue onto the base, pus
 git queue submit               # refresh the PRs
 ```
 
+### Named queues
+
+Every queue has a **name** — asked for interactively when a new queue starts
+(`create`/`track`/`split`; `--queue <name>` scripts it, and non-interactive
+runs fall back to the branch name). The name appears in each PR's header
+("📚 eql-v3 PR · 2 of 3"), namespaces split branches (`queue/<name>/<segment>`),
+and keys the queue's own description:
+
+```sh
+git queue name                 # show the current queue's name
+git queue name eql-v3          # (re)name it
+git queue describe             # describe the QUEUE  -> "About this queue" in every PR
+git queue describe-branch      # describe the BRANCH -> "About this branch" in its PR
+git queue ls                   # all queues, most recently touched first
+```
+
+PR bodies are fully generated from this metadata: the queue map, then
+"About this queue", then "About this branch" — regenerated on every
+`submit`/`sync`, so edits belong in `describe`/`describe-branch` (a hand-written
+body on an adopted PR is imported as the branch description rather than lost).
+
 ### Queues on any base branch
 
 A queue doesn't have to start on trunk. Run `create` from any branch — a
@@ -114,11 +135,14 @@ git queue create fix-a --base release-1.2            # base named explicitly
 |---|---|
 | `git queue init [--trunk <b>]` | Record the trunk branch for this repo. |
 | `git queue create <name> [--base <b>]` | Create `<name>` queued after the current branch (or on base `<b>`) and track it. |
-| `git queue split [--delete-original]` | Split the current branch's commits into a queue (editor assigns commits to branches). If no segment reuses the original branch name, offers to delete the now-redundant old branch. |
+| `git queue split [--queue <n>] [--delete-original]` | Split the current branch's commits into a queue (editor assigns commits to branches; they are created as `queue/<name>/<segment>`). If no segment reuses the original branch name, offers to delete the now-redundant old branch. |
 | `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Queued-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
 | `git queue untrack` | Forget the current branch's queue metadata. |
-| `git queue describe [-m <text>]` | Describe what the current branch/PR is about; becomes the PR body (opens `$EDITOR` without `-m`). |
-| `git queue status` (`ls`, `list`) | Show the queue tree with PR numbers/states and `Queued-Commit-Id` coverage. |
+| `git queue describe [-m <text>]` | Describe the current **queue**; shows under "About this queue" in every PR of the queue (opens `$EDITOR` without `-m`). |
+| `git queue describe-branch [-m <text>]` | Describe the current **branch**; shows under "About this branch" in its PR. |
+| `git queue name [<name>]` | Show or set the current queue's name. |
+| `git queue ls` (`list`) | List every queue, most recently touched first. |
+| `git queue status` | Show the queue tree with PR numbers/states and `Queued-Commit-Id` coverage. |
 | `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Queued-Commit-Id`. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |

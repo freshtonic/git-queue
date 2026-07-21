@@ -4,11 +4,15 @@
 //!   queue.trunk                       -> trunk branch name
 //!   queue.remote                      -> remote name (default "origin")
 //!   queue.gate                        -> merge-order gate mode
+//!   queue.<qname>.description         -> the queue's description
+//!   queue.<qname>.createdat           -> epoch seconds, set once
+//!   queue.<qname>.modifiedat          -> epoch seconds, touched by queue ops
 //!   branch.<name>.queueParent         -> parent branch of <name>
 //!   branch.<name>.queueParentSha      -> parent tip when last (re)based; the
 //!                                        rebase anchor used by `sync`
 //!   branch.<name>.queuePr             -> cached PR number
-//!   branch.<name>.queueDescription    -> PR body text set by `describe`
+//!   branch.<name>.queueName           -> name of the queue this branch is in
+//!   branch.<name>.queueDescription    -> branch text set by `describe-branch`
 
 use crate::git;
 use anyhow::{bail, Result};
@@ -115,6 +119,102 @@ pub fn untrack(branch: &str) {
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
     config_unset(&description_key(branch));
+    config_unset(&queue_name_key(branch));
+}
+
+fn queue_name_key(branch: &str) -> String {
+    format!("branch.{branch}.queueName")
+}
+
+/// The named queue this branch belongs to, if recorded.
+pub fn branch_queue(branch: &str) -> Option<String> {
+    config_get(&queue_name_key(branch))
+}
+
+pub fn set_branch_queue(branch: &str, queue: &str) -> Result<()> {
+    config_set(&queue_name_key(branch), queue)
+}
+
+/// Queue names must be usable inside branch names and config subsections.
+pub fn validate_queue_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if !ok {
+        bail!("queue name `{name}` is invalid: use letters, digits, '-', '_' or '.'");
+    }
+    Ok(())
+}
+
+pub fn queue_description(queue: &str) -> Option<String> {
+    config_get(&format!("queue.{queue}.description"))
+}
+
+pub fn set_queue_description(queue: &str, text: &str) -> Result<()> {
+    if text.trim().is_empty() {
+        config_unset(&format!("queue.{queue}.description"));
+        Ok(())
+    } else {
+        config_set(&format!("queue.{queue}.description"), text)
+    }
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Record activity on a queue: sets createdAt once, bumps modifiedAt.
+pub fn touch_queue(queue: &str) {
+    let created = format!("queue.{queue}.createdat");
+    if config_get(&created).is_none() {
+        let _ = config_set(&created, &now_epoch().to_string());
+    }
+    let _ = config_set(
+        &format!("queue.{queue}.modifiedat"),
+        &now_epoch().to_string(),
+    );
+}
+
+/// Last-activity time of a queue (modifiedAt, falling back to createdAt).
+pub fn queue_touched_at(queue: &str) -> u64 {
+    config_get(&format!("queue.{queue}.modifiedat"))
+        .or_else(|| config_get(&format!("queue.{queue}.createdat")))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Every queue name that has metadata or a member branch.
+pub fn all_queue_names() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(raw) = git::out(&["config", "--local", "--get-regexp", r"^queue\..+\..+$"]) {
+        for line in raw.lines() {
+            if let Some(key) = line.split_whitespace().next() {
+                let parts: Vec<&str> = key.splitn(3, '.').collect();
+                if parts.len() == 3 && parts[0] == "queue" {
+                    names.push(parts[1].to_string());
+                }
+            }
+        }
+    }
+    if let Ok(raw) = git::out(&[
+        "config",
+        "--local",
+        "--get-regexp",
+        r"^branch\..*\.queuename$",
+    ]) {
+        for line in raw.lines() {
+            if let Some(name) = line.split_whitespace().nth(1) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// All branches that have a `queueParent` recorded.

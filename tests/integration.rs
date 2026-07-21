@@ -453,33 +453,42 @@ fn split_divides_a_branch_into_a_queue() {
         .success();
 
     // Three tracked branches with the right parent chain.
-    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
     assert_eq!(
-        git_out(dir, &["config", "branch.service.queueParent"]),
-        "api"
+        git_out(dir, &["config", "branch.queue/feature/api.queueParent"]),
+        "main"
     );
     assert_eq!(
-        git_out(dir, &["config", "branch.ui.queueParent"]),
-        "service"
+        git_out(dir, &["config", "branch.queue/feature/service.queueParent"]),
+        "queue/feature/api"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/feature/ui.queueParent"]),
+        "queue/feature/service"
     );
 
     // Each branch contains exactly its own slice of history.
-    assert!(exists_at(dir, "api", "c1.txt"));
+    assert!(exists_at(dir, "queue/feature/api", "c1.txt"));
     assert!(
-        !exists_at(dir, "api", "c2.txt"),
+        !exists_at(dir, "queue/feature/api", "c2.txt"),
         "api should not include c2"
     );
-    assert!(exists_at(dir, "service", "c2.txt"));
+    assert!(exists_at(dir, "queue/feature/service", "c2.txt"));
     assert!(
-        !exists_at(dir, "service", "c3.txt"),
+        !exists_at(dir, "queue/feature/service", "c3.txt"),
         "service should not include c3"
     );
     for f in ["c1.txt", "c2.txt", "c3.txt"] {
-        assert!(exists_at(dir, "ui", f), "ui should include {f}");
+        assert!(
+            exists_at(dir, "queue/feature/ui", f),
+            "ui should include {f}"
+        );
     }
 
     // Ends up checked out on the top of the new queue.
-    assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "ui");
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "queue/feature/ui"
+    );
 }
 
 #[test]
@@ -491,7 +500,7 @@ fn describe_stores_and_clears_description() {
     commit(dir, "a.txt");
 
     queue(dir)
-        .args(["describe", "-m", "Adds the API layer"])
+        .args(["describe-branch", "-m", "Adds the API layer"])
         .assert()
         .success();
     assert_eq!(
@@ -499,8 +508,22 @@ fn describe_stores_and_clears_description() {
         "Adds the API layer"
     );
 
+    // Queue-level description lands under queue.<name>.description (`a` was
+    // auto-named after its branch).
+    queue(dir)
+        .args(["describe", "-m", "The whole queue plan"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(dir, &["config", "--local", "queue.a.description"]),
+        "The whole queue plan"
+    );
+
     // Empty description clears it.
-    queue(dir).args(["describe", "-m", ""]).assert().success();
+    queue(dir)
+        .args(["describe-branch", "-m", ""])
+        .assert()
+        .success();
     let cleared = StdCommand::new("git")
         .args(["config", "--local", "--get", "branch.a.queueDescription"])
         .current_dir(dir)
@@ -1319,17 +1342,23 @@ fn track_split_divides_an_adopted_branch() {
         .assert()
         .success();
 
-    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
-    assert_eq!(git_out(dir, &["config", "branch.ui.queueParent"]), "api");
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/big/api.queueParent"]),
+        "main"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/big/ui.queueParent"]),
+        "queue/big/api"
+    );
     // Stamping ran before the split, so every segment tip carries an id.
-    for rev in ["api", "ui"] {
+    for rev in ["queue/big/api", "queue/big/ui"] {
         let id = queue_id_of(dir, rev);
         assert!(id.starts_with("q-"), "{rev} unstamped: {id:?}");
     }
     // Segment contents are right.
-    git(dir, &["checkout", "-q", "api"]);
+    git(dir, &["checkout", "-q", "queue/big/api"]);
     assert!(dir.join("c2.txt").exists() && !dir.join("c3.txt").exists());
-    git(dir, &["checkout", "-q", "ui"]);
+    git(dir, &["checkout", "-q", "queue/big/ui"]);
     assert!(dir.join("c3.txt").exists());
 }
 
@@ -1358,8 +1387,14 @@ fn split_cleans_up_an_unreused_original_branch() {
         .output()
         .unwrap();
     assert!(!cfg.status.success(), "big's queue config must be gone");
-    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
-    assert_eq!(git_out(dir, &["config", "branch.ui.queueParent"]), "api");
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/big/api.queueParent"]),
+        "main"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/big/ui.queueParent"]),
+        "queue/big/api"
+    );
 }
 
 #[test]
@@ -1387,4 +1422,61 @@ fn split_keeps_the_original_by_default_when_not_a_tty() {
         .output()
         .unwrap();
     assert!(!cfg.status.success());
+}
+
+#[test]
+fn ls_lists_queues_most_recently_touched_first() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "alpha"]).assert().success();
+    commit(dir, "a.txt");
+    git(dir, &["checkout", "-q", "main"]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    queue(dir).args(["create", "beta"]).assert().success();
+    commit(dir, "b.txt");
+
+    let out = queue(dir).arg("ls").assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    let beta_pos = text.find("beta").unwrap();
+    let alpha_pos = text.find("alpha").unwrap();
+    assert!(beta_pos < alpha_pos, "newest first:\n{text}");
+    assert!(text.contains("← current"), "{text}");
+
+    // Touching alpha (a queue op) reorders it to the top.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    git(dir, &["checkout", "-q", "alpha"]);
+    stage(dir, "a2.txt", "a2");
+    queue(dir).args(["commit", "-m", "more"]).assert().success();
+    queue(dir).args(["submit"]).assert().failure(); // no gh remote; touch still via name below
+    queue(dir).args(["name", "alpha"]).assert().success();
+    let out = queue(dir).arg("ls").assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        text.find("alpha").unwrap() < text.find("beta").unwrap(),
+        "alpha touched last:\n{text}"
+    );
+}
+
+#[test]
+fn name_shows_and_renames_the_queue() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "work"]).assert().success();
+    commit(dir, "w.txt");
+
+    let out = queue(dir).arg("name").assert().success();
+    assert_eq!(
+        String::from_utf8_lossy(&out.get_output().stdout).trim(),
+        "work"
+    );
+    queue(dir).args(["name", "payments"]).assert().success();
+    let out = queue(dir).arg("name").assert().success();
+    assert_eq!(
+        String::from_utf8_lossy(&out.get_output().stdout).trim(),
+        "payments"
+    );
+    // Invalid names rejected.
+    queue(dir).args(["name", "bad/name"]).assert().failure();
 }

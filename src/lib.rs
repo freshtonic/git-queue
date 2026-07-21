@@ -45,10 +45,20 @@ enum Command {
         /// Start the queue on this base branch instead of the current branch.
         #[arg(long)]
         base: Option<String>,
+        /// Name for the queue when this starts a new one.
+        #[arg(long)]
+        queue: Option<String>,
     },
     /// Show the current queue and its PR status.
-    #[command(visible_aliases = ["ls", "list"])]
     Status,
+    /// List every queue in the repo, most recently touched first.
+    #[command(visible_alias = "list")]
+    Ls,
+    /// Show or set the current queue's name.
+    Name {
+        /// New name for the queue (shows the current name when omitted).
+        name: Option<String>,
+    },
     /// The status tree with each branch's commits (and their Queued-Commit-Ids) shown.
     Log,
     /// Split the current branch's commits into a queue of branches.
@@ -56,9 +66,19 @@ enum Command {
         /// If the original branch isn't reused as a segment, delete it without asking.
         #[arg(long)]
         delete_original: bool,
+        /// Queue name; segment branches are created as queue/<name>/<segment>.
+        #[arg(long)]
+        queue: Option<String>,
     },
-    /// Describe what the current branch/PR is about (becomes the PR body).
+    /// Describe the current QUEUE (the "About this queue" section of its PRs).
     Describe {
+        /// Description text (opens $EDITOR if omitted).
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+    },
+    /// Describe the current BRANCH (the "About this branch" section of its PR).
+    #[command(name = "describe-branch")]
+    DescribeBranch {
         /// Description text (opens $EDITOR if omitted).
         #[arg(short = 'm', long)]
         message: Option<String>,
@@ -82,6 +102,9 @@ enum Command {
         /// reused as a segment.
         #[arg(long, requires = "split")]
         delete_original: bool,
+        /// Name for the queue when this adoption starts a new one.
+        #[arg(long)]
+        queue: Option<String>,
     },
     /// Forget the current branch's queue metadata.
     Untrack,
@@ -207,18 +230,34 @@ pub fn run() {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Init { trunk } => commands::init(trunk),
-        Command::Create { name, base } => commands::create(&name, base.as_deref()),
+        Command::Create { name, base, queue } => {
+            commands::create(&name, base.as_deref(), queue.as_deref())
+        }
         Command::Status => commands::status(),
+        Command::Ls => commands::ls(),
+        Command::Name { name } => commands::name(name),
         Command::Log => commands::log(),
-        Command::Split { delete_original } => commands::split(delete_original),
+        Command::Split {
+            delete_original,
+            queue,
+        } => commands::split(delete_original, queue.as_deref()),
         Command::Describe { message } => commands::describe(message),
+        Command::DescribeBranch { message } => commands::describe_branch(message),
         Command::Track {
             parent,
             stamp_ids,
             no_stamp_ids,
             split,
             delete_original,
-        } => commands::track(parent, stamp_ids, no_stamp_ids, split, delete_original),
+            queue,
+        } => commands::track(
+            parent,
+            stamp_ids,
+            no_stamp_ids,
+            split,
+            delete_original,
+            queue.as_deref(),
+        ),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),

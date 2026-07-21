@@ -102,7 +102,7 @@ pub fn init(trunk: Option<String>) -> Result<()> {
 
 /// `git queue create <name> [--base <branch>]` — new branch queued after the
 /// current one (or on an explicit `--base` branch).
-pub fn create(name: &str, base: Option<&str>) -> Result<()> {
+pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
     if git::branch_exists(name) {
@@ -117,11 +117,24 @@ pub fn create(name: &str, base: Option<&str>) -> Result<()> {
         }
         None => git::current_branch()?,
     };
+    // Every queue is named: inherit when extending, otherwise ask/take one.
+    let qname = if meta::parent(&parent).is_some() {
+        let q = Queue::load()?;
+        let line = q.line_through(&parent)?;
+        match line_queue_name(&line) {
+            Some(n) => n,
+            None => bail!("this queue has no name; run `git queue name <name>` first"),
+        }
+    } else {
+        require_queue_name(queue_flag, name)?
+    };
     let parent_sha = git::rev_parse(&parent)?;
 
     git::create_branch(name, &parent)?;
     meta::set_parent(name, &parent)?;
     meta::set_parent_sha(name, &parent_sha)?;
+    meta::set_branch_queue(name, &qname)?;
+    meta::touch_queue(&qname);
     git::checkout(name)?;
 
     if parent == trunk {
@@ -140,7 +153,7 @@ pub fn create(name: &str, base: Option<&str>) -> Result<()> {
 /// branches. Opens a `rebase -i`-style editor where each commit is prefixed
 /// with the branch it should belong to; consecutive commits sharing a name
 /// become one branch, and the groups queue in order (file order = merge order).
-pub fn split(delete_original: bool) -> Result<()> {
+pub fn split(delete_original: bool, queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     if !git::worktree_clean() {
         bail!("working tree has uncommitted changes; commit or stash them before splitting");
@@ -151,6 +164,15 @@ pub fn split(delete_original: bool) -> Result<()> {
         queue.parent_of(&branch).unwrap().to_string()
     } else {
         queue.trunk.clone()
+    };
+    // Every queue is named, and split's branches live under queue/<name>/…
+    let qname = if queue.is_tracked(&branch) {
+        match line_queue_name(&queue.line_through(&branch)?) {
+            Some(n) => n,
+            None => require_queue_name(queue_flag, &branch)?,
+        }
+    } else {
+        require_queue_name(queue_flag, &branch)?
     };
 
     let commits = git::commits_between(&base, &branch)?;
@@ -164,6 +186,19 @@ pub fn split(delete_original: bool) -> Result<()> {
         println!("All commits stayed in one branch — nothing split.");
         return Ok(());
     }
+    // Segment branches live under the queue's namespace; names the user
+    // already fully qualified are kept as-is.
+    let segments: Vec<(String, String)> = segments
+        .into_iter()
+        .map(|(n, sha)| {
+            let full = if n.starts_with("queue/") || n == branch {
+                n
+            } else {
+                format!("queue/{qname}/{n}")
+            };
+            (full, sha)
+        })
+        .collect();
 
     // Names must be free (unless it's the original branch we're reusing).
     for (name, _) in &segments {
@@ -184,8 +219,10 @@ pub fn split(delete_original: bool) -> Result<()> {
         }
         meta::set_parent(name, &parent)?;
         meta::set_parent_sha(name, &git::rev_parse(&parent)?)?;
+        meta::set_branch_queue(name, &qname)?;
         parent = name.clone();
     }
+    meta::touch_queue(&qname);
 
     let top = segments.last().unwrap().0.clone();
     git::checkout(&top)?;
@@ -333,6 +370,7 @@ pub fn track(
     no_stamp_ids: bool,
     split_after: bool,
     delete_original: bool,
+    queue_flag: Option<&str>,
 ) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
@@ -358,7 +396,19 @@ pub fn track(
     let base = git::merge_base(&parent, &branch)?;
     meta::set_parent(&branch, &parent)?;
     meta::set_parent_sha(&branch, &base)?;
-    println!("Tracking `{branch}` with parent `{parent}`.");
+    // Every queue is named: inherit when adopting into an existing queue,
+    // otherwise ask/take one.
+    let qname = {
+        let q = Queue::load()?;
+        let line = q.line_through(&branch)?;
+        match line_queue_name(&line) {
+            Some(n) => n,
+            None => require_queue_name(queue_flag, &branch)?,
+        }
+    };
+    meta::set_branch_queue(&branch, &qname)?;
+    meta::touch_queue(&qname);
+    println!("Tracking `{branch}` with parent `{parent}` in queue `{qname}`.");
 
     // Offer stable change identity to the adopted commits.
     let missing: Vec<String> = git::queue_ids(&format!("{base}..{branch}"))?
@@ -423,7 +473,7 @@ fn split_if_requested(
         println!("`{branch}` has fewer than 2 commits — nothing to split.");
         return Ok(());
     }
-    split(delete_original)
+    split(delete_original, None)
 }
 
 /// `git queue untrack` — forget the current branch's queue metadata.
@@ -445,9 +495,45 @@ pub fn describe(message: Option<String>) -> Result<()> {
     if !queue.is_tracked(&branch) {
         bail!("`{branch}` is not a queue branch; `git queue create`/`track` it first");
     }
+    let line = queue.line_through(&branch)?;
+    let Some(qname) = line_queue_name(&line) else {
+        bail!("this queue has no name yet; run `git queue name <name>` first");
+    };
     let text = match message {
         Some(m) => m,
-        None => edit_description(&branch, meta::description(&branch).as_deref())?,
+        None => edit_description(
+            &format!("queue `{qname}`"),
+            meta::queue_description(&qname).as_deref(),
+            "the whole queue (the \"About this queue\" section of every PR in it)",
+        )?,
+    };
+    meta::set_queue_description(&qname, &text)?;
+    meta::touch_queue(&qname);
+    if text.trim().is_empty() {
+        println!("Cleared the description of queue `{qname}`.");
+    } else {
+        println!("Saved the description of queue `{qname}`. Every PR in the queue shows it");
+        println!("under \"About this queue\" on the next `git queue submit`/`sync`.");
+    }
+    Ok(())
+}
+
+/// `git queue describe-branch [-m <text>]` — describe what the current branch
+/// is about; becomes the "About this branch" section of its PR.
+pub fn describe_branch(message: Option<String>) -> Result<()> {
+    git::ensure_repo()?;
+    let queue = Queue::load()?;
+    let branch = git::current_branch()?;
+    if !queue.is_tracked(&branch) {
+        bail!("`{branch}` is not a queue branch; `git queue create`/`track` it first");
+    }
+    let text = match message {
+        Some(m) => m,
+        None => edit_description(
+            &format!("`{branch}`"),
+            meta::description(&branch).as_deref(),
+            "this branch (the \"About this branch\" section of its PR)",
+        )?,
     };
     meta::set_description(&branch, &text)?;
     if text.trim().is_empty() {
@@ -460,14 +546,104 @@ pub fn describe(message: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// `git queue name [<name>]` — show or set the current queue's name. Setting
+/// records membership on every branch of the line.
+pub fn name(new_name: Option<String>) -> Result<()> {
+    git::ensure_repo()?;
+    let queue = Queue::load()?;
+    let branch = git::current_branch()?;
+    if !queue.is_tracked(&branch) {
+        bail!("`{branch}` is not a queue branch");
+    }
+    let line = queue.line_through(&branch)?;
+    match new_name {
+        None => match line_queue_name(&line) {
+            Some(n) => println!("{n}"),
+            None => println!("(this queue has no name; set one with `git queue name <name>`)"),
+        },
+        Some(n) => {
+            meta::validate_queue_name(&n)?;
+            for b in &line.branches {
+                meta::set_branch_queue(b, &n)?;
+            }
+            meta::touch_queue(&n);
+            println!("Named this queue `{n}` ({} branches).", line.branches.len());
+        }
+    }
+    Ok(())
+}
+
+/// `git queue ls` — every queue in the repo, most recently touched first.
+pub fn ls() -> Result<()> {
+    git::ensure_repo()?;
+    let queue = Queue::load()?;
+    let current = git::current_branch().ok();
+
+    // Group tracked lines by queue name (leaf-per-line; forks share a name).
+    let mut queues: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut unnamed: Vec<String> = Vec::new();
+    for leaf in queue.leaves() {
+        let Ok(line) = queue.line_through(&leaf) else {
+            continue;
+        };
+        match line_queue_name(&line) {
+            Some(n) => {
+                let e = queues.entry(n).or_default();
+                for b in &line.branches {
+                    if !e.contains(b) {
+                        e.push(b.clone());
+                    }
+                }
+            }
+            None => unnamed.push(line.branches.first().cloned().unwrap_or(leaf)),
+        }
+    }
+    // Named queues with metadata but no live branches still show up.
+    for n in meta::all_queue_names() {
+        queues.entry(n).or_default();
+    }
+    if queues.is_empty() && unnamed.is_empty() {
+        println!("No queues yet. Create one with `git queue create <name>`.");
+        return Ok(());
+    }
+    let mut ordered: Vec<(String, Vec<String>)> = queues.into_iter().collect();
+    ordered.sort_by_key(|(n, _)| std::cmp::Reverse(meta::queue_touched_at(n)));
+    for (n, branches) in &ordered {
+        let here = current
+            .as_deref()
+            .map(|c| branches.iter().any(|b| b == c))
+            .unwrap_or(false);
+        let marker = if here { "  ← current" } else { "" };
+        let desc = meta::queue_description(n)
+            .map(|d| {
+                let first = d.lines().next().unwrap_or("").trim().to_string();
+                format!("  — {first}")
+            })
+            .unwrap_or_default();
+        println!(
+            "{n}  ({} branch{}){desc}{marker}",
+            branches.len(),
+            if branches.len() == 1 { "" } else { "es" }
+        );
+        for b in branches {
+            println!("    {b}");
+        }
+    }
+    for front in unnamed {
+        println!("(unnamed queue starting at `{front}` — run `git queue name <name>` from it)");
+    }
+    Ok(())
+}
+
 /// Open the user's git editor on a temp file seeded with `existing`, and return
 /// the edited text (lines starting with `#` are stripped as comments).
-fn edit_description(branch: &str, existing: Option<&str>) -> Result<String> {
+fn edit_description(what: &str, existing: Option<&str>, becomes: &str) -> Result<String> {
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
     let path = dir.join("QUEUE_DESCRIBE");
     let template = format!(
-        "{}\n\n# Describe what `{branch}` is about. This becomes the PR body\n\
-         # (below the auto-generated queue list). Lines starting with '#' are ignored.\n",
+        "{}\n\n# Describe {what}. This becomes the PR text for {becomes}.\n\
+         # Lines starting with '#' are ignored.\n",
         existing.unwrap_or("")
     );
     std::fs::write(&path, template)?;
@@ -715,6 +891,13 @@ pub fn sync(no_push: bool) -> Result<()> {
             if !published {
                 continue;
             }
+            if line_queue_name(&line).is_none() {
+                eprintln!(
+                    "warning: skipping PR reconciliation for the queue ending at `{leaf}` — it \
+                     has no name. Run `git queue name <name>` from one of its branches."
+                );
+                continue;
+            }
             let outcome = reconcile_line_prs(&line, false, None, false)?;
             report_line(&line, &outcome, "Reconciled")?;
         }
@@ -950,6 +1133,50 @@ fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Optio
     Ok(Some(RemoteAction::Pulled(n)))
 }
 
+/// The name of the queue a line belongs to: recorded membership first, then
+/// the `queue/<name>/…` branch-naming convention.
+fn line_queue_name(line: &Line) -> Option<String> {
+    for b in &line.branches {
+        if let Some(n) = meta::branch_queue(b) {
+            return Some(n);
+        }
+    }
+    for b in &line.branches {
+        if let Some(rest) = b.strip_prefix("queue/") {
+            if let Some((n, _)) = rest.split_once('/') {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Ask for (or take) a queue name, mandatorily. Order: explicit flag, TTY
+/// prompt, then — non-interactive with no flag — a fallback so scripts keep
+/// working, announced loudly.
+fn require_queue_name(flag: Option<&str>, fallback: &str) -> Result<String> {
+    if let Some(n) = flag {
+        meta::validate_queue_name(n)?;
+        return Ok(n.to_string());
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        print!("Name this queue: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).ok();
+        let answer = answer.trim().to_string();
+        if !answer.is_empty() {
+            meta::validate_queue_name(&answer)?;
+            return Ok(answer);
+        }
+    }
+    let fallback = fallback.replace('/', "-");
+    meta::validate_queue_name(&fallback)?;
+    eprintln!("note: queue named `{fallback}` (rename any time with `git queue name <name>`).");
+    Ok(fallback)
+}
+
 /// The outcome of reconciling one line's PRs.
 struct LinePrs {
     entries: Vec<Entry>,
@@ -969,6 +1196,11 @@ fn reconcile_line_prs(
     push: Option<&str>,
     strict: bool,
 ) -> Result<LinePrs> {
+    let Some(queue_name) = line_queue_name(line) else {
+        bail!("this queue has no name (needed for its PRs); run `git queue name <name>` first");
+    };
+    let queue_description = meta::queue_description(&queue_name).unwrap_or_default();
+    meta::touch_queue(&queue_name);
     let branches = &line.branches;
     let total = branches.len();
     let base_of = |i: usize| -> String {
@@ -1110,7 +1342,7 @@ fn reconcile_line_prs(
             _ => git::tip_subject(b)?,
         };
         let title = render::numbered_title(&subject, i, total);
-        let nav = render::nav_block(&entries, b, &line.base);
+        let nav = render::nav_block(&entries, b, &line.base, &queue_name);
         let description = match meta::description(b).filter(|d| !d.trim().is_empty()) {
             Some(d) => d,
             None => {
@@ -1132,7 +1364,7 @@ fn reconcile_line_prs(
                 adopted
             }
         };
-        let body = render::compose_body(&description, &nav);
+        let body = render::compose_body(&queue_description, &description, &nav);
         gh::edit(number, &base_of(i), &title, &body)?;
     }
 
