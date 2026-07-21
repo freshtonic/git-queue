@@ -145,6 +145,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue status` | Show the queue tree with PR numbers/states and `Queued-Commit-Id` coverage. |
 | `git queue log` | The status tree with each branch's commits indented beneath it, newest first, each prefixed by its abbreviated `Queued-Commit-Id`. |
 | `git queue up` / `down` (`next`/`prev`) | Check out the child / parent branch. |
+| `git queue checkout <commit>` | Detach HEAD on a queue commit (SHA or `Queued-Commit-Id`) to edit it in place: `git commit` inserts a new commit after it, `git commit --amend` revises it (id preserved) — the rest of the queue rebases on top via the hooks or `git queue requeue`. |
 | `git queue commit [-m <msg>]` | Make a **new** commit on the current branch, then requeue all descendants onto the new tip. |
 | `git queue amend` | Fold **staged** changes into the current commit and update every descendant. |
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |

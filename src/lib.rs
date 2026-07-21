@@ -61,6 +61,11 @@ enum Command {
     },
     /// The status tree with each branch's commits (and their Queued-Commit-Ids) shown.
     Log,
+    /// Detach HEAD on a queue commit (SHA or Queued-Commit-Id) to edit it in place.
+    Checkout {
+        /// A commit of the current queue, or one of its branches to reattach.
+        commit: String,
+    },
     /// Split the current branch's commits into a queue of branches.
     Split {
         /// If the original branch isn't reused as a segment, delete it without asking.
@@ -237,6 +242,7 @@ pub fn run() {
         Command::Ls => commands::ls(),
         Command::Name { name } => commands::name(name),
         Command::Log => commands::log(),
+        Command::Checkout { commit } => commands::checkout(&commit),
         Command::Split {
             delete_original,
             queue,

@@ -1480,3 +1480,118 @@ fn name_shows_and_renames_the_queue() {
     // Invalid names rejected.
     queue(dir).args(["name", "bad/name"]).assert().failure();
 }
+
+#[test]
+fn checkout_amend_preserves_id_and_rebases_the_rest() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f1.txt", "v1\n");
+    queue(dir)
+        .args(["commit", "-m", "add f1"])
+        .assert()
+        .success();
+    let id1 = queue_id_of(dir, "HEAD");
+    stage(dir, "f2.txt", "f2");
+    queue(dir)
+        .args(["commit", "-m", "add f2"])
+        .assert()
+        .success();
+    queue(dir).args(["create", "b"]).assert().success();
+    stage(dir, "f3.txt", "f3");
+    queue(dir)
+        .args(["commit", "-m", "add f3"])
+        .assert()
+        .success();
+
+    // Checkout the first commit by its Queued-Commit-Id and amend it.
+    queue(dir).args(["checkout", &id1]).assert().success();
+    assert!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]) == "HEAD");
+    std::fs::write(dir.join("f1.txt"), "v2\n").unwrap();
+    git(dir, &["add", "f1.txt"]);
+    git(dir, &["commit", "-q", "--amend", "--no-edit"]);
+    queue(dir).arg("requeue").assert().success();
+
+    // Still detached at the amended commit, same id, new content everywhere.
+    assert_eq!(queue_id_of(dir, "HEAD"), id1, "id must be preserved");
+    assert_eq!(git_out(dir, &["show", "a:f1.txt"]), "v2");
+    assert_eq!(git_out(dir, &["show", "b:f1.txt"]), "v2");
+    assert!(is_ancestor(dir, "a", "b"), "b must still build on a");
+    assert_eq!(subjects(dir, "main..b"), vec!["add f1", "add f2", "add f3"]);
+
+    // Reattach.
+    queue(dir).args(["checkout", "b"]).assert().success();
+    assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "b");
+}
+
+#[test]
+fn checkout_plain_commit_inserts_mid_queue_with_hooks() {
+    if skip_below(REPLAY, "git replay") {
+        return;
+    }
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f1.txt", "f1");
+    queue(dir)
+        .args(["commit", "-m", "add f1"])
+        .assert()
+        .success();
+    let c1 = sha(dir, "HEAD");
+    stage(dir, "f2.txt", "f2");
+    queue(dir)
+        .args(["commit", "-m", "add f2"])
+        .assert()
+        .success();
+    queue(dir).args(["hooks", "install"]).assert().success();
+
+    queue(dir).args(["checkout", &c1]).assert().success();
+    stage(dir, "mid.txt", "mid");
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
+    assert!(StdCommand::new("git")
+        .args(["commit", "-q", "-m", "inserted between"])
+        .current_dir(dir)
+        .env("PATH", &path)
+        .status()
+        .unwrap()
+        .success());
+
+    // The hooks stamped the new commit and reintegrated the queue.
+    let id = queue_id_of(dir, "HEAD");
+    assert!(id.starts_with("q-"), "inserted commit unstamped: {id:?}");
+    assert_eq!(
+        subjects(dir, "main..a"),
+        vec!["add f1", "inserted between", "add f2"]
+    );
+    assert_eq!(git_out(dir, &["show", "a:mid.txt"]), "mid");
+}
+
+#[test]
+fn checkout_validates_membership_and_cleanliness() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).arg("init").assert().success();
+    let trunk_commit = sha(dir, "main");
+    queue(dir).args(["create", "a"]).assert().success();
+    stage(dir, "f1.txt", "f1");
+    queue(dir)
+        .args(["commit", "-m", "add f1"])
+        .assert()
+        .success();
+
+    // A trunk commit is not part of the queue.
+    queue(dir)
+        .args(["checkout", &trunk_commit])
+        .assert()
+        .failure();
+    // A dirty stage blocks checkout.
+    stage(dir, "dirty.txt", "x");
+    let head = sha(dir, "HEAD");
+    queue(dir).args(["checkout", &head]).assert().failure();
+}

@@ -58,6 +58,7 @@ below own that propagation.
 | Move around the queue | `git queue up` / `down`, `git queue status` | Navigate / view |
 | See every commit in the queue with its Queued-Commit-Id | `git queue log` | Status tree + indented per-branch commits, newest first |
 | Address a commit by its id | `git queue move q-3zz02424 --new-parent <rev>`, `git queue reword q-…` | Any commit argument accepts a `Queued-Commit-Id` (unique prefix ok), as shown by `git queue log` |
+| Edit a commit in place, anywhere in the queue | `git queue checkout <commit-or-id>`, edit, `git add`, then `git commit` (insert) or `git commit --amend` (revise; id preserved), then `git queue requeue` if hooks aren't installed | The rest of the queue rebases on top; reattach with `git queue checkout <branch>` |
 
 ### commit vs amend — the key distinction
 

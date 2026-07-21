@@ -122,6 +122,25 @@ pub fn untrack(branch: &str) {
     config_unset(&queue_name_key(branch));
 }
 
+/// Detached queue-editing state, set by `git queue checkout <commit>`:
+/// the commit HEAD was placed on, and the top branch of its line.
+pub fn detached_state() -> Option<(String, String)> {
+    Some((
+        config_get("queue.detachedoriginal")?,
+        config_get("queue.detachedtop")?,
+    ))
+}
+
+pub fn set_detached_state(original: &str, top: &str) -> Result<()> {
+    config_set("queue.detachedoriginal", original)?;
+    config_set("queue.detachedtop", top)
+}
+
+pub fn clear_detached_state() {
+    config_unset("queue.detachedoriginal");
+    config_unset("queue.detachedtop");
+}
+
 fn queue_name_key(branch: &str) -> String {
     format!("branch.{branch}.queueName")
 }

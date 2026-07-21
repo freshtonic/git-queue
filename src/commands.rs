@@ -1701,11 +1701,19 @@ pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
     // the commits instead of the branch check.
     let stamping = std::env::var("GIT_QUEUE_STAMP_ALL").is_ok();
     if !stamping {
-        let Ok(branch) = git::current_branch() else {
-            return Ok(());
-        };
-        if meta::parent(&branch).is_none() {
-            return Ok(());
+        match git::current_branch() {
+            Ok(branch) => {
+                if meta::parent(&branch).is_none() {
+                    return Ok(());
+                }
+            }
+            // Detached: stamp only inside a queue-editing session, where a
+            // plain `git commit` inserts a new queue commit.
+            Err(_) => {
+                if meta::detached_state().is_none() {
+                    return Ok(());
+                }
+            }
         }
     }
     let msg = std::fs::read_to_string(path).unwrap_or_default();
@@ -1716,6 +1724,116 @@ pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     git::add_trailer_to_file(path, &ident::new_id())
+}
+
+/// `git queue checkout <commit>` — detach HEAD on a commit of the current
+/// queue (named by SHA or Queued-Commit-Id) for in-place editing. From there,
+/// plain `git commit` INSERTS a new commit after it and `git commit --amend`
+/// REVISES it (message — and Queued-Commit-Id — carried over); either way the
+/// rest of the queue rebases on top, via the hooks or `git queue requeue`.
+pub fn checkout(arg: &str) -> Result<()> {
+    git::ensure_repo()?;
+    std::env::set_var(git::GUARD_ENV, "1");
+    let queue = Queue::load()?;
+
+    // The line in play: from the current branch, or — already detached via a
+    // previous `git queue checkout` — from the recorded top branch.
+    let line = if let Ok(current) = git::current_branch() {
+        if !queue.is_tracked(&current) {
+            bail!("`{current}` is not a queue branch");
+        }
+        queue.line_through(&current)?
+    } else if let Some((_, top)) = meta::detached_state() {
+        queue.line_through(&top)?
+    } else {
+        bail!("HEAD is detached outside a queue-editing session; check out a queue branch first");
+    };
+    let top = line.branches.last().unwrap().clone();
+
+    // Checking out a branch of the line reattaches and ends the session.
+    if line.branches.iter().any(|b| b == arg) || arg == line.base {
+        if !git::tracked_clean() {
+            bail!("stage or tracked files have changes; commit or stash them first");
+        }
+        git::checkout_quiet(arg)?;
+        meta::clear_detached_state();
+        println!("Back on `{arg}`.");
+        return Ok(());
+    }
+
+    let sha = resolve_queue_rev(&line, arg)?;
+    let commits = git::commits_between(&line.base, &top)?;
+    if !commits.iter().any(|(s, _)| s == &sha) {
+        bail!(
+            "`{arg}` is not a commit of this queue (`{}`..`{top}`)",
+            line.base
+        );
+    }
+    if !git::tracked_clean() {
+        bail!(
+            "stage or tracked files have changes; commit or stash them before `git queue checkout`"
+        );
+    }
+
+    git::run(&["checkout", "-q", "--detach", &sha])?;
+    meta::set_detached_state(&sha, &top)?;
+    let subject = git::tip_subject("HEAD")?;
+    println!("Detached at {} ({subject}).", &sha[..8]);
+    println!("Edit away — `git add` then:");
+    println!("  git commit           inserts a NEW commit right after this one");
+    println!("  git commit --amend   revises this commit (its Queued-Commit-Id is kept)");
+    println!("The rest of the queue rebases on top automatically (with hooks installed);");
+    println!("otherwise run `git queue requeue`. Return with `git queue checkout {top}`.");
+    Ok(())
+}
+
+/// Reintegrate after editing at a detached queue commit: rebase everything
+/// that followed the original commit onto the new HEAD (branch refs ride
+/// along via --update-refs), re-anchor the line, and stay detached at the
+/// new commit so editing can continue.
+fn reintegrate_detached(auto: bool, original: &str, top: &str) -> Result<()> {
+    let head = git::rev_parse("HEAD")?;
+    if head == original {
+        if !auto {
+            println!("Nothing to reintegrate: HEAD is still the checked-out commit.");
+        }
+        return Ok(());
+    }
+    git::rebase_persist(&head, original, top)?;
+    // The rebase leaves HEAD on `top`; go back to the edited commit.
+    git::run(&["checkout", "-q", "--detach", &head])?;
+    meta::set_detached_state(&head, top)?;
+
+    let queue = Queue::load()?;
+    let line = queue.line_through(top)?;
+    let mut conflicted = Vec::new();
+    for (i, br) in line.branches.iter().enumerate() {
+        let parent = if i == 0 {
+            line.base.clone()
+        } else {
+            line.branches[i - 1].clone()
+        };
+        meta::set_parent_sha(br, &git::rev_parse(&parent)?)?;
+        if git::has_conflict_markers(br) {
+            conflicted.push(br.clone());
+        }
+    }
+    if let Some(qname) = line_queue_name(&line) {
+        meta::touch_queue(&qname);
+    }
+    println!(
+        "Reintegrated: the rest of the queue is rebased onto {} — still detached here.",
+        &head[..8]
+    );
+    if conflicted.is_empty() {
+        println!(
+            "When you're done editing: `git queue checkout {top}` to reattach, then \
+             `git queue sync` to push and refresh PRs."
+        );
+    } else {
+        requeue::warn_conflicts(&conflicted);
+    }
+    Ok(())
 }
 
 /// `git queue yank` — close every open (non-merged) PR in the current queue.
@@ -1834,8 +1952,19 @@ pub fn reword(commit: Option<String>) -> Result<()> {
 pub fn requeue(auto: bool) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
+    // A queue-editing session (git queue checkout) reintegrates instead.
+    if git::current_branch().is_err() {
+        if let Some((original, top)) = meta::detached_state() {
+            return reintegrate_detached(auto, &original, &top);
+        }
+        if auto {
+            return Ok(());
+        }
+        bail!("HEAD is detached; check out a branch first");
+    }
     let queue = Queue::load()?;
     let current = git::current_branch()?;
+    meta::clear_detached_state(); // attached again: any old session is over
     if !queue.is_tracked(&current) && current != queue.trunk {
         if auto {
             return Ok(());

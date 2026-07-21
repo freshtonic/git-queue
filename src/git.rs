@@ -138,6 +138,14 @@ pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
         .collect())
 }
 
+/// True if the index has no staged changes and no tracked file is modified
+/// (untracked files are allowed).
+pub fn tracked_clean() -> bool {
+    out(&["status", "--porcelain", "--untracked-files=no"])
+        .map(|s| s.is_empty())
+        .unwrap_or(false)
+}
+
 /// True if the work tree and index are clean.
 pub fn worktree_clean() -> bool {
     out(&["status", "--porcelain"])
