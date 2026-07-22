@@ -852,14 +852,47 @@ fn show_tree(with_commits: bool) -> Result<()> {
         return Ok(());
     };
 
-    let line = queue.line_through(&anchor)?;
-    let mut entries = build_entries(&line.branches)?;
-    for (i, e) in entries.iter_mut().enumerate() {
-        let parent = if i == 0 {
-            line.base.clone()
-        } else {
-            line.branches[i - 1].clone()
-        };
+    // Show the WHOLE tree the anchor belongs to, forks included: the current
+    // chain renders at indent 0, and each forked subtree renders one level in,
+    // directly above the branch it forks from.
+    let chain = queue.chain_to_base(&anchor)?;
+    let root = chain[0].clone();
+    let base = queue
+        .parent_of(&root)
+        .expect("root is tracked, so it has a parent")
+        .to_string();
+    fn topdown(
+        queue: &Queue,
+        branch: &str,
+        indent: usize,
+        chain: &[String],
+        out: &mut Vec<(String, usize)>,
+    ) {
+        let kids = queue.children(branch);
+        let main = kids
+            .iter()
+            .find(|k| chain.contains(k))
+            .or_else(|| kids.first())
+            .cloned();
+        if let Some(m) = &main {
+            topdown(queue, m, indent, chain, out);
+        }
+        for k in kids.iter().filter(|k| Some(*k) != main.as_ref()) {
+            topdown(queue, k, indent + 1, chain, out);
+        }
+        out.push((branch.to_string(), indent));
+    }
+    let mut ordered: Vec<(String, usize)> = Vec::new();
+    topdown(&queue, &root, 0, &chain, &mut ordered);
+
+    let branches: Vec<String> = ordered.iter().map(|(b, _)| b.clone()).collect();
+    let mut entries = build_entries(&branches)?;
+    for (e, (_, indent)) in entries.iter_mut().zip(&ordered) {
+        e.indent = *indent;
+        let parent = queue
+            .parent_of(&e.branch)
+            .expect("tracked branch has a parent")
+            .to_string();
         if e.conflicted {
             e.conflicts = git::conflict_files(&e.branch);
         }
@@ -869,7 +902,6 @@ fn show_tree(with_commits: bool) -> Result<()> {
             }
         }
     }
-    let fork = line.fork_at.as_deref();
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let color = tty && std::env::var_os("NO_COLOR").is_none();
     let repo_url = if tty && terminal_renders_hyperlinks() {
@@ -882,9 +914,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
         render::status_tree(
             &entries,
             &current,
-            &line.base,
-            line.base == queue.trunk,
-            fork,
+            &base,
+            base == queue.trunk,
             color,
             repo_url.as_deref()
         )
@@ -1562,6 +1593,7 @@ fn reconcile_line_prs(
             conflicted: git::has_conflict_markers(b),
             conflicts: Vec::new(),
             commits: Vec::new(),
+            indent: 0,
         })
         .collect();
 
@@ -2374,6 +2406,7 @@ fn build_entries(branches: &[String]) -> Result<Vec<Entry>> {
             conflicted: git::has_conflict_markers(b),
             conflicts: Vec::new(),
             commits: Vec::new(),
+            indent: 0,
         });
     }
     Ok(entries)

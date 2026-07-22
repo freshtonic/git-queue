@@ -16,6 +16,9 @@ pub struct Entry {
     /// Commits to render beneath the branch (newest first): `(Stable-Commit-Id?,
     /// subject)`. Empty for `status`; filled by `log`.
     pub commits: Vec<(Option<String>, String)>,
+    /// Nesting level: 0 on the main line, +1 for each fork the branch sits
+    /// behind. Forked subtrees render indented above their fork parent.
+    pub indent: usize,
 }
 
 #[derive(Clone)]
@@ -226,7 +229,6 @@ pub fn status_tree(
     current: &str,
     base: &str,
     base_is_trunk: bool,
-    fork_note: Option<&str>,
     color: bool,
     // `Some(repo url)` when the terminal renders OSC 8 hyperlinks: PR numbers
     // become clickable links to their PRs.
@@ -240,13 +242,16 @@ pub fn status_tree(
         }
     };
     let mut out = String::new();
-    for e in entries.iter().rev() {
+    // Entries arrive top-down (leaves first, base-most branch last); forked
+    // subtrees sit directly above their fork parent, one indent level in.
+    for e in entries.iter() {
         let is_current = e.branch == current;
         let margin = if is_current {
             paint("1;32", "❯ ")
         } else {
             "  ".to_string()
         };
+        let pad = "  ".repeat(e.indent);
         let node = if is_current { "◉" } else { "◯" };
         let name = paint("1", &e.branch);
         let link = |n: u64| -> String {
@@ -278,9 +283,12 @@ pub fn status_tree(
         } else {
             String::new()
         };
-        out.push_str(&format!("{margin}{node} {name}{pr}{warn}\n"));
+        out.push_str(&format!("{margin}{pad}{node} {name}{pr}{warn}\n"));
         for path in &e.conflicts {
-            out.push_str(&format!("      {}\n", paint("33", &format!("⚠ {path}"))));
+            out.push_str(&format!(
+                "      {pad}{}\n",
+                paint("33", &format!("⚠ {path}"))
+            ));
         }
         for (id, subject) in &e.commits {
             // Abbreviate the id to `q-` + 8 chars.
@@ -291,15 +299,12 @@ pub fn status_tree(
                 }
                 None => paint("2", "(no id)   "),
             };
-            out.push_str(&format!("      {abbrev}  {subject}\n"));
+            out.push_str(&format!("      {pad}{abbrev}  {subject}\n"));
         }
     }
     out.push_str("  ┴\n");
     let label = if base_is_trunk { "trunk" } else { "base" };
     out.push_str(&format!("    {base} ({label})\n"));
-    if let Some(f) = fork_note {
-        out.push_str(&format!("\nnote: `{f}` has multiple children; showing one line. Use `git queue status` from another branch to see the others.\n"));
-    }
     out
 }
 
@@ -349,6 +354,7 @@ mod tests {
             conflicted: false,
             conflicts: Vec::new(),
             commits: Vec::new(),
+            indent: 0,
         }
     }
 
@@ -402,6 +408,7 @@ mod tests {
             conflicted: false,
             conflicts: Vec::new(),
             commits: Vec::new(),
+            indent: 0,
         });
         let plan = gate_plan(&line);
         assert_eq!(plan.len(), 1);

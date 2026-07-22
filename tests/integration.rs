@@ -50,6 +50,10 @@ fn new_repo() -> TempDir {
     git(dir, &["init", "-q", "-b", "main"]);
     git(dir, &["config", "user.email", "test@example.com"]);
     git(dir, &["config", "user.name", "Test"]);
+    // Keep test repos hermetic: the host's global config may sign commits
+    // with a key that isn't loaded.
+    git(dir, &["config", "commit.gpgsign", "false"]);
+    git(dir, &["config", "tag.gpgsign", "false"]);
     commit(dir, "seed.txt");
     tmp
 }
@@ -383,6 +387,7 @@ fn sync_pulls_teammate_commits_and_pushes_with_lease() {
     );
     git(mate_dir, &["config", "user.email", "mate@example.com"]);
     git(mate_dir, &["config", "user.name", "Mate"]);
+    git(mate_dir, &["config", "commit.gpgsign", "false"]);
     git(mate_dir, &["checkout", "-q", "a"]);
     commit(mate_dir, "teammate.txt");
     git(mate_dir, &["push", "-q", "origin", "a"]);
@@ -540,6 +545,7 @@ fn trunk_is_autodetected_without_any_setup() {
     git(dir2, &["init", "-q", "-b", "develop"]);
     git(dir2, &["config", "user.email", "t@example.com"]);
     git(dir2, &["config", "user.name", "T"]);
+    git(dir2, &["config", "commit.gpgsign", "false"]);
     commit(dir2, "seed.txt");
     let remote = TempDir::new().unwrap();
     git(remote.path(), &["init", "--bare", "-q", "-b", "develop"]);
@@ -672,6 +678,44 @@ fn track_adopts_an_existing_branch() {
         git_out(dir, &["config", "--local", "branch.hotfix.queueParent"]),
         "main"
     );
+}
+
+#[test]
+fn status_shows_forked_branches_indented() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir)
+        .args(["create", "a", "--queue", "q"])
+        .assert()
+        .success();
+    commit(dir, "a.txt");
+    queue(dir).args(["create", "b"]).assert().success();
+    commit(dir, "b.txt");
+    // Fork: a second child of `a`, sibling to `b`.
+    git(dir, &["checkout", "-q", "queue/q/a"]);
+    git(dir, &["checkout", "-q", "-b", "side"]);
+    commit(dir, "side.txt");
+    queue(dir)
+        .args(["track", "--parent", "a", "--no-stamp-ids"])
+        .assert()
+        .success();
+    git(dir, &["checkout", "-q", "queue/q/b"]);
+    let out = queue(dir).arg("status").assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    // The whole tree shows: the current line at the margin, the fork indented
+    // one level, directly above the branch it forks from.
+    let lines: Vec<&str> = text.lines().collect();
+    let side = lines
+        .iter()
+        .position(|l| l.contains("side"))
+        .expect("forked branch rendered");
+    let fork_parent = lines
+        .iter()
+        .position(|l| l.contains("queue/q/a"))
+        .expect("fork parent rendered");
+    assert!(lines[side].starts_with("    ◯"), "fork is indented: {text}");
+    assert_eq!(side + 1, fork_parent, "fork sits above its parent: {text}");
+    assert!(text.contains("queue/q/b"), "current line rendered: {text}");
 }
 
 #[test]
@@ -1094,6 +1138,7 @@ fn sync_pulls_teammate_commits_but_not_stale_copies_of_ours() {
     );
     git(mate_dir, &["config", "user.email", "mate@example.com"]);
     git(mate_dir, &["config", "user.name", "Mate"]);
+    git(mate_dir, &["config", "commit.gpgsign", "false"]);
     git(mate_dir, &["checkout", "-q", "a"]);
     commit(mate_dir, "teammate.txt");
     git(mate_dir, &["push", "-q", "origin", "a"]);
