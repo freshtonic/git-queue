@@ -122,6 +122,31 @@ pub fn ahead_count(base: &str, branch: &str) -> Result<usize> {
 }
 
 /// Commits in `base..tip`, oldest first, as `(full_sha, subject)` pairs.
+/// Commits in `base..tip`, oldest first: `(full sha, Stable-Commit-Id?, subject)`.
+pub fn commits_between_with_ids(
+    base: &str,
+    tip: &str,
+) -> Result<Vec<(String, Option<String>, String)>> {
+    let raw = out(&[
+        "log",
+        "--reverse",
+        &format!(
+            "--format=%H%x09%(trailers:key={},valueonly,separator=%x20)%x09%s",
+            crate::ident::TRAILER
+        ),
+        &format!("{base}..{tip}"),
+    ])?;
+    Ok(raw
+        .lines()
+        .filter_map(|l| {
+            let (sha, rest) = l.split_once('\t')?;
+            let (id, subject) = rest.split_once('\t')?;
+            let id = id.split_whitespace().next().map(str::to_string);
+            Some((sha.to_string(), id, subject.to_string()))
+        })
+        .collect())
+}
+
 pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
     let raw = out(&[
         "log",

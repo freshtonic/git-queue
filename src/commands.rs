@@ -333,11 +333,11 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
 
     // Every commit of the line, oldest first (front of the queue at the top
     // of the file), plus how many belong to each branch.
-    let mut all: Vec<(String, String)> = Vec::new();
+    let mut all: Vec<(String, Option<String>, String)> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut parent = base.clone();
     for b in &line_branches {
-        let commits = git::commits_between(&parent, b)?;
+        let commits = git::commits_between_with_ids(&parent, b)?;
         counts.push((b.clone(), commits.len()));
         all.extend(commits);
         parent = b.clone();
@@ -453,7 +453,7 @@ fn run_queue_editor(
     qname: &str,
     base: &str,
     counts: &[(String, usize)],
-    all: &[(String, String)],
+    all: &[(String, Option<String>, String)],
     display: &dyn Fn(&str) -> String,
 ) -> Result<Vec<(String, String)>> {
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
@@ -475,8 +475,14 @@ fn run_queue_editor(
     let mut idx = 0;
     for (b, n) in counts {
         body.push_str(&format!("\n[{}]\n", display(b)));
-        for (sha, subject) in &all[idx..idx + n] {
-            body.push_str(&format!("{} {subject}\n", &sha[..sha.len().min(12)]));
+        for (sha, id, subject) in &all[idx..idx + n] {
+            // Same identity format as `git queue log`: the abbreviated
+            // Stable-Commit-Id; sha only for commits that don't carry one.
+            let token = match id {
+                Some(id) => id.chars().take(10).collect::<String>(),
+                None => sha[..sha.len().min(12)].to_string(),
+            };
+            body.push_str(&format!("{token} {subject}\n"));
         }
         idx += n;
     }
@@ -531,7 +537,7 @@ fn run_queue_editor(
 /// them into contiguous `(branch, tip_full_sha)` segments in queue order.
 fn fold_segments(
     assignments: &[(String, String)],
-    all: &[(String, String)],
+    all: &[(String, Option<String>, String)],
 ) -> Result<Vec<(String, String)>> {
     if assignments.len() != all.len() {
         bail!(
@@ -542,9 +548,16 @@ fn fold_segments(
     }
     let mut segments: Vec<(String, String)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
-    for (i, (name, short)) in assignments.iter().enumerate() {
-        let (full_sha, _) = &all[i];
-        if !short.is_empty() && !full_sha.starts_with(short.as_str()) {
+    for (i, (name, token)) in assignments.iter().enumerate() {
+        let (full_sha, id, _) = &all[i];
+        let in_place = token.is_empty()
+            || if token.starts_with("q-") {
+                id.as_deref()
+                    .is_some_and(|id| id.starts_with(token.as_str()))
+            } else {
+                full_sha.starts_with(token.as_str())
+            };
+        if !in_place {
             bail!("commit lines were reordered; commits cannot be reordered here — only assigned to branches");
         }
         match segments.last_mut() {
