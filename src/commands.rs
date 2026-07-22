@@ -250,7 +250,7 @@ pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Resul
     // `namespaced` decides whether the new branch lives under queue/<name>/…:
     // true when the queue name is explicit or the queue already follows the
     // convention — so you type short names and never the prefix (as with
-    // split), and plain-named queues stay plain.
+    // edit), and plain-named queues stay plain.
     let (qname, namespaced) = if meta::parent(&parent).is_some() {
         let q = Queue::load()?;
         let line = q.line_through(&parent)?;
@@ -298,66 +298,98 @@ pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Resul
     Ok(())
 }
 
-/// `git queue split` — split the current branch's commits into a queue of
-/// branches. Opens a `rebase -i`-style editor where each commit is prefixed
-/// with the branch it should belong to; consecutive commits sharing a name
-/// become one branch, and the groups queue in order (file order = merge order).
-pub fn split(delete_original: bool, queue_flag: Option<&str>) -> Result<()> {
+/// `git queue edit` — open the whole queue in an editor. Every branch is a
+/// `[name]` section; the commits beneath a header belong to that branch. The
+/// commit sequence is fixed — commits cannot be reordered or deleted, only
+/// assigned to branches — so editing means moving, renaming, adding, or
+/// removing the `[name]` header lines. Branch refs simply move to the new
+/// section boundaries; no commit is rewritten.
+pub fn edit(queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     if !git::worktree_clean() {
-        bail!("working tree has uncommitted changes; commit or stash them before splitting");
+        bail!(
+            "working tree has uncommitted changes; commit or stash them before editing the queue"
+        );
     }
     let queue = Queue::load()?;
     let branch = git::current_branch()?;
-    let base = if queue.is_tracked(&branch) {
-        queue.parent_of(&branch).unwrap().to_string()
-    } else {
-        queue.trunk.clone()
-    };
-    // Every queue is named, and split's branches live under queue/<name>/…
-    let qname = if queue.is_tracked(&branch) {
-        match line_queue_name(&queue.line_through(&branch)?) {
-            Some(n) => n,
-            None => require_queue_name(queue_flag, &branch)?.0,
+
+    // Scope: the current queue line — all its branches, all their commits.
+    // An untracked branch edits as one provisional section over trunk.
+    let (line_branches, base, qname, explicit) = if queue.is_tracked(&branch) {
+        let line = queue.line_through(&branch)?;
+        if let Some(f) = &line.fork_at {
+            eprintln!("warning: `{f}` has multiple children; editing this line only.");
         }
+        let (qname, explicit) = match line_queue_name(&line) {
+            Some(n) => (n, queue_flag.is_some()),
+            None => require_queue_name(queue_flag, &branch)?,
+        };
+        (line.branches, line.base, qname, explicit)
     } else {
-        require_queue_name(queue_flag, &branch)?.0
+        let (qname, explicit) = require_queue_name(queue_flag, &branch)?;
+        (vec![branch.clone()], queue.trunk.clone(), qname, explicit)
     };
 
-    let commits = git::commits_between(&base, &branch)?;
-    if commits.len() < 2 {
-        bail!("`{branch}` has fewer than 2 commits beyond `{base}`; nothing to split");
+    // Every commit of the line, oldest first (front of the queue at the top
+    // of the file), plus how many belong to each branch.
+    let mut all: Vec<(String, String)> = Vec::new();
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    let mut parent = base.clone();
+    for b in &line_branches {
+        let commits = git::commits_between(&parent, b)?;
+        counts.push((b.clone(), commits.len()));
+        all.extend(commits);
+        parent = b.clone();
+    }
+    if all.is_empty() {
+        bail!("the queue has no commits to edit");
     }
 
-    let assignments = edit_split_plan(&branch, &commits)?;
-    let segments = parse_segments(&assignments, &commits)?;
-    if segments.len() < 2 {
-        println!("All commits stayed in one branch — nothing split.");
-        return Ok(());
-    }
-    // Segment branches live under the queue's namespace; names the user
-    // already fully qualified are kept as-is.
+    // Whether short section names get namespaced to queue/<qname>/<short>:
+    // when the line already follows that convention, or the queue name was
+    // given explicitly. Plain-named queues stay plain (same rule as create).
+    let namespaced = line_branches.iter().any(|b| b.starts_with("queue/")) || explicit;
+    let display = |b: &str| -> String {
+        b.strip_prefix(&format!("queue/{qname}/"))
+            .unwrap_or(b)
+            .to_string()
+    };
+    let resolve = |n: &str| -> String {
+        if n.contains('/') || line_branches.iter().any(|b| b == n) || !namespaced {
+            n.to_string()
+        } else {
+            format!("queue/{qname}/{n}")
+        }
+    };
+
+    let assignments = run_queue_editor(&qname, &base, &counts, &all, &display)?;
+    let segments = fold_segments(&assignments, &all)?;
     let segments: Vec<(String, String)> = segments
         .into_iter()
-        .map(|(n, sha)| {
-            let full = if n.starts_with("queue/") || n == branch {
-                n
-            } else {
-                format!("queue/{qname}/{n}")
-            };
-            (full, sha)
-        })
+        .map(|(n, sha)| (resolve(&n), sha))
         .collect();
 
-    // Names must be free (unless it's the original branch we're reusing).
+    // New names must be free.
     for (name, _) in &segments {
-        if name != &branch && git::branch_exists(name) {
+        if !line_branches.contains(name) && git::branch_exists(name) {
             bail!("branch `{name}` already exists; pick a different name");
         }
     }
 
-    // Detach so we can move/create refs freely, then place a branch at each
-    // group boundary and wire up the parent pointers bottom-up.
+    // Nothing moved and nothing renamed? Then there is nothing to apply.
+    let unchanged = segments.len() == line_branches.len()
+        && segments
+            .iter()
+            .zip(&line_branches)
+            .all(|((n, tip), b)| n == b && git::rev_parse(b).map(|s| &s == tip).unwrap_or(false));
+    if unchanged {
+        println!("Queue unchanged.");
+        return Ok(());
+    }
+
+    // Detach so refs can move freely, then place each branch at its section
+    // boundary and wire up the parent pointers bottom-up.
     git::detach_head()?;
     let mut parent = base.clone();
     for (name, tip_sha) in &segments {
@@ -373,71 +405,82 @@ pub fn split(delete_original: bool, queue_flag: Option<&str>) -> Result<()> {
     }
     meta::touch_queue(&qname);
 
-    let top = segments.last().unwrap().0.clone();
-    git::checkout(&top)?;
+    // Branches whose headers were removed are gone from the queue: their
+    // commits now belong to other sections, so the old refs are redundant.
+    let removed: Vec<String> = line_branches
+        .iter()
+        .filter(|b| !segments.iter().any(|(n, _)| &n == b))
+        .cloned()
+        .collect();
+    for b in &removed {
+        let pr = meta::pr(b);
+        meta::untrack(b);
+        git::run(&["branch", "-q", "-D", b])?;
+        println!("Deleted `{b}` (its commits are covered by the remaining branches).");
+        if let Some(n) = pr {
+            println!(
+                "note: its PR #{n} is still open on GitHub — close it, or repurpose it manually."
+            );
+        }
+        if git::remote_branch(&meta::remote(), b).is_some() {
+            println!(
+                "note: it still exists on the remote; remove it with `git push {} --delete {b}`.",
+                meta::remote()
+            );
+        }
+    }
 
-    println!("Split `{branch}` into {} queued branches:", segments.len());
+    let land = if segments.iter().any(|(n, _)| n == &branch) {
+        branch.clone()
+    } else {
+        segments.last().unwrap().0.clone()
+    };
+    git::checkout(&land)?;
+
+    println!("Queue `{qname}` now has {} branches:", segments.len());
     let mut p = base.clone();
     for (name, _) in &segments {
         println!("  {p} ← {name}");
         p = name.clone();
     }
-
-    // If the original branch wasn't reused as a segment name, it's now fully
-    // redundant: the last segment's tip IS the old tip, so the old ref merely
-    // duplicates it (and any queue config it carried would read as a phantom
-    // fork). Untrack it, and offer to delete it.
-    let reused = segments.iter().any(|(n, _)| n == &branch);
-    if !reused {
-        meta::untrack(&branch);
-        let delete = delete_original
-            || (std::io::IsTerminal::is_terminal(&std::io::stdin()) && {
-                print!(
-                    "`{branch}` is now fully covered by `{top}` — delete the old branch? [Y/n] "
-                );
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-                let mut answer = String::new();
-                std::io::stdin().read_line(&mut answer).ok();
-                matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes")
-            });
-        if delete {
-            git::run(&["branch", "-q", "-D", &branch])?;
-            println!("Deleted `{branch}`.");
-            if git::remote_branch(&meta::remote(), &branch).is_some() {
-                println!(
-                    "note: it still exists on the remote; remove it with `git push {} --delete {branch}`.",
-                    meta::remote()
-                );
-            }
-        } else {
-            println!("note: `{branch}` kept; it duplicates `{top}` — delete it whenever with `git branch -D {branch}`.");
-        }
-    }
-    println!("Now on `{top}`. Run `git queue submit` to open the PRs.");
+    println!("Now on `{land}`. Run `git queue sync` to update the PRs.");
     Ok(())
 }
 
-/// Open an editor to assign each commit to a branch. Returns `(branch, sha)`
-/// pairs in commit order.
-fn edit_split_plan(branch: &str, commits: &[(String, String)]) -> Result<Vec<(String, String)>> {
+/// Write the queue-edit file, open `$GIT_EDITOR` on it, and parse the result
+/// into per-commit `(section name, sha token)` assignments in file order.
+fn run_queue_editor(
+    qname: &str,
+    base: &str,
+    counts: &[(String, usize)],
+    all: &[(String, String)],
+    display: &dyn Fn(&str) -> String,
+) -> Result<Vec<(String, String)>> {
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-dir"])?);
-    let path = dir.join("QUEUE_SPLIT");
+    let path = dir.join("QUEUE_EDIT");
+
     let mut body = String::new();
-    for (sha, subject) in commits {
-        body.push_str(&format!(
-            "{branch} {} {subject}\n",
-            &sha[..sha.len().min(12)]
-        ));
+    body.push_str(&format!(
+        "# Queue `{qname}` on `{base}` — assign commits to branches.\n\
+         #\n\
+         # A `[branch]` line starts a branch; the commits listed below it belong\n\
+         # to that branch. The first section is the front of the queue (merges\n\
+         # first). Move, rename, add, or remove the `[branch]` lines to change\n\
+         # which branch a commit belongs to — but keep every commit line exactly\n\
+         # where it is: commits cannot be reordered or deleted here.\n\
+         # Removing a header dissolves that branch into its neighbours; adding\n\
+         # one splits a branch in two. Short names are fine — they resolve\n\
+         # within this queue. Lines starting with `#` are ignored.\n"
+    ));
+    let mut idx = 0;
+    for (b, n) in counts {
+        body.push_str(&format!("\n[{}]\n", display(b)));
+        for (sha, subject) in &all[idx..idx + n] {
+            body.push_str(&format!("{} {subject}\n", &sha[..sha.len().min(12)]));
+        }
+        idx += n;
     }
-    let template = format!(
-        "{body}\n\
-         # Split `{branch}` into a queue. The first token on each line is the branch\n\
-         # that commit belongs to — edit it. Consecutive commits with the SAME branch\n\
-         # become one PR; groups queue top-to-bottom in this file (top = merges first).\n\
-         # Do not reorder or delete commit lines. Lines starting with '#' are ignored.\n"
-    );
-    std::fs::write(&path, template)?;
+    std::fs::write(&path, body)?;
 
     let editor = git::out(&["var", "GIT_EDITOR"])?;
     let status = std::process::Command::new("sh")
@@ -448,59 +491,69 @@ fn edit_split_plan(branch: &str, commits: &[(String, String)]) -> Result<Vec<(St
         .status()
         .context("failed to launch editor")?;
     if !status.success() {
-        bail!("editor exited with an error; split cancelled");
+        bail!("editor exited with an error; edit cancelled");
     }
     let raw = std::fs::read_to_string(&path)?;
     let _ = std::fs::remove_file(&path);
 
     let mut out = Vec::new();
+    let mut headers: Vec<String> = Vec::new();
+    let mut section: Option<String> = None;
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let mut it = line.split_whitespace();
-        let name = it.next().unwrap().to_string();
-        let sha = it.next().unwrap_or("").to_string();
-        out.push((name, sha));
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            let name = name.trim();
+            if name.is_empty() {
+                bail!("a `[]` header has no branch name");
+            }
+            headers.push(name.to_string());
+            section = Some(name.to_string());
+            continue;
+        }
+        let sha = line.split_whitespace().next().unwrap().to_string();
+        match &section {
+            Some(s) => out.push((s.clone(), sha)),
+            None => bail!("commit `{sha}` appears before any `[branch]` header"),
+        }
+    }
+    for h in &headers {
+        if !out.iter().any(|(s, _)| s == h) {
+            bail!("branch `{h}` has no commits; remove its header or move commits beneath it");
+        }
     }
     Ok(out)
 }
 
-/// Validate the edited plan against the original commit order and collapse it
-/// into contiguous `(branch, tip_full_sha)` segments in merge order.
-fn parse_segments(
+/// Validate the edited assignments against the original commit order and fold
+/// them into contiguous `(branch, tip_full_sha)` segments in queue order.
+fn fold_segments(
     assignments: &[(String, String)],
-    commits: &[(String, String)],
+    all: &[(String, String)],
 ) -> Result<Vec<(String, String)>> {
-    if assignments.len() != commits.len() {
+    if assignments.len() != all.len() {
         bail!(
-            "expected {} commit lines but found {}; do not add or remove lines",
-            commits.len(),
+            "expected {} commit lines but found {}; commits cannot be added or deleted here",
+            all.len(),
             assignments.len()
         );
     }
     let mut segments: Vec<(String, String)> = Vec::new();
     let mut seen: Vec<String> = Vec::new();
     for (i, (name, short)) in assignments.iter().enumerate() {
-        let (full_sha, _) = &commits[i];
-        // Guard against reordering: the short sha must match this position.
+        let (full_sha, _) = &all[i];
         if !short.is_empty() && !full_sha.starts_with(short.as_str()) {
-            bail!("commit lines were reordered; that isn't supported yet — keep them in order");
-        }
-        if name.is_empty() {
-            bail!(
-                "commit {} has no branch name",
-                &full_sha[..12.min(full_sha.len())]
-            );
+            bail!("commit lines were reordered; commits cannot be reordered here — only assigned to branches");
         }
         match segments.last_mut() {
-            Some((last_name, tip)) if last_name == name => {
-                *tip = full_sha.clone(); // extend current group
-            }
+            Some((last, tip)) if last == name => *tip = full_sha.clone(),
             _ => {
                 if seen.contains(name) {
-                    bail!("branch `{name}` appears in non-adjacent groups; commits for one branch must be contiguous");
+                    bail!(
+                        "branch `{name}` appears twice; a branch is one contiguous run of commits"
+                    );
                 }
                 seen.push(name.clone());
                 segments.push((name.clone(), full_sha.clone()));
@@ -517,8 +570,7 @@ pub fn track(
     parent: Option<String>,
     stamp_ids: bool,
     no_stamp_ids: bool,
-    split_after: bool,
-    delete_original: bool,
+    edit_after: bool,
     queue_flag: Option<&str>,
 ) -> Result<()> {
     git::ensure_repo()?;
@@ -527,8 +579,8 @@ pub fn track(
     if branch == trunk {
         bail!("cannot track the trunk branch itself");
     }
-    if split_after && !git::worktree_clean() {
-        bail!("working tree has uncommitted changes; commit or stash them before `track --split`");
+    if edit_after && !git::worktree_clean() {
+        bail!("working tree has uncommitted changes; commit or stash them before `track --edit`");
     }
     let parent = match parent {
         Some(p) => resolve_branch_arg(&p)?,
@@ -566,7 +618,7 @@ pub fn track(
         .map(|(sha, _)| sha)
         .collect();
     if missing.is_empty() {
-        return split_if_requested(split_after, delete_original, &base, &branch);
+        return edit_if_requested(edit_after, &base, &branch, queue_flag);
     }
     let n = missing.len();
     let stamp = if stamp_ids {
@@ -595,34 +647,34 @@ pub fn track(
         false
     };
     if !stamp {
-        return split_if_requested(split_after, delete_original, &base, &branch);
+        return edit_if_requested(edit_after, &base, &branch, queue_flag);
     }
     if !git::worktree_clean() {
         eprintln!("note: working tree has uncommitted changes; skipping id stamping. Commit or");
         eprintln!("stash, then re-run `git queue track --stamp-ids`.");
-        return split_if_requested(split_after, delete_original, &base, &branch);
+        return edit_if_requested(edit_after, &base, &branch, queue_flag);
     }
     git::rebase_stamp_ids(&base, &branch, &missing)?;
     println!("Stamped {n} commit(s) with Stable-Commit-Ids (their hashes changed).");
-    split_if_requested(split_after, delete_original, &base, &branch)
+    edit_if_requested(edit_after, &base, &branch, queue_flag)
 }
 
-/// The `--split` tail of `track`: hand off to the split editor, unless the
+/// The `--edit` tail of `track`: hand off to the queue editor, unless the
 /// adopted branch is too small to divide.
-fn split_if_requested(
+fn edit_if_requested(
     requested: bool,
-    delete_original: bool,
     base: &str,
     branch: &str,
+    queue_flag: Option<&str>,
 ) -> Result<()> {
     if !requested {
         return Ok(());
     }
     if git::ahead_count(base, branch)? < 2 {
-        println!("`{branch}` has fewer than 2 commits — nothing to split.");
+        println!("`{branch}` has fewer than 2 commits — nothing to divide.");
         return Ok(());
     }
-    split(delete_original, None)
+    edit(queue_flag)
 }
 
 /// `git queue untrack` — forget the current branch's queue metadata.

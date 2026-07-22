@@ -1,7 +1,7 @@
 ---
 name: Using git-queue
 description: Manage queues of dependent branches and their numbered pull requests with the `git queue` subcommand
-when_to_use: when work spans several dependent branches that should become separate, reviewable PRs; when editing a branch that has other branches queued behind it; when keeping a queue rebased on its base branch and its PRs in sync; when a large branch should be split into a reviewable queue; when PRs must not be merged out of order
+when_to_use: when work spans several dependent branches that should become separate, reviewable PRs; when editing a branch that has other branches queued behind it; when keeping a queue rebased on its base branch and its PRs in sync; when a large branch should be divided into a reviewable queue; when PRs must not be merged out of order
 version: 1.1.0
 ---
 
@@ -49,8 +49,8 @@ below own that propagation.
 | Describe the whole queue | `git queue describe [-m …]` | "About this queue" section in every PR of the queue |
 | Describe one branch | `git queue describe-branch [-m …]` | "About this branch" section in its PR |
 | List all queues | `git queue ls` | Most recently touched first |
-| One big branch → a queue | `git queue split` | Editor assigns commits to branches |
-| Adopt an existing branch AND divide it | `git queue track --split` (add `--stamp-ids` to skip the prompt) | track + stamp + split editor in one step |
+| One big branch → a queue, or reshape a queue | `git queue edit` | Editor: `[branch]` section headers over a fixed commit list |
+| Adopt an existing branch AND divide it | `git queue track --edit` (add `--stamp-ids` to skip the prompt) | track + stamp + queue editor in one step |
 | Abandon a queue's open PRs | `git queue yank` | Closes every open (non-merged) PR in the queue |
 | Stop PRs merging out of order | `git queue setup` (enable the gate step) | Red/green merge-order status per PR (advisory) |
 | Check enforcement is on | `git queue doctor` | Read-only report of the gate status |
@@ -155,7 +155,7 @@ Splitting an existing branch:
 
 ```sh
 git checkout big-feature
-git queue split                      # editor: prefix each commit with a branch
+git queue edit                       # editor: [branch] headers over the commits
 #   e.g.  api  <sha> Add API   /  api <sha> Add client  /  ui <sha> Add UI
 git queue submit
 ```
@@ -167,7 +167,7 @@ git queue submit
   the commit.
 - **`amend` aborting on conflict is not a failure** — it's the safe outcome.
   Resolve the descendant or use `commit` instead.
-- **`split` requires a clean work tree** and contiguous groups (all of one
+- **`edit` requires a clean work tree** and contiguous groups (all of one
   branch's commits together, in order). It doesn't reorder commits yet.
 - **`git queue <cmd> --help` opens a man page** (git intercepts `--help`); use
   `git queue help` for the CLI help.

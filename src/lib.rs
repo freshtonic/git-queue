@@ -34,7 +34,7 @@ struct Cli {
 enum Command {
     /// Create a new branch queued after the current one.
     #[command(
-        long_about = "Creates the next branch of the queue at the current branch's tip (or at `--base <branch>`'s tip). In a namespaced queue — one with an explicit name, or whose branches already live under queue/<name>/… — you give the short name and the branch is created as queue/<name>/<short>, exactly like split's segments; names containing `/` are used as-is, and plain-named queues stay plain. Extending a queue inherits its name; starting a new one asks (or takes `--queue`). The front PR targets the base branch, which is how queues can be built on release branches. Branch arguments elsewhere (`--base`, `track --parent`, `checkout`) accept the same short names."
+        long_about = "Creates the next branch of the queue at the current branch's tip (or at `--base <branch>`'s tip). In a namespaced queue — one with an explicit name, or whose branches already live under queue/<name>/… — you give the short name and the branch is created as queue/<name>/<short>, exactly like edit's sections; names containing `/` are used as-is, and plain-named queues stay plain. Extending a queue inherits its name; starting a new one asks (or takes `--queue`). The front PR targets the base branch, which is how queues can be built on release branches. Branch arguments elsewhere (`--base`, `track --parent`, `checkout`) accept the same short names."
     )]
     Create {
         /// Name of the new branch.
@@ -59,7 +59,7 @@ enum Command {
     Ls,
     /// Show or set the current queue's name.
     #[command(
-        long_about = "Shows the current queue's name, or (re)names it. Every queue is named: the name appears in each PR's header, namespaces split branches (`queue/<name>/<segment>`), and keys the queue-level description and activity time. Naming records membership on every branch of the line, so branches that don't follow the `queue/<name>/…` convention still resolve."
+        long_about = "Shows the current queue's name, or (re)names it. Every queue is named: the name appears in each PR's header, namespaces the queue's branches (`queue/<name>/<branch>`), and keys the queue-level description and activity time. Naming records membership on every branch of the line, so branches that don't follow the `queue/<name>/…` convention still resolve."
     )]
     Name {
         /// New name for the queue (shows the current name when omitted).
@@ -78,15 +78,13 @@ enum Command {
         /// A commit of the current queue, or one of its branches to reattach.
         commit: String,
     },
-    /// Split the current branch's commits into a queue of branches.
+    /// Edit the whole queue: reassign commits to branches in an editor.
+    #[command(visible_alias = "split")]
     #[command(
-        long_about = "Turns one branch with many commits into a queue of branches: an editor lists every commit prefixed by a branch name — edit the names, and consecutive commits sharing a name become one branch/PR, in file order. Branches are created as `queue/<name>/<segment>` at the existing commit boundaries (no commits are rewritten). If no segment reuses the original branch's name, the old ref is fully redundant and split offers to delete it (`--delete-original` skips the prompt)."
+        long_about = "Opens the whole queue in an editor: every branch is a `[name]` section header, with the commits belonging to it listed beneath (the first section is the front of the queue — it merges first). The commit sequence is fixed — commits cannot be reordered or deleted, only assigned to branches — so editing means moving, renaming, adding, or removing the `[name]` header lines: add a header to split a branch in two, remove one to dissolve a branch into its neighbours, move one to shift commits between adjacent branches. Branch refs simply move to the new section boundaries; no commit is rewritten. Removed branches are deleted (their commits are covered by the remaining branches). Short header names resolve within the queue and new ones are created as `queue/<name>/<short>` in namespaced queues. Also works on an untracked branch: it becomes one section over trunk, ready to divide."
     )]
-    Split {
-        /// If the original branch isn't reused as a segment, delete it without asking.
-        #[arg(long)]
-        delete_original: bool,
-        /// Queue name; segment branches are created as queue/<name>/<segment>.
+    Edit {
+        /// Queue name when editing starts a new queue (untracked branch).
         #[arg(long)]
         queue: Option<String>,
     },
@@ -111,7 +109,7 @@ enum Command {
     },
     /// Adopt the current branch into a queue.
     #[command(
-        long_about = "Adopts an existing branch into a queue: records its parent (trunk by default, or `--parent`), asks for a queue name when starting a new one, and offers to stamp Stable-Commit-Ids onto the adopted commits — asking first because stamping rewrites them (hashes change; an already-pushed branch will be force-pushed with lease on the next sync). `--stamp-ids`/`--no-stamp-ids` decide non-interactively, and `--split` continues straight into the split editor to divide the adopted commits into multiple branches."
+        long_about = "Adopts an existing branch into a queue: records its parent (trunk by default, or `--parent`), asks for a queue name when starting a new one, and offers to stamp Stable-Commit-Ids onto the adopted commits — asking first because stamping rewrites them (hashes change; an already-pushed branch will be force-pushed with lease on the next sync). `--stamp-ids`/`--no-stamp-ids` decide non-interactively, and `--edit` continues straight into the queue editor to divide the adopted commits into multiple branches."
     )]
     Track {
         /// Parent branch (defaults to trunk).
@@ -123,14 +121,10 @@ enum Command {
         /// Never stamp Stable-Commit-Ids onto existing commits.
         #[arg(long)]
         no_stamp_ids: bool,
-        /// After adopting, open the split editor to divide the commits into
+        /// After adopting, open the queue editor to divide the commits into
         /// multiple queued branches.
-        #[arg(long)]
-        split: bool,
-        /// With --split: delete the original branch without asking if it isn't
-        /// reused as a segment.
-        #[arg(long, requires = "split")]
-        delete_original: bool,
+        #[arg(long, alias = "split")]
+        edit: bool,
         /// Name for the queue when this adoption starts a new one.
         #[arg(long)]
         queue: Option<String>,
@@ -400,27 +394,16 @@ pub fn run() {
         Command::Name { name } => commands::name(name),
         Command::Log => commands::log(),
         Command::Checkout { commit } => commands::checkout(&commit),
-        Command::Split {
-            delete_original,
-            queue,
-        } => commands::split(delete_original, queue.as_deref()),
+        Command::Edit { queue } => commands::edit(queue.as_deref()),
         Command::Describe { message } => commands::describe(message),
         Command::DescribeBranch { message } => commands::describe_branch(message),
         Command::Track {
             parent,
             stamp_ids,
             no_stamp_ids,
-            split,
-            delete_original,
+            edit,
             queue,
-        } => commands::track(
-            parent,
-            stamp_ids,
-            no_stamp_ids,
-            split,
-            delete_original,
-            queue.as_deref(),
-        ),
+        } => commands::track(parent, stamp_ids, no_stamp_ids, edit, queue.as_deref()),
         Command::Untrack => commands::untrack(),
         Command::Next => commands::next(),
         Command::Prev => commands::prev(),

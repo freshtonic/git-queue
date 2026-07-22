@@ -435,7 +435,7 @@ fn exists_at(dir: &Path, rev: &str, path: &str) -> bool {
 }
 
 #[test]
-fn split_divides_a_branch_into_a_queue() {
+fn edit_divides_a_branch_into_a_queue() {
     let tmp = new_repo();
     let dir = tmp.path();
     queue(dir).args(["create", "feature"]).assert().success();
@@ -443,12 +443,12 @@ fn split_divides_a_branch_into_a_queue() {
     commit(dir, "c2.txt");
     commit(dir, "c3.txt");
 
-    // Editor assigns commit 1 -> api, 2 -> service, 3 -> ui.
-    // perl -i is portable across macOS/Linux; BSD `sed -i ''` differs from GNU.
-    let editor = "perl -i -pe 's/^feature /api / if $. == 1; s/^feature /service / if $. == 2; s/^feature /ui / if $. == 3'";
+    // Rename the section and insert two new headers: commit 1 -> api,
+    // 2 -> service, 3 -> ui. perl -i is portable across macOS/Linux.
+    let editor = r#"perl -i -pe 's/^\[feature\]$/[api]/; $_ = "[service]\n$_" if /add c2/; $_ = "[ui]\n$_" if /add c3/'"#;
     queue(dir)
         .env("GIT_EDITOR", editor)
-        .arg("split")
+        .args(["edit", "--queue", "feature"])
         .assert()
         .success();
 
@@ -483,6 +483,9 @@ fn split_divides_a_branch_into_a_queue() {
             "ui should include {f}"
         );
     }
+
+    // The original branch's header was removed, so the branch is gone.
+    assert!(!git_out(dir, &["branch", "--list", "feature"]).contains("feature"));
 
     // Ends up checked out on the top of the new queue.
     assert_eq!(
@@ -1374,7 +1377,7 @@ fn reword_accepts_queued_commit_ids() {
 }
 
 #[test]
-fn track_split_divides_an_adopted_branch() {
+fn track_edit_divides_an_adopted_branch() {
     let tmp = new_repo();
     let dir = tmp.path();
     git(dir, &["checkout", "-q", "-b", "big"]);
@@ -1382,11 +1385,11 @@ fn track_split_divides_an_adopted_branch() {
     commit(dir, "c2.txt");
     commit(dir, "c3.txt");
 
-    // Adopt + stamp + split in one go: first two commits -> `api`, third -> `ui`.
-    let editor = "perl -i -pe 's/^big /api / if $. <= 2; s/^big /ui / if $. == 3'";
+    // Adopt + stamp + edit in one go: first two commits -> `api`, third -> `ui`.
+    let editor = r#"perl -i -pe 's/^\[big\]$/[api]/; $_ = "[ui]\n$_" if /add c3/'"#;
     queue(dir)
         .env("GIT_EDITOR", editor)
-        .args(["track", "--stamp-ids", "--split"])
+        .args(["track", "--stamp-ids", "--edit", "--queue", "big"])
         .assert()
         .success();
 
@@ -1398,12 +1401,12 @@ fn track_split_divides_an_adopted_branch() {
         git_out(dir, &["config", "branch.queue/big/ui.queueParent"]),
         "queue/big/api"
     );
-    // Stamping ran before the split, so every segment tip carries an id.
+    // Stamping ran before the edit, so every branch tip carries an id.
     for rev in ["queue/big/api", "queue/big/ui"] {
         let id = queue_id_of(dir, rev);
         assert!(id.starts_with("q-"), "{rev} unstamped: {id:?}");
     }
-    // Segment contents are right.
+    // Branch contents are right.
     git(dir, &["checkout", "-q", "queue/big/api"]);
     assert!(dir.join("c2.txt").exists() && !dir.join("c3.txt").exists());
     git(dir, &["checkout", "-q", "queue/big/ui"]);
@@ -1411,18 +1414,18 @@ fn track_split_divides_an_adopted_branch() {
 }
 
 #[test]
-fn split_cleans_up_an_unreused_original_branch() {
+fn edit_deletes_branches_whose_headers_are_removed() {
     let tmp = new_repo();
     let dir = tmp.path();
     git(dir, &["checkout", "-q", "-b", "big"]);
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
 
-    // Neither segment reuses `big`; --delete-original removes it.
-    let editor = "perl -i -pe 's/^big /api / if $. == 1; s/^big /ui / if $. == 2'";
+    // Neither section reuses `big`, so the old branch is deleted.
+    let editor = r#"perl -i -pe 's/^\[big\]$/[api]/; $_ = "[ui]\n$_" if /add c2/'"#;
     queue(dir)
         .env("GIT_EDITOR", editor)
-        .args(["track", "--no-stamp-ids", "--split", "--delete-original"])
+        .args(["track", "--no-stamp-ids", "--edit", "--queue", "big"])
         .assert()
         .success();
 
@@ -1445,29 +1448,42 @@ fn split_cleans_up_an_unreused_original_branch() {
 }
 
 #[test]
-fn split_keeps_the_original_by_default_when_not_a_tty() {
+fn edit_moves_commits_between_existing_branches() {
     let tmp = new_repo();
     let dir = tmp.path();
-    git(dir, &["checkout", "-q", "-b", "big"]);
+    queue(dir)
+        .args(["create", "a", "--queue", "q"])
+        .assert()
+        .success();
     commit(dir, "c1.txt");
     commit(dir, "c2.txt");
-    let tip = sha(dir, "big");
+    queue(dir).args(["create", "b"]).assert().success();
+    commit(dir, "c3.txt");
+    let b_tip = sha(dir, "queue/q/b");
 
-    let editor = "perl -i -pe 's/^big /api / if $. == 1; s/^big /ui / if $. == 2'";
+    // Move the `[b]` boundary up one commit: a keeps c1, b takes c2 and c3.
+    // Headers show short names for namespaced branches.
+    let editor = r#"perl -i -pe '$_ = "" if /^\[b\]$/; $_ = "[b]\n$_" if /add c2/'"#;
     queue(dir)
         .env("GIT_EDITOR", editor)
-        .arg("split")
+        .arg("edit")
         .assert()
         .success();
 
-    // Kept (stdin is not a TTY), still at the old tip, and untracked.
-    assert_eq!(sha(dir, "big"), tip);
-    let cfg = StdCommand::new("git")
-        .args(["config", "--local", "--get", "branch.big.queueParent"])
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(!cfg.status.success());
+    // No commit was rewritten: b's tip is untouched, a's ref just moved.
+    assert_eq!(sha(dir, "queue/q/b"), b_tip);
+    assert!(exists_at(dir, "queue/q/a", "c1.txt"));
+    assert!(!exists_at(dir, "queue/q/a", "c2.txt"), "c2 moved off a");
+    assert!(exists_at(dir, "queue/q/b", "c2.txt"));
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/q/b.queueParent"]),
+        "queue/q/a"
+    );
+    // Still on the branch we started from.
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "queue/q/b"
+    );
 }
 
 #[test]
