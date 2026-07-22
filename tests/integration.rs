@@ -315,7 +315,7 @@ fn hooks_autorequeue_on_plain_commit() {
     commit(dir, "a.txt");
     queue(dir).args(["create", "b"]).assert().success();
     commit(dir, "b.txt");
-    queue(dir).args(["hooks", "install"]).assert().success();
+    queue(dir).args(["setup", "--yes"]).assert().success();
 
     // Plain `git commit` on `a`, with our binary on PATH for the hook to find.
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
@@ -1020,7 +1020,7 @@ fn commit_msg_hook_stamps_queue_ids_on_queue_branches_only() {
     let tmp = new_repo();
     let dir = tmp.path();
     queue(dir).args(["create", "a"]).assert().success();
-    queue(dir).args(["hooks", "install"]).assert().success();
+    queue(dir).args(["setup", "--yes"]).assert().success();
 
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_git-queue")).parent().unwrap();
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
@@ -1545,7 +1545,7 @@ fn checkout_plain_commit_inserts_mid_queue_with_hooks() {
         .args(["commit", "-m", "add f2"])
         .assert()
         .success();
-    queue(dir).args(["hooks", "install"]).assert().success();
+    queue(dir).args(["setup", "--yes"]).assert().success();
 
     queue(dir).args(["checkout", &c1]).assert().success();
     stage(dir, "mid.txt", "mid");
@@ -1645,4 +1645,28 @@ fn sync_stamps_missing_stable_commit_ids() {
     let tip = sha(dir, "b");
     queue(dir).args(["sync", "--no-push"]).assert().success();
     assert_eq!(sha(dir, "b"), tip, "second sync must not rewrite");
+}
+
+#[test]
+fn setup_yes_installs_hooks_and_gate_and_undo_reverses() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["setup", "--yes"]).assert().success();
+
+    let hooks = dir.join(".git/hooks");
+    for h in ["post-commit", "post-rewrite", "commit-msg"] {
+        assert!(hooks.join(h).exists(), "{h} hook missing");
+    }
+    assert_eq!(git_out(dir, &["config", "--local", "queue.gate"]), "status");
+
+    queue(dir).args(["setup", "--undo"]).assert().success();
+    for h in ["post-commit", "post-rewrite", "commit-msg"] {
+        assert!(!hooks.join(h).exists(), "{h} hook should be removed");
+    }
+    let gate = StdCommand::new("git")
+        .args(["config", "--local", "--get", "queue.gate"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(!gate.status.success(), "gate should be unset");
 }

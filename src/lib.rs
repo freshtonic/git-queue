@@ -199,14 +199,6 @@ enum Command {
         #[arg(long)]
         auto: bool,
     },
-    /// Install or remove hooks that auto-requeue after plain commits.
-    #[command(
-        long_about = "Installs (or removes) three per-repository hooks: post-commit and post-rewrite auto-requeue descendants after plain `git commit`/`--amend` on a queue branch — making the plumbing invisible — and commit-msg stamps a Stable-Commit-Id trailer on every new queue commit. Guarded against recursion; no-ops on branches outside any queue."
-    )]
-    Hooks {
-        #[command(subcommand)]
-        action: HooksAction,
-    },
     /// Pull remote commits, requeue onto the latest base branch, and push (with lease).
     #[command(
         long_about = "The converge-with-reality command. Fetches with `--prune`, fast-forwards each queue's base branch, stamps Stable-Commit-Ids onto any queue commits missing them, drops branches whose work has landed (merged PRs, and squash-merges detected by Stable-Commit-Id), pulls genuinely new teammate commits (id correspondence guarantees your own rewrites are never re-applied over themselves), requeues the whole forest onto its bases, pushes everything back with `--force-with-lease`, and reconciles the PRs of every published queue — opening missing ones, reviving closed ones, refreshing bases, titles and queue maps. `--no-push` stops after the local requeue. It never pushes a branch that would make GitHub mislabel an open child PR as merged."
@@ -231,16 +223,23 @@ enum Command {
         long_about = "Closes every open PR of the current queue without merging — for abandoning or restarting a published queue. Merged PRs, local branches and metadata are all left untouched."
     )]
     Yank,
+    /// Interactive setup: hooks, merge-order gate, and agent-skill install.
+    #[command(
+        long_about = "Walks through git-queue's optional integrations, asking permission for each step: the git hooks (auto-requeue after plain commits, Stable-Commit-Id stamping), the advisory merge-order gate (red/green commit status per PR), the Claude Code skill (when Claude Code is detected), and a git-queue section in AGENTS.md (when other agent CLIs are detected — the cross-agent convention read by Codex, Cursor, Copilot and others). --yes accepts the two repo-local steps non-interactively; --undo reverses everything."
+    )]
+    Setup {
+        /// Accept the hooks and gate steps without asking (integrations still ask).
+        #[arg(long)]
+        yes: bool,
+        /// Reverse setup: remove hooks, gate, skill and AGENTS.md section.
+        #[arg(long)]
+        undo: bool,
+    },
     /// Report whether merge-order signalling is set up (read-only).
     #[command(
         long_about = "Read-only diagnosis of merge-order signalling: whether the status gate is enabled, and whether the GitHub CLI is ready. Changes nothing."
     )]
     Doctor,
-    /// Enable merge-order signalling: submit posts a red/green commit status per PR.
-    #[command(
-        long_about = "Enables the advisory merge-order gate: from then on, submit/sync post a `git-queue/merge-order` commit status on every open PR — green ✓ on the PR at the front of the queue, red ✗ (\"merge PR #N first\", linking to the blocker) on the ones behind it. Advisory by design: every hard block GitHub offers lives on base-branch rules, which would also reject git-queue's own pushes to queue branches. PRs stay normal, reviewable, non-draft."
-    )]
-    Protect,
     /// Internal: GIT_SEQUENCE_EDITOR for id stamping (marks picks as reword).
     #[command(hide = true, name = "stamp-todo")]
     StampTodo {
@@ -266,14 +265,6 @@ enum Command {
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-}
-
-#[derive(Subcommand)]
-enum HooksAction {
-    /// Install the auto-requeue hooks.
-    Install,
-    /// Remove the auto-requeue hooks.
-    Uninstall,
 }
 
 /// Render the man page. clap_mangen produces the top-level page, whose
@@ -437,7 +428,7 @@ pub fn run() {
         Command::Submit { draft } => commands::submit(draft),
         Command::Yank => commands::yank(),
         Command::Doctor => commands::doctor(),
-        Command::Protect => commands::protect(),
+        Command::Setup { yes, undo } => commands::setup(yes, undo),
         Command::Commit { message } => commands::commit(message),
         Command::Amend => commands::amend(),
         Command::Reword { commit } => commands::reword(commit),
@@ -446,10 +437,6 @@ pub fn run() {
         Command::AddQueueId { file } => commands::add_queue_id(&file),
         Command::ReorderTodo { file } => commands::reorder_todo(&file),
         Command::Requeue { auto } => commands::requeue(auto),
-        Command::Hooks { action } => match action {
-            HooksAction::Install => commands::hooks_install(),
-            HooksAction::Uninstall => commands::hooks_uninstall(),
-        },
         Command::Man { dir } => generate_man(dir),
     };
     if let Err(e) = result {

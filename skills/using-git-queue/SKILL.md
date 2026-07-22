@@ -52,9 +52,9 @@ below own that propagation.
 | One big branch → a queue | `git queue split` | Editor assigns commits to branches |
 | Adopt an existing branch AND divide it | `git queue track --split` (add `--stamp-ids` to skip the prompt) | track + stamp + split editor in one step |
 | Abandon a queue's open PRs | `git queue yank` | Closes every open (non-merged) PR in the queue |
-| Stop PRs merging out of order | `git queue protect` | Enables merge-order statuses on each PR (one-time) |
+| Stop PRs merging out of order | `git queue setup` (enable the gate step) | Red/green merge-order status per PR (advisory) |
 | Check enforcement is on | `git queue doctor` | Read-only report of the gate status |
-| Give commits stable identity across rewrites | `git queue hooks install`, `git queue commit`, or `git queue track --stamp-ids` for existing commits | Stamps a `Stable-Commit-Id:` trailer; powers safe sync (no self-conflicts) and squash-merge detection |
+| Give commits stable identity across rewrites | `git queue setup`, `git queue commit`, or `git queue track --stamp-ids` for existing commits | Stamps a `Stable-Commit-Id:` trailer; powers safe sync (no self-conflicts) and squash-merge detection |
 | Move around the queue | `git queue up` / `down`, `git queue status` | Navigate / view |
 | See every commit in the queue with its Stable-Commit-Id | `git queue log` | Status tree + indented per-branch commits, newest first |
 | Address a commit by its id | `git queue move q-3zz02424 --new-parent <rev>`, `git queue reword q-…` | Any commit argument accepts a `Stable-Commit-Id` (unique prefix ok), as shown by `git queue log` |
@@ -91,7 +91,7 @@ markers.
 
 ## Enforcing merge order
 
-To warn reviewers off merging PRs out of order, run `git queue protect` **once**
+To warn reviewers off merging PRs out of order, run `git queue setup` **once**
 per repo. It enables *status-based* gating (`queue.gate = status`) — no GitHub
 workflow, ruleset, or admin rights needed. Then `git queue submit` posts a
 `git-queue/merge-order` commit status on every open PR: green ✓ on the

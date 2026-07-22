@@ -60,8 +60,8 @@ To have a plain `git commit`/`git commit --amend` on a queue branch
 automatically requeue its descendants, install the git hooks (per repository):
 
 ```sh
-git queue hooks install     # writes post-commit / post-rewrite hooks
-git queue hooks uninstall   # remove them
+git queue setup             # interactive: hooks, gate, agent skills
+git queue setup --undo      # reverse it all
 ```
 
 Without the hooks, use `git queue commit` / `git queue amend` explicitly.
@@ -148,16 +148,15 @@ git queue create fix-a --base release-1.2            # base named explicitly
 | `git queue reword [<commit>]` | Rewrite a commit message and update descendants (defaults to HEAD). |
 | `git queue move <c>[..<c>] --new-parent <c>` | Move a commit (or an inclusive range) elsewhere in the queue — within one PR or across PRs. Commits can be named by revision or `Stable-Commit-Id` (unique prefix ok). Everything after the removal and insertion points is requeued; conflicts persist as markers. |
 | `git queue requeue` (`restack`) | Requeue the current branch's descendants onto its tip. |
-| `git queue hooks install` / `uninstall` | Make plain `git commit`/amend auto-requeue descendants and stamp `Stable-Commit-Id` trailers on new queue commits. |
 | `git queue sync [--no-push]` | Pull remote commits, drop branches whose PRs have merged (reparenting their children), requeue onto the latest base, push back with `--force-with-lease`, and reconcile the PRs of every published queue (open missing ones, revive closed ones, fix bases/titles/queue maps). |
 | `git queue submit [--draft]` (`push`) | Push the current queue line and open/update its numbered PRs (revives a child PR GitHub closed when its base was deleted). |
 | `git queue yank` | Close every open (non-merged) PR in the current queue. |
-| `git queue protect` | Enable merge-order signalling (a red/green commit status per PR) for this repo. |
+| `git queue setup [--yes] [--undo]` | Interactive, per-step setup: git hooks, merge-order gate, the Claude Code skill, and an `AGENTS.md` section for other agents. `--undo` reverses everything. |
 | `git queue doctor` | Report whether merge-order signalling is enabled (read-only). |
 
 ### Signalling merge order
 
-Run `git queue protect` once to warn reviewers off merging PRs out of order. It
+Enable the gate via `git queue setup` to warn reviewers off merging PRs out of order. It
 sets a local flag (`queue.gate = status`) — no GitHub setup, workflow, ruleset,
 or admin rights required. With it on, `git queue submit` posts a
 `git-queue/merge-order` commit status on every open PR in the queue: green ✓
@@ -195,7 +194,7 @@ stable identity: a `Stable-Commit-Id:` trailer in the commit message (the same i
 Gerrit's `Change-Id`), minted once and carried by git itself through every
 rebase, cherry-pick, replay and amend.
 
-- `git queue commit` stamps one automatically, and `git queue hooks install`
+- `git queue commit` stamps one automatically, and `git queue setup`
   adds a `commit-msg` hook so plain `git commit` on a queue branch does too.
   Commits off the queue are never touched.
 - `git queue track` offers to stamp the branch's existing commits (with a
@@ -260,7 +259,7 @@ what you're doing:
 Branches left holding persisted conflict markers are shown with `⚠ conflict
 markers` in `git queue status`. Search for `<<<<<<<`, resolve, and commit.
 
-Prefer plain `git commit`? Run `git queue hooks install` and a post-commit /
+Prefer plain `git commit`? Run `git queue setup` and a post-commit /
 post-rewrite hook will call `git queue requeue` for you (the hooks are guarded
 against recursion and no-op off a queue).
 
@@ -280,7 +279,7 @@ State lives in the repository's own git config (nothing outside git):
 | `branch.<n>.queueParentSha` | Parent tip when `<n>` was last based — the rebase anchor used by `sync`. |
 | `branch.<n>.queuePr` | Cached PR number. |
 | `branch.<n>.queueDescription` | PR body text set by `git queue describe`. |
-| `queue.gate` | `status` once `git queue protect` enables merge-order signalling. |
+| `queue.gate` | `status` once `git queue setup` enables merge-order signalling. |
 
 (Conflict-marker state is **not** stored — `status` detects `<<<<<<<` in each
 branch's tip live, so it can never report a stale warning.)

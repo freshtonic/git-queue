@@ -24,6 +24,179 @@ fn apply_status_gate(entries: &[Entry]) -> Result<()> {
     Ok(())
 }
 
+/// Ask a yes/no question on the TTY; `default_yes` decides bare Enter.
+fn confirm(question: &str, default_yes: bool) -> bool {
+    use std::io::Write;
+    print!("{question} [{}] ", if default_yes { "Y/n" } else { "y/N" });
+    std::io::stdout().flush().ok();
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer).ok();
+    match answer.trim().to_lowercase().as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    }
+}
+
+/// `git queue setup [--yes] [--undo]` — interactive, per-step opt-in setup:
+/// the git hooks, the merge-order gate, the Claude Code skill, and (when
+/// other agents are detected) an AGENTS.md section. `--yes` accepts the two
+/// repo-local steps non-interactively; the integrations always ask.
+pub fn setup(yes: bool, undo: bool) -> Result<()> {
+    git::ensure_repo()?;
+    if undo {
+        return setup_undo();
+    }
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+    if !tty && !yes {
+        bail!("`git queue setup` is interactive; pass --yes to accept the repo-local steps");
+    }
+    let ask = |q: &str| -> bool {
+        if tty {
+            confirm(q, true)
+        } else {
+            yes
+        }
+    };
+
+    // 1. Hooks.
+    if ask(
+        "Install the git hooks? (plain `git commit`/`--amend` auto-requeue descendants;
+new queue commits get a Stable-Commit-Id)",
+    ) {
+        hooks_install()?;
+    }
+    // 2. Merge-order gate.
+    if ask(
+        "Enable the merge-order gate? (submit/sync post a red/green commit status per PR
+so reviewers see which PR merges next)",
+    ) {
+        meta::set_gate("status")?;
+        println!("Merge-order gate enabled.");
+    }
+    // 3. Claude Code skill (only when Claude Code is present; interactive only).
+    let home = std::env::var("HOME").unwrap_or_default();
+    let claude_dir = std::path::Path::new(&home).join(".claude");
+    if tty
+        && claude_dir.exists()
+        && confirm(
+            "Claude Code detected. Install the `using-git-queue` skill so Claude drives
+git-queue correctly?",
+            true,
+        )
+    {
+        let dir = claude_dir.join("skills").join("using-git-queue");
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("SKILL.md"), EMBEDDED_SKILL)?;
+        println!("Installed {}.", dir.join("SKILL.md").display());
+    }
+    // 4. Other agents -> AGENTS.md (the cross-agent convention).
+    let others: Vec<&str> = [
+        ("codex", ".codex"),
+        ("cursor", ".cursor"),
+        ("gemini", ".gemini"),
+        ("windsurf", ".windsurf"),
+        ("copilot", ".config/github-copilot"),
+    ]
+    .iter()
+    .filter(|(_, d)| std::path::Path::new(&home).join(d).exists())
+    .map(|(n, _)| *n)
+    .collect();
+    if tty
+        && !others.is_empty()
+        && confirm(
+            &format!(
+                "Detected other agents ({}). Add a git-queue section to this repo's AGENTS.md
+(read by Codex, Cursor, Copilot and most agent CLIs)?",
+                others.join(", ")
+            ),
+            true,
+        )
+    {
+        write_agents_md_section()?;
+    }
+    println!(
+        "
+Setup done. `git queue doctor` reports the current state."
+    );
+    Ok(())
+}
+
+fn setup_undo() -> Result<()> {
+    hooks_uninstall()?;
+    let _ = git::ok(&["config", "--local", "--unset", "queue.gate"]);
+    println!("Merge-order gate disabled.");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let skill = std::path::Path::new(&home).join(".claude/skills/using-git-queue/SKILL.md");
+    if skill.exists() {
+        std::fs::remove_file(&skill).ok();
+        println!("Removed {}.", skill.display());
+    }
+    strip_agents_md_section()?;
+    Ok(())
+}
+
+const EMBEDDED_SKILL: &str = include_str!("../skills/using-git-queue/SKILL.md");
+const AGENTS_BEGIN: &str = "<!-- git-queue:agents:begin -->";
+const AGENTS_END: &str = "<!-- git-queue:agents:end -->";
+
+/// Idempotently write a marker-delimited git-queue section into AGENTS.md.
+fn write_agents_md_section() -> Result<()> {
+    let section = format!(
+        "{AGENTS_BEGIN}
+## git-queue (PR queues)
+
+         This repo uses git-queue for stacked/queued PRs. Rules:
+
+         - See `git queue --help` (man page) for every command; `git queue status`/`log` show the queue.
+         - Never hand-rebase a queue branch: use `git queue commit`/`amend`/`move`/`checkout`.
+         - After changing history, run `git queue sync` to requeue, push (lease) and refresh PRs.
+         - PRs merge front-first; never merge a PR whose `git-queue/merge-order` status is red.
+         - Commits carry `Stable-Commit-Id:` trailers — preserve commit messages when rewriting.
+         {AGENTS_END}
+"
+    );
+    let path = std::path::Path::new("AGENTS.md");
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let updated = match (existing.find(AGENTS_BEGIN), existing.find(AGENTS_END)) {
+        (Some(a), Some(b)) if b > a => format!(
+            "{}{}{}",
+            &existing[..a],
+            section.trim_end(),
+            &existing[b + AGENTS_END.len()..]
+        ),
+        _ if existing.is_empty() => section,
+        _ => format!(
+            "{}
+{}",
+            existing.trim_end(),
+            section
+        ),
+    };
+    std::fs::write(path, updated)?;
+    println!("Wrote the git-queue section of AGENTS.md.");
+    Ok(())
+}
+
+fn strip_agents_md_section() -> Result<()> {
+    let path = std::path::Path::new("AGENTS.md");
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return Ok(());
+    };
+    if let (Some(a), Some(b)) = (existing.find(AGENTS_BEGIN), existing.find(AGENTS_END)) {
+        if b > a {
+            let rest = format!("{}{}", &existing[..a], &existing[b + AGENTS_END.len()..]);
+            if rest.trim().is_empty() {
+                std::fs::remove_file(path).ok();
+            } else {
+                std::fs::write(path, rest)?;
+            }
+            println!("Removed the git-queue section of AGENTS.md.");
+        }
+    }
+    Ok(())
+}
+
 /// `git queue doctor` — report-only diagnostics for merge-order enforcement.
 pub fn doctor() -> Result<()> {
     git::ensure_repo()?;
@@ -40,10 +213,10 @@ pub fn doctor() -> Result<()> {
             println!("    on the ones behind it.");
         }
         Some(other) => {
-            println!("  ! gate: unknown mode `{other}` \u{2014} run `git queue protect` to (re)enable status mode");
+            println!("  ! gate: unknown mode `{other}` \u{2014} run `git queue setup` to (re)enable status mode");
         }
         None => {
-            println!("  \u{2717} gate: not enabled \u{2014} run `git queue protect` to turn it on");
+            println!("  \u{2717} gate: not enabled \u{2014} run `git queue setup` to turn it on");
         }
     }
 
@@ -55,32 +228,6 @@ pub fn doctor() -> Result<()> {
 
     println!("\nNote: the gate is advisory \u{2014} a red \u{2717} in the checks list warns reviewers off,");
     println!("but it does not disable the merge button.");
-    Ok(())
-}
-
-/// `git queue protect` — enable status-based merge-order signalling.
-///
-/// A commit status is the one advisory GitHub mechanism that composes with
-/// base-chaining: it shows up in every PR's checks UI (red ✗ with "merge PR #N
-/// first") while leaving the PRs as normal, reviewable, non-draft PRs and
-/// never blocking pushes. Anything that actually disables the merge button
-/// requires base-branch rules, which also gate pushes to the queue branches.
-pub fn protect() -> Result<()> {
-    git::ensure_repo()?;
-    meta::set_gate("status")?;
-    println!("Enabled status-based merge-order signalling for this repository.\n");
-    println!(
-        "`git queue submit` now posts a `{}` commit status on every open",
-        render::GATE_CONTEXT
-    );
-    println!("PR in the queue: green \u{2713} on the front (mergeable) PR, red \u{2717} \u{201c}merge PR #N");
-    println!(
-        "first\u{201d} on every PR above it. As PRs land, `git queue sync` + `git queue submit`"
-    );
-    println!("promote the PR now at the front to green.\n");
-    println!("No GitHub setup or admin rights needed, and PRs stay normal (no drafts). The gate");
-    println!("is advisory: the red \u{2717} warns reviewers, but the merge button still works.");
-    println!("Run `git queue submit` now to apply it.");
     Ok(())
 }
 
@@ -1433,7 +1580,7 @@ fn report_line(line: &Line, outcome: &LinePrs, heading: &str) -> Result<()> {
     let gate = meta::gate();
     let gated = gate.as_deref() == Some("status");
     if let Some(other) = gate.as_deref().filter(|g| *g != "status") {
-        eprintln!("warning: unknown queue.gate mode `{other}` — no merge gate applied; run `git queue protect` to enable status mode");
+        eprintln!("warning: unknown queue.gate mode `{other}` — no merge gate applied; run `git queue setup` to enable status mode");
     }
     if gated {
         apply_status_gate(&outcome.entries)?;
@@ -2089,7 +2236,7 @@ fn id_hook_snippet() -> String {
 }
 
 /// `git queue hooks install` — make plain `git commit`/amend auto-requeue.
-pub fn hooks_install() -> Result<()> {
+fn hooks_install() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
     std::fs::create_dir_all(&dir)?;
@@ -2102,7 +2249,7 @@ pub fn hooks_install() -> Result<()> {
 }
 
 /// `git queue hooks uninstall` — remove the git-queue hook blocks.
-pub fn hooks_uninstall() -> Result<()> {
+fn hooks_uninstall() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);
     for name in ["post-commit", "post-rewrite", "commit-msg"] {
