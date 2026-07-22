@@ -1670,3 +1670,59 @@ fn setup_yes_installs_hooks_and_gate_and_undo_reverses() {
         .unwrap();
     assert!(!gate.status.success(), "gate should be unset");
 }
+
+#[test]
+fn create_namespaces_branches_and_short_names_resolve() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    // Explicit queue name => namespaced branches from short names.
+    queue(dir)
+        .args(["create", "fix-a", "--queue", "pay"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "queue/pay/fix-a"
+    );
+    commit(dir, "a.txt");
+    // Extending inherits the namespace, still from a short name.
+    queue(dir).args(["create", "fix-b"]).assert().success();
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "queue/pay/fix-b"
+    );
+    assert_eq!(
+        git_out(dir, &["config", "branch.queue/pay/fix-b.queueParent"]),
+        "queue/pay/fix-a"
+    );
+    commit(dir, "b.txt");
+
+    // checkout reattaches by short name.
+    let c = sha(dir, "queue/pay/fix-a");
+    queue(dir).args(["checkout", &c]).assert().success();
+    queue(dir).args(["checkout", "fix-b"]).assert().success();
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "queue/pay/fix-b"
+    );
+
+    // track --parent resolves a short name too.
+    git(dir, &["checkout", "-q", "-b", "hotfix", "queue/pay/fix-b"]);
+    commit(dir, "h.txt");
+    queue(dir)
+        .args(["track", "--parent", "fix-b", "--no-stamp-ids"])
+        .assert()
+        .success();
+    assert_eq!(
+        git_out(dir, &["config", "branch.hotfix.queueParent"]),
+        "queue/pay/fix-b"
+    );
+
+    // Plain-named queues stay plain (fallback naming, no prefix).
+    git(dir, &["checkout", "-q", "main"]);
+    queue(dir).args(["create", "plain"]).assert().success();
+    assert_eq!(
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "plain"
+    );
+}

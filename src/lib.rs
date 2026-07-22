@@ -34,7 +34,7 @@ struct Cli {
 enum Command {
     /// Create a new branch queued after the current one.
     #[command(
-        long_about = "Creates `<name>` at the current branch's tip (or at `--base <branch>`'s tip) and records it as the next branch of the queue. Extending a queue inherits its name; starting a new one asks for a name (or takes `--queue`). The front PR of a queue targets its base branch — which is how queues can be built on release or bugfix branches, not just trunk. Make commits, then `git queue submit` opens the numbered PRs."
+        long_about = "Creates the next branch of the queue at the current branch's tip (or at `--base <branch>`'s tip). In a namespaced queue — one with an explicit name, or whose branches already live under queue/<name>/… — you give the short name and the branch is created as queue/<name>/<short>, exactly like split's segments; names containing `/` are used as-is, and plain-named queues stay plain. Extending a queue inherits its name; starting a new one asks (or takes `--queue`). The front PR targets the base branch, which is how queues can be built on release branches. Branch arguments elsewhere (`--base`, `track --parent`, `checkout`) accept the same short names."
     )]
     Create {
         /// Name of the new branch.

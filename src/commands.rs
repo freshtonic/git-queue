@@ -236,29 +236,47 @@ pub fn doctor() -> Result<()> {
 pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
-    if git::branch_exists(name) {
-        bail!("branch `{name}` already exists");
-    }
     let parent = match base {
         Some(b) => {
-            if !git::branch_exists(b) {
+            let b = resolve_branch_arg(b)?;
+            if !git::branch_exists(&b) {
                 bail!("base branch `{b}` does not exist");
             }
-            b.to_string()
+            b
         }
         None => git::current_branch()?,
     };
     // Every queue is named: inherit when extending, otherwise ask/take one.
-    let qname = if meta::parent(&parent).is_some() {
+    // `namespaced` decides whether the new branch lives under queue/<name>/…:
+    // true when the queue name is explicit or the queue already follows the
+    // convention — so you type short names and never the prefix (as with
+    // split), and plain-named queues stay plain.
+    let (qname, namespaced) = if meta::parent(&parent).is_some() {
         let q = Queue::load()?;
         let line = q.line_through(&parent)?;
         match line_queue_name(&line) {
-            Some(n) => n,
+            Some(n) => {
+                let ns = line
+                    .branches
+                    .first()
+                    .map(|b| b.starts_with("queue/"))
+                    .unwrap_or(false);
+                (n, ns)
+            }
             None => bail!("this queue has no name; run `git queue name <name>` first"),
         }
     } else {
         require_queue_name(queue_flag, name)?
     };
+    let name = if name.contains('/') || !namespaced {
+        name.to_string()
+    } else {
+        format!("queue/{qname}/{name}")
+    };
+    let name = name.as_str();
+    if git::branch_exists(name) {
+        bail!("branch `{name}` already exists");
+    }
     let parent_sha = git::rev_parse(&parent)?;
 
     git::create_branch(name, &parent)?;
@@ -300,10 +318,10 @@ pub fn split(delete_original: bool, queue_flag: Option<&str>) -> Result<()> {
     let qname = if queue.is_tracked(&branch) {
         match line_queue_name(&queue.line_through(&branch)?) {
             Some(n) => n,
-            None => require_queue_name(queue_flag, &branch)?,
+            None => require_queue_name(queue_flag, &branch)?.0,
         }
     } else {
-        require_queue_name(queue_flag, &branch)?
+        require_queue_name(queue_flag, &branch)?.0
     };
 
     let commits = git::commits_between(&base, &branch)?;
@@ -513,7 +531,7 @@ pub fn track(
         bail!("working tree has uncommitted changes; commit or stash them before `track --split`");
     }
     let parent = match parent {
-        Some(p) => p,
+        Some(p) => resolve_branch_arg(&p)?,
         None => trunk.clone(),
     };
     if !git::branch_exists(&parent) {
@@ -534,7 +552,7 @@ pub fn track(
         let line = q.line_through(&branch)?;
         match line_queue_name(&line) {
             Some(n) => n,
-            None => require_queue_name(queue_flag, &branch)?,
+            None => require_queue_name(queue_flag, &branch)?.0,
         }
     };
     meta::set_branch_queue(&branch, &qname)?;
@@ -1358,10 +1376,10 @@ fn line_queue_name(line: &Line) -> Option<String> {
 /// Ask for (or take) a queue name, mandatorily. Order: explicit flag, TTY
 /// prompt, then — non-interactive with no flag — a fallback so scripts keep
 /// working, announced loudly.
-fn require_queue_name(flag: Option<&str>, fallback: &str) -> Result<String> {
+fn require_queue_name(flag: Option<&str>, fallback: &str) -> Result<(String, bool)> {
     if let Some(n) = flag {
         meta::validate_queue_name(n)?;
-        return Ok(n.to_string());
+        return Ok((n.to_string(), true));
     }
     if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
         print!("Name this queue: ");
@@ -1372,13 +1390,31 @@ fn require_queue_name(flag: Option<&str>, fallback: &str) -> Result<String> {
         let answer = answer.trim().to_string();
         if !answer.is_empty() {
             meta::validate_queue_name(&answer)?;
-            return Ok(answer);
+            return Ok((answer, true));
         }
     }
     let fallback = fallback.replace('/', "-");
     meta::validate_queue_name(&fallback)?;
     eprintln!("note: queue named `{fallback}` (rename any time with `git queue name <name>`).");
-    Ok(fallback)
+    Ok((fallback, false))
+}
+
+/// Resolve a branch argument, accepting short names inside namespaced queues:
+/// an exact branch name wins; otherwise a unique `queue/*/<arg>` match does.
+fn resolve_branch_arg(arg: &str) -> Result<String> {
+    if git::branch_exists(arg) {
+        return Ok(arg.to_string());
+    }
+    let suffix = format!("/{arg}");
+    let matches: Vec<String> = meta::tracked_branches()
+        .into_iter()
+        .filter(|b| b.ends_with(&suffix))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.clone()),
+        [] => Ok(arg.to_string()), // let the caller produce its natural error
+        many => bail!("`{arg}` is ambiguous: {}", many.join(", ")),
+    }
 }
 
 /// The outcome of reconciling one line's PRs.
@@ -1954,8 +1990,16 @@ pub fn checkout(arg: &str) -> Result<()> {
     };
     let top = line.branches.last().unwrap().clone();
 
-    // Checking out a branch of the line reattaches and ends the session.
-    if line.branches.iter().any(|b| b == arg) || arg == line.base {
+    // Checking out a branch of the line reattaches and ends the session
+    // (short names resolve inside namespaced queues).
+    let reattach = line
+        .branches
+        .iter()
+        .find(|b| *b == arg || b.ends_with(&format!("/{arg}")))
+        .cloned()
+        .or_else(|| (arg == line.base).then(|| line.base.clone()));
+    if let Some(target) = reattach {
+        let arg = target.as_str();
         if !git::tracked_clean() {
             bail!("stage or tracked files have changes; commit or stash them first");
         }
