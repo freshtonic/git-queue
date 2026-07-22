@@ -100,7 +100,10 @@ Every queue has a **name** — asked for interactively when a new queue starts
 (`create`/`track`/`split`; `--queue <name>` scripts it, and non-interactive
 runs fall back to the branch name). The name appears in each PR's header
 ("📚 eql-v3 PR · 2 of 3"), namespaces split branches (`queue/<name>/<segment>`),
-and keys the queue's own description:
+namespaces branches — `create`, like `split`, takes short
+names and creates `queue/<name>/<short>` in namespaced queues (and every
+command that accepts a branch resolves short names back) — and keys the
+queue's own description:
 
 ```sh
 git queue name                 # show the current queue's name
@@ -131,7 +134,7 @@ git queue create fix-a --base release-1.2            # base named explicitly
 
 | Command | Description |
 |---|---|
-| `git queue create <name> [--base <b>]` | Create `<name>` queued after the current branch (or on base `<b>`) and track it. |
+| `git queue create <name> [--base <b>] [--queue <q>]` | Create the next branch of the queue (short names become `queue/<qname>/<name>` in namespaced queues, like split). |
 | `git queue split [--queue <n>] [--delete-original]` | Split the current branch's commits into a queue (editor assigns commits to branches; they are created as `queue/<name>/<segment>`). If no segment reuses the original branch name, offers to delete the now-redundant old branch. |
 | `git queue track [--parent <b>] [--stamp-ids\|--no-stamp-ids] [--split]` | Adopt the current branch into a queue (parent defaults to trunk). Offers to stamp `Stable-Commit-Id`s onto the adopted commits — asks first, since that rewrites their hashes. `--split` then opens the split editor to divide the commits into multiple queued branches. |
 | `git queue untrack` | Forget the current branch's queue metadata. |
