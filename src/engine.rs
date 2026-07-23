@@ -649,6 +649,9 @@ impl Engine {
                 self.undo.push(snap);
                 self.redo.clear();
                 self.touched = true;
+                // A reorder can leave a commit empty (two commits touching the
+                // same lines); auto-drop the undescribed ones (jj).
+                self.auto_drop_empties(&land)?;
                 Ok(Applied::Done)
             }
             git::Rewrite::Conflict => {
@@ -683,10 +686,12 @@ impl Engine {
         match git::rebase_with_todo_stop(&base, &top, &todo)? {
             git::Rewrite::Clean => {
                 self.finish_rewrite(&land)?;
-                self.auto_drop_empties(&land)?;
+                // Record undo before the empty-cleanup, so a delete stays
+                // undoable even if the (rare) cleanup step fails.
                 self.undo.push(snap);
                 self.redo.clear();
                 self.touched = true;
+                self.auto_drop_empties(&land)?;
                 Ok(Applied::Done)
             }
             git::Rewrite::Conflict => {
@@ -884,10 +889,10 @@ impl Engine {
         git::checkout_quiet(&land)?;
         git::reset_hard_head()?;
         self.reload()?;
-        self.auto_drop_empties(&land)?;
         self.undo.push(snap);
         self.redo.clear();
         self.touched = true;
+        self.auto_drop_empties(&land)?;
         Ok(Applied::Done)
     }
 
@@ -947,10 +952,10 @@ impl Engine {
         match git::rebase_squash_stop(&base, &top, &todo, &final_message)? {
             git::Rewrite::Clean => {
                 self.finish_rewrite(&land)?;
-                self.auto_drop_empties(&land)?;
                 self.undo.push(snap);
                 self.redo.clear();
                 self.touched = true;
+                self.auto_drop_empties(&land)?;
                 Ok(Applied::Done)
             }
             git::Rewrite::Conflict => {

@@ -139,10 +139,20 @@ pub fn commits_between_with_ids(
     Ok(raw
         .lines()
         .filter_map(|l| {
-            let (sha, rest) = l.split_once('\t')?;
-            let (id, subject) = rest.split_once('\t')?;
-            let id = id.split_whitespace().next().map(str::to_string);
-            Some((sha.to_string(), id, subject.to_string()))
+            // `out()` trims the whole capture, so a trailing commit with an
+            // empty subject loses its tab(s); parse defensively (missing
+            // fields → empty) so such a commit is never silently dropped.
+            let mut it = l.splitn(3, '\t');
+            let sha = it.next()?.to_string();
+            if sha.is_empty() {
+                return None;
+            }
+            let id = it
+                .next()
+                .and_then(|s| s.split_whitespace().next())
+                .map(str::to_string);
+            let subject = it.next().unwrap_or("").to_string();
+            Some((sha, id, subject))
         })
         .collect())
 }

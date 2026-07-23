@@ -573,6 +573,27 @@ fn cross_boundary_squash_lands_in_the_older_branch_and_empties_the_newer() {
 }
 
 #[test]
+fn a_tip_commit_with_an_empty_subject_is_still_loaded() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f.txt", "real");
+    // A non-empty commit whose subject is empty, at the tip.
+    std::fs::write(dir.join("g.txt"), "g\n").unwrap();
+    git(dir, &["add", "g.txt"]);
+    git(dir, &["commit", "--allow-empty-message", "-q", "-m", ""]);
+
+    with_engine(dir, |e| {
+        assert_eq!(
+            e.line().commits.len(),
+            2,
+            "the empty-subject tip commit is not silently dropped"
+        );
+        assert_eq!(e.line().commits[1].subject, "");
+    });
+}
+
+#[test]
 fn split_divides_a_commit_keeping_the_older_id_and_stamping_the_peeled_piece() {
     let tmp = new_repo();
     let dir = tmp.path();

@@ -1,11 +1,11 @@
 //! The ratatui view for `git queue tui` (ADR-0001).
 //!
 //! This is the deliberately-thin, essentially-untested shell in front of the
-//! headless [`Engine`]: it owns terminal setup/teardown, the event loop, and
-//! the three-pane layout, but no domain logic — every mutation goes through an
-//! [`Operation`](crate::engine::Operation) on the engine. In this ticket the
-//! view is **read-only**: it renders the queue, the selected commit's message
-//! and its own diff, and lets the user navigate; it performs no mutations.
+//! headless [`Engine`]: it owns terminal setup/teardown, the event loop, the
+//! three-pane layout, and the modal states (message editor, split selector,
+//! conflict / dissolve / quit prompts), but no domain logic — every mutation
+//! goes through an [`Operation`](crate::engine::Operation) on the engine, which
+//! decides whether it completed or conflicted.
 //!
 //! Rendering decisions that are pure (diff-line classification, queue-row
 //! ordering) live in [`render`](crate::render) and [`engine`](crate::engine)
@@ -87,6 +87,9 @@ struct SplitState {
     selected: HashSet<usize>,
     /// Cursor position within `lines` (always on a selectable line).
     cursor: usize,
+    /// List scroll/selection state, kept so mouse clicks hit-test with the
+    /// same offset the last frame rendered.
+    list_state: ListState,
 }
 
 /// An in-progress message edit: a buffer plus what applying it will do.
@@ -245,12 +248,22 @@ impl App {
                 index: self.selected,
                 message: edit.buffer,
             }) {
-                Ok(_) => {
+                Ok(Applied::Done) => {
                     self.msg_edit = None;
                     self.msg_apply_discard = false;
                     self.after_change();
                 }
-                Err(e) => self.status = format!("{e:#}"),
+                // Reword can't conflict today, but stay honest if it ever does.
+                Ok(Applied::Conflict) => {
+                    self.msg_edit = None;
+                    self.msg_apply_discard = false;
+                    self.conflict_prompt = true;
+                }
+                // Drop the prompt so the error is visible; keep the buffer.
+                Err(e) => {
+                    self.msg_apply_discard = false;
+                    self.status = format!("{e:#}");
+                }
             },
             MsgTarget::Squash { index } => {
                 self.msg_edit = None;
@@ -258,18 +271,21 @@ impl App {
                 self.apply_squash(index, Some(edit.buffer));
             }
             MsgTarget::Split { index, selected } => {
-                self.msg_edit = None;
-                self.msg_apply_discard = false;
                 match self.engine.apply(Operation::Split {
                     index,
                     selected,
                     message: edit.buffer,
                 }) {
-                    Ok(_) => {
+                    Ok(Applied::Done) => {
+                        self.msg_edit = None;
                         self.selected = index; // the older piece keeps this slot
                         self.after_change();
                     }
-                    Err(e) => self.status = format!("{e:#}"),
+                    Ok(Applied::Conflict) => {
+                        self.msg_edit = None;
+                        self.conflict_prompt = true;
+                    }
+                    Err(e) => self.status = format!("{e:#}"), // keep the buffer to retry
                 }
             }
         }
@@ -288,6 +304,7 @@ impl App {
                     lines,
                     selected: HashSet::new(),
                     cursor,
+                    list_state: ListState::default(),
                 });
                 self.focus = Pane::Diff;
             }
@@ -343,9 +360,16 @@ impl App {
     }
 
     /// Recompute the message and diff for the currently selected commit, and
-    /// reset the message/diff scroll.
+    /// reset the message/diff scroll. Guards an empty line (which a rewrite
+    /// that auto-dropped every commit could produce) rather than panicking.
     fn refresh_selection(&mut self) -> Result<()> {
-        let sha = self.engine.line().commits[self.selected].sha.clone();
+        let commits = &self.engine.line().commits;
+        let Some(commit) = commits.get(self.selected).or_else(|| commits.last()) else {
+            self.message.clear();
+            self.diff.clear();
+            return Ok(());
+        };
+        let sha = commit.sha.clone();
         self.message = git::commit_message(&sha)?;
         self.diff = git::commit_diff(&sha)?;
         self.msg_scroll = 0;
@@ -805,10 +829,12 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
             let inner_top = app.diff_area.y + 1;
             if m.row >= inner_top {
-                let row = (m.row - inner_top) as usize;
-                if let Some(line) = st.lines.get(row) {
+                // Add the list's scroll offset so clicks hit-test correctly
+                // once the diff has scrolled.
+                let index = st.list_state.offset() + (m.row - inner_top) as usize;
+                if let Some(line) = st.lines.get(index) {
                     if let Some(ci) = line.change_index {
-                        st.cursor = row;
+                        st.cursor = index;
                         if !st.selected.insert(ci) {
                             st.selected.remove(&ci);
                         }
@@ -827,7 +853,6 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
     {
         return Ok(());
     }
-    let at = Rect::new(m.column, m.row, 1, 1);
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if intersects(app.queue_area, m.column, m.row) {
@@ -839,7 +864,6 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
             } else if intersects(app.diff_area, m.column, m.row) {
                 app.focus = Pane::Diff;
             }
-            let _ = at;
         }
         MouseEventKind::ScrollDown => scroll_pane_at(app, m.column, m.row, 3),
         MouseEventKind::ScrollUp => scroll_pane_at(app, m.column, m.row, -3),
@@ -920,9 +944,10 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     draw_queue(f, app, chunks[0]);
     draw_message(f, app, right[0]);
     // The diff pane flips to the interactive selector during a split.
-    match &app.split {
-        Some(st) => draw_split(f, st, right[1]),
-        None => draw_diff(f, app, right[1]),
+    if app.split.is_some() {
+        draw_split(f, app, right[1]);
+    } else {
+        draw_diff(f, app, right[1]);
     }
     draw_footer(f, app, outer[1]);
 
@@ -1104,7 +1129,8 @@ fn draw_diff(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
 /// Render the interactive split selector into the diff pane: each `+`/`-` line
 /// gets a ○/◉ marker for its piece, the cursor line is highlighted.
-fn draw_split(f: &mut ratatui::Frame, st: &SplitState, area: Rect) {
+fn draw_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let st = app.split.as_mut().expect("split active");
     let items: Vec<ListItem> = st
         .lines
         .iter()
@@ -1130,12 +1156,12 @@ fn draw_split(f: &mut ratatui::Frame, st: &SplitState, area: Rect) {
             ]))
         })
         .collect();
-    let mut state = ListState::default();
-    state.select(Some(st.cursor));
+    let cursor = st.cursor;
+    st.list_state.select(Some(cursor));
     let list = List::new(items)
         .block(pane_block("split — Space toggles, Enter confirms", true))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, &mut st.list_state);
 }
 
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
