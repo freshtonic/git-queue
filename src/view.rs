@@ -27,7 +27,9 @@ use ratatui::crossterm::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{
+    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
+};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io;
 
@@ -1016,8 +1018,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  J/K reorder  e message  s squash  S split  D delete  \
-             r rename  a add-branch  x dissolve  </> shift  u undo  C-r redo  \
+            "j/k select  J/K reorder  e message  s squash  S split  D delete  \
+             r rename  a new-branch  x dissolve  </> shift  u undo  C-r redo  \
              ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
@@ -1059,8 +1061,9 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     Some(id) => id.chars().take(10).collect::<String>(),
                     None => "(no id)".to_string(),
                 };
+                // The leading gutter comes from the highlight symbol/spacing.
                 let mut spans = vec![
-                    Span::styled(format!("  {id:<10} "), Style::default().fg(Color::Blue)),
+                    Span::styled(format!("{id:<10} "), Style::default().fg(Color::Blue)),
                     Span::raw(c.subject.clone()),
                 ];
                 if c.empty {
@@ -1077,9 +1080,13 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     app.list_state.select(Some(selected_row));
     let list = List::new(items)
         .block(pane_block("queue", app.focus == Pane::Queue))
+        // A clear marker + reversed style so the selected commit is unmistakable.
+        .highlight_symbol("❯ ")
+        .highlight_spacing(HighlightSpacing::Always)
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(40, 40, 60))
+                .fg(Color::Black)
+                .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         );
     f.render_stateful_widget(list, area, &mut app.list_state);
@@ -1166,19 +1173,19 @@ fn draw_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     let bindings = [
-        ("j / ↓", "next commit"),
-        ("k / ↑", "previous commit"),
-        ("g / G", "first / last commit"),
+        ("j / ↓", "select next commit"),
+        ("k / ↑", "select previous commit"),
+        ("g / G", "select first / last commit"),
         ("Tab", "cycle pane focus"),
         ("Ctrl-d / Ctrl-u", "scroll focused pane"),
         ("PgDn / PgUp", "scroll focused pane"),
-        ("J / K", "reorder the selected commit down / up"),
+        ("J / K", "move (reorder) the selected commit down / up"),
         ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
         ("s", "squash into the older neighbour"),
         ("S", "split the commit (line-level selector)"),
         ("D", "delete the selected commit"),
         ("r", "rename the selected commit's branch"),
-        ("a", "add a boundary after the selected commit"),
+        ("a", "start a new branch at the selected commit"),
         ("x", "dissolve the selected commit's branch"),
         ("< / >", "shift the branch boundary by a commit"),
         ("u", "undo"),
@@ -1453,15 +1460,15 @@ mod tests {
     fn add_boundary_via_prompt_splits_the_branch() {
         with_app(|app| {
             assert_eq!(boundary_names(app), vec!["feature"]);
-            // Select the front commit, add a boundary after it.
-            key(app, KeyCode::Char('g'));
+            // Start a new branch at the tip commit; `feature` keeps the front.
+            key(app, KeyCode::Char('G'));
             press(app, 'a');
             assert!(app.input.is_some(), "prompt opened");
             type_str(app, "api");
             key(app, KeyCode::Enter);
             assert!(app.input.is_none(), "prompt closed after apply");
             assert!(app.status.is_empty(), "no error: {}", app.status);
-            assert_eq!(boundary_names(app), vec!["api", "feature"]);
+            assert_eq!(boundary_names(app), vec!["feature", "api"]);
         });
     }
 
@@ -1469,7 +1476,7 @@ mod tests {
     fn quit_guard_prompts_once_operations_are_pending() {
         with_app(|app| {
             // Make a change so the undo stack is non-empty.
-            key(app, KeyCode::Char('g'));
+            key(app, KeyCode::Char('G'));
             press(app, 'a');
             type_str(app, "api");
             key(app, KeyCode::Enter);
@@ -1487,11 +1494,11 @@ mod tests {
     #[test]
     fn undo_after_a_boundary_op_restores_the_single_branch() {
         with_app(|app| {
-            key(app, KeyCode::Char('g'));
+            key(app, KeyCode::Char('G'));
             press(app, 'a');
             type_str(app, "api");
             key(app, KeyCode::Enter);
-            assert_eq!(boundary_names(app), vec!["api", "feature"]);
+            assert_eq!(boundary_names(app), vec!["feature", "api"]);
 
             press(app, 'u'); // undo
             assert_eq!(boundary_names(app), vec!["feature"]);
@@ -1502,9 +1509,9 @@ mod tests {
     #[test]
     fn a_failed_op_surfaces_in_the_status_line() {
         with_app(|app| {
-            // Adding a boundary after the last commit of the only branch is
-            // rejected (it would leave an empty branch).
-            key(app, KeyCode::Char('G'));
+            // Starting a new branch at the branch's *first* commit is rejected
+            // (it would leave the original branch empty).
+            key(app, KeyCode::Char('g'));
             press(app, 'a');
             type_str(app, "api");
             key(app, KeyCode::Enter);

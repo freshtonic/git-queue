@@ -321,8 +321,9 @@ pub enum Operation {
     Reword { index: usize, message: String },
     /// Delete the commit at `index`.
     Delete { index: usize },
-    /// Add a branch boundary after the commit at `index`, naming the new
-    /// (front-ward) branch `name`.
+    /// Start a new branch `name` at the commit at `index`: that commit becomes
+    /// the new branch's front, and the new branch takes the tip-ward remainder
+    /// of its current branch (matching `git queue edit`).
     AddBoundary { index: usize, name: String },
     /// Remove the boundary at `boundary`, dissolving that branch into its
     /// neighbour.
@@ -1026,28 +1027,39 @@ impl Engine {
         self.commit_op(segs, land)
     }
 
-    /// Add a boundary after commit `index`, creating a new front-ward branch
-    /// `name`; the branch that owned `index` keeps the tip-ward remainder.
+    /// Start a new branch `name` **at** commit `index`: the highlighted commit
+    /// becomes the front of the new branch, which takes the tip-ward remainder
+    /// of its current branch; the current branch keeps the commits before it.
+    /// This matches `git queue edit`, where a header sits above the commits it
+    /// owns — so the new branch's header lands on the highlighted commit.
     fn add_boundary(&mut self, index: usize, name: &str) -> Result<()> {
         let resolved = self.resolve_name(name);
         if git::branch_exists(&resolved) {
             bail!("branch `{resolved}` already exists; pick a different name");
         }
         let b = self.line.boundary_of(index);
-        let end = self.line.boundaries[b].end;
-        if index + 1 >= end {
+        let start = if b == 0 {
+            0
+        } else {
+            self.line.boundaries[b - 1].end
+        };
+        if index == start {
             bail!(
-                "cannot add a boundary after the last commit of `{}` — it would leave \
-                 an empty branch",
+                "`{}` already starts at that commit; highlight a later commit to \
+                 split off a new branch",
                 self.line.boundaries[b].name
             );
         }
         let mut segs = self.line.boundaries.clone();
+        let end = segs[b].end;
+        // The existing branch keeps [start..index); the new branch owns
+        // [index..end) with the highlighted commit as its front.
+        segs[b].end = index;
         segs.insert(
-            b,
+            b + 1,
             Boundary {
                 name: resolved,
-                end: index + 1,
+                end,
             },
         );
         let land = self.current.clone();

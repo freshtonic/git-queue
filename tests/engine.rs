@@ -191,20 +191,43 @@ fn add_boundary_splits_a_branch_ref_only() {
 
     with_engine(dir, |e| {
         let c0 = e.line().commits[0].sha.clone();
+        // Start a new branch AT commit index 1: the highlighted commit becomes
+        // the front of `api`, which takes the tip-ward remainder; `feat` keeps
+        // the front commit.
         e.apply(Operation::AddBoundary {
-            index: 0,
+            index: 1,
             name: "api".into(),
         })
         .unwrap();
-        assert_eq!(names(e), vec!["api", "feat"]);
-        assert_eq!(e.line().commits_of(0).len(), 1, "api owns the first commit");
-        assert_eq!(e.line().commits_of(1).len(), 2, "feat keeps the rest");
+        assert_eq!(names(e), vec!["feat", "api"]);
+        assert_eq!(e.line().commits_of(0).len(), 1, "feat keeps the front commit");
+        assert_eq!(e.line().commits_of(1).len(), 2, "api owns from the highlight up");
         assert_eq!(e.line().commits[0].sha, c0, "commit not rewritten");
     });
 
-    assert_eq!(sha(dir, "feat"), tip, "feat still at its original tip");
-    assert_eq!(git_out(dir, &["config", "branch.feat.queueParent"]), "api");
-    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
+    assert_eq!(sha(dir, "api"), tip, "api tips at the branch's original tip");
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "feat");
+    assert_eq!(git_out(dir, &["config", "branch.feat.queueParent"]), "main");
+}
+
+#[test]
+fn add_boundary_at_the_front_commit_is_rejected() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "feat"]).assert().success();
+    queue_commit(dir, "c0.txt", "zero");
+    queue_commit(dir, "c1.txt", "one");
+
+    with_engine(dir, |e| {
+        // Starting a new branch at the branch's first commit would empty it.
+        assert!(e
+            .apply(Operation::AddBoundary {
+                index: 0,
+                name: "api".into(),
+            })
+            .is_err());
+        assert_eq!(names(e), vec!["feat"], "nothing changed");
+    });
 }
 
 #[test]
