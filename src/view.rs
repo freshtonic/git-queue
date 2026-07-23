@@ -11,7 +11,7 @@
 //! ordering) live in [`render`](crate::render) and [`engine`](crate::engine)
 //! so they can be unit-tested; the code here is the ratatui wiring around them.
 
-use crate::engine::{Engine, Operation, Row};
+use crate::engine::{Applied, Engine, Operation, Row};
 use crate::git;
 use crate::render::{classify_diff_line, DiffLine};
 use anyhow::Result;
@@ -84,6 +84,11 @@ struct App {
     input: Option<Input>,
     /// Showing the "quit with pending operations?" guard.
     confirm_quit: bool,
+    /// Showing the "conflict — resolve or undo?" prompt.
+    conflict_prompt: bool,
+    /// Set when the user chose to resolve a conflict in the shell: quit without
+    /// the normal exit summary and print resolution instructions instead.
+    suspend: bool,
     /// Transient status/error line shown in the footer.
     status: String,
     /// Whether the user asked to quit.
@@ -107,6 +112,8 @@ impl App {
             diff_area: Rect::default(),
             input: None,
             confirm_quit: false,
+            conflict_prompt: false,
+            suspend: false,
             status: String::new(),
             quit: false,
         };
@@ -119,21 +126,39 @@ impl App {
         self.engine.line().boundary_of(self.selected)
     }
 
-    /// Apply an operation, folding any error into the status line and keeping
-    /// the selection valid.
+    /// Apply an operation, folding any error into the status line, raising the
+    /// conflict prompt on a conflict, and keeping the selection valid.
     fn apply_op(&mut self, op: Operation) {
         match self.engine.apply(op) {
-            Ok(()) => {
-                self.status.clear();
-                let last = self.commit_count().saturating_sub(1);
-                if self.selected > last {
-                    self.selected = last;
-                }
-                if let Err(e) = self.refresh_selection() {
-                    self.status = format!("{e:#}");
-                }
-            }
+            Ok(Applied::Done) => self.after_change(),
+            Ok(Applied::Conflict) => self.conflict_prompt = true,
             Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// Reorder the selected commit to `to`, following it with the selection.
+    fn reorder_to(&mut self, to: usize) {
+        let from = self.selected;
+        match self.engine.apply(Operation::Reorder { from, to }) {
+            Ok(Applied::Done) => {
+                self.selected = to;
+                self.after_change();
+            }
+            Ok(Applied::Conflict) => self.conflict_prompt = true,
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// Post-change housekeeping: clear the status, clamp the selection, and
+    /// refresh the message/diff for the (possibly rewritten) selected commit.
+    fn after_change(&mut self) {
+        self.status.clear();
+        let last = self.commit_count().saturating_sub(1);
+        if self.selected > last {
+            self.selected = last;
+        }
+        if let Err(e) = self.refresh_selection() {
+            self.status = format!("{e:#}");
         }
     }
 
@@ -180,12 +205,29 @@ pub fn run(engine: Engine) -> Result<()> {
     let mut app = App::new(engine)?;
     let mut term = TerminalGuard::new()?;
     let res = event_loop(&mut app, &mut term.terminal);
-    // The guard's Drop restores the terminal; print the exit summary only once
-    // the alternate screen is gone.
+    // The guard's Drop restores the terminal; print only once the alternate
+    // screen is gone.
     drop(term);
     res?;
-    print_exit_summary(&app.engine);
+    if app.suspend {
+        print_suspend_instructions();
+    } else {
+        print_exit_summary(&app.engine);
+    }
     Ok(())
+}
+
+/// Printed when the user chose to resolve a conflict in the shell: the repo is
+/// left in the standard mid-rebase state, and re-running `git queue tui`
+/// resumes once the rebase is finished.
+fn print_suspend_instructions() {
+    println!("The operation produced conflicts; a rebase is in progress.");
+    println!("Resolve it with your normal git workflow, then re-open the editor:");
+    println!("  git status                 # see the conflicted files");
+    println!("  # edit the files to resolve, then:");
+    println!("  git add <files>");
+    println!("  git rebase --continue      # repeat until the rebase finishes");
+    println!("  git queue tui              # resume editing the queue");
 }
 
 /// After a session that changed anything, print the new branch layout, the
@@ -283,6 +325,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         app.show_help = false; // any key dismisses help
         return Ok(());
     }
+    if app.conflict_prompt {
+        return handle_conflict_key(app, key);
+    }
     if app.input.is_some() {
         return handle_input_key(app, key);
     }
@@ -346,6 +391,18 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
             delta: -1,
         }),
 
+        // ---- reorder (history-rewriting) ----
+        KeyCode::Char('J') => {
+            if app.selected + 1 < app.commit_count() {
+                app.reorder_to(app.selected + 1);
+            }
+        }
+        KeyCode::Char('K') => {
+            if app.selected > 0 {
+                app.reorder_to(app.selected - 1);
+            }
+        }
+
         // ---- undo ----
         KeyCode::Char('u') => app.apply_op(Operation::Undo),
         _ => {}
@@ -393,9 +450,32 @@ fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     Ok(())
 }
 
+/// The resolve-or-undo choice after a conflicting operation.
+fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    match key.code {
+        // Resolve: suspend to the shell in the mid-rebase state.
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            app.conflict_prompt = false;
+            app.suspend = true;
+            app.quit = true;
+        }
+        // Undo: back the operation out cleanly.
+        KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Esc => {
+            app.conflict_prompt = false;
+            match app.engine.undo_conflict() {
+                Ok(()) => app.after_change(),
+                Err(e) => app.status = format!("{e:#}"),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
-    // While a modal (help / prompt / quit-guard) is up, ignore the mouse.
-    if app.show_help || app.input.is_some() || app.confirm_quit {
+    // While a modal (help / prompt / quit-guard / conflict) is up, ignore the
+    // mouse.
+    if app.show_help || app.input.is_some() || app.confirm_quit || app.conflict_prompt {
         return Ok(());
     }
     let at = Rect::new(m.column, m.row, 1, 1);
@@ -501,7 +581,14 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 /// The footer line: an active prompt, the quit-guard, a status/error message,
 /// or the default key hint — in that priority.
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let (text, style) = if let Some(input) = &app.input {
+    let (text, style) = if app.conflict_prompt {
+        (
+            "conflict — [R]esolve in the shell, or [U]ndo the operation?".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(input) = &app.input {
         (
             format!("{}: {}\u{2588}", input.prompt.label(), input.buffer),
             Style::default().fg(Color::Cyan),
@@ -517,8 +604,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  r rename  a add-branch  x dissolve  </> shift  u undo  \
-             C-r redo  ? help  q quit"
+            "j/k move  J/K reorder  r rename  a add-branch  x dissolve  </> shift  \
+             u undo  C-r redo  ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -615,6 +702,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("Tab", "cycle pane focus"),
         ("Ctrl-d / Ctrl-u", "scroll focused pane"),
         ("PgDn / PgUp", "scroll focused pane"),
+        ("J / K", "reorder the selected commit down / up"),
         ("r", "rename the selected commit's branch"),
         ("a", "add a boundary after the selected commit"),
         ("x", "dissolve the selected commit's branch"),
@@ -720,11 +808,39 @@ mod tests {
         tmp
     }
 
+    /// A repo whose untracked `feature` branch has three commits, the last two
+    /// of which edit the same line — so reordering across them conflicts.
+    fn repo_with_conflict() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "t@example.com"]);
+        git(dir, &["config", "user.name", "T"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        git(dir, &["add", "seed.txt"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+        git(dir, &["checkout", "-q", "-b", "feature"]);
+        for (content, msg) in [
+            ("L1\nL2\nL3\n", "base lines"),
+            ("L1\nA\nL3\n", "edit to A"),
+            ("L1\nB\nL3\n", "edit to B"),
+        ] {
+            std::fs::write(dir.join("f.txt"), content).unwrap();
+            git(dir, &["add", "f.txt"]);
+            git(dir, &["commit", "-q", "-m", msg]);
+        }
+        tmp
+    }
+
     /// Build an app over a fresh feature-branch repo and run `f` with the cwd
     /// lock held for the whole call — `App`'s git reads and every op mutate the
     /// process cwd, so the lock must span them all.
     fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
-        let tmp = repo_with_feature_branch();
+        with_app_over(repo_with_feature_branch(), f)
+    }
+
+    fn with_app_over<T>(tmp: tempfile::TempDir, f: impl FnOnce(&mut App) -> T) -> T {
         let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut app = App::new(Engine::load().expect("engine loads")).expect("app builds");
@@ -873,5 +989,68 @@ mod tests {
             assert!(!app.status.is_empty(), "error shown in status line");
             assert_eq!(boundary_names(app), vec!["feature"], "nothing changed");
         });
+    }
+
+    #[test]
+    fn shift_j_reorders_and_the_selection_follows() {
+        // feature.txt and more.txt touch different files, so this is clean.
+        with_app(|app| {
+            let subjects_before: Vec<String> = app
+                .engine
+                .line()
+                .commits
+                .iter()
+                .map(|c| c.subject.clone())
+                .collect();
+            key(app, KeyCode::Char('g')); // select the front commit
+            press(app, 'J'); // move it down one
+            assert_eq!(app.selected, 1, "selection follows the moved commit");
+            let subjects_after: Vec<String> = app
+                .engine
+                .line()
+                .commits
+                .iter()
+                .map(|c| c.subject.clone())
+                .collect();
+            assert_ne!(subjects_before, subjects_after, "the order changed");
+            assert_eq!(subjects_before[0], subjects_after[1], "front commit moved down");
+        });
+    }
+
+    #[test]
+    fn a_conflicting_reorder_raises_the_prompt_and_undo_backs_out() {
+        with_app_over(repo_with_conflict(), |app| {
+            // Move "edit to B" (last) up onto "edit to A" — a line-2 conflict.
+            key(app, KeyCode::Char('G'));
+            press(app, 'K');
+            assert!(app.conflict_prompt, "the conflict prompt is raised");
+            assert!(app.engine.conflicted());
+
+            // Undo backs it out cleanly.
+            press(app, 'u');
+            assert!(!app.conflict_prompt);
+            assert!(!app.engine.conflicted());
+            assert!(app.status.is_empty(), "clean undo: {}", app.status);
+        });
+    }
+
+    #[test]
+    fn resolving_a_conflict_sets_suspend_and_quits() {
+        with_app_over(repo_with_conflict(), |app| {
+            key(app, KeyCode::Char('G'));
+            press(app, 'K');
+            assert!(app.conflict_prompt);
+
+            press(app, 'r'); // resolve in the shell
+            assert!(app.suspend, "suspends to the shell");
+            assert!(app.quit);
+            // Leave the mid-rebase state for the test's own cleanup.
+            let _ = git_queue_git_abort();
+        });
+    }
+
+    /// Abort any rebase left in progress by a test (best-effort cleanup).
+    fn git_queue_git_abort() -> std::io::Result<std::process::ExitStatus> {
+        Command::new("git").args(["rebase", "--abort"]).status()
     }
 }

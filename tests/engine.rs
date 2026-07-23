@@ -11,7 +11,7 @@
 //! serialises those loads across the parallel test runner).
 
 use assert_cmd::Command;
-use git_queue::engine::{Boundary, Engine, Operation};
+use git_queue::engine::{Applied, Boundary, Engine, Operation};
 use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::Mutex;
@@ -89,6 +89,29 @@ fn queue_commit(dir: &Path, file: &str, msg: &str) {
     std::fs::write(dir.join(file), file).unwrap();
     git(dir, &["add", file]);
     queue(dir).args(["commit", "-m", msg]).assert().success();
+}
+
+/// Write `content` to `file` and record it as a queue commit with `msg`.
+fn write_commit(dir: &Path, file: &str, content: &str, msg: &str) {
+    std::fs::write(dir.join(file), content).unwrap();
+    git(dir, &["add", file]);
+    queue(dir).args(["commit", "-m", msg]).assert().success();
+}
+
+fn rebase_active(dir: &Path) -> bool {
+    dir.join(".git/rebase-merge").exists() || dir.join(".git/rebase-apply").exists()
+}
+
+/// Finish an in-progress rebase after staging the resolution (no editor).
+fn rebase_continue(dir: &Path) {
+    let ok = StdCommand::new("git")
+        .args(["rebase", "--continue"])
+        .current_dir(dir)
+        .env("GIT_EDITOR", "true")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git rebase --continue failed");
 }
 
 /// Load the engine with the process cwd pointed at `dir`, serialised so
@@ -254,6 +277,138 @@ fn undo_and_redo_restore_exact_refs_and_metadata() {
         e.apply(Operation::Redo).unwrap();
         assert_eq!(names(e), vec!["api", "b"], "redo reapplies");
         assert!(branch_exists(dir, "api"));
+    });
+}
+
+#[test]
+fn reorder_within_a_branch_is_clean_and_preserves_ids() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    // Distinct files, so the reorder never conflicts.
+    queue_commit(dir, "f0.txt", "zero");
+    queue_commit(dir, "f1.txt", "one");
+    queue_commit(dir, "f2.txt", "two");
+
+    with_engine(dir, |e| {
+        let before: Vec<(String, Option<String>)> = e
+            .line()
+            .commits
+            .iter()
+            .map(|c| (c.subject.clone(), c.id.clone()))
+            .collect();
+        // Move the last commit ("two") to the front.
+        assert_eq!(
+            e.apply(Operation::Reorder { from: 2, to: 0 }).unwrap(),
+            Applied::Done
+        );
+        let after: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(after, vec!["two", "zero", "one"]);
+        // Each id travels with its message across the rebase.
+        let after_ids: std::collections::HashMap<String, Option<String>> = e
+            .line()
+            .commits
+            .iter()
+            .map(|c| (c.subject.clone(), c.id.clone()))
+            .collect();
+        for (subj, id) in &before {
+            assert!(id.is_some(), "commit {subj} was stamped");
+            assert_eq!(after_ids.get(subj).unwrap(), id, "id preserved for {subj}");
+        }
+    });
+}
+
+#[test]
+fn reorder_across_a_boundary_reassigns_the_commit() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f0.txt", "zero");
+    queue_commit(dir, "f1.txt", "one");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "f2.txt", "two");
+
+    with_engine(dir, |e| {
+        assert_eq!(names(e), vec!["a", "b"]);
+        // a owns [zero, one], b owns [two]. Move "one" past the boundary.
+        assert_eq!(
+            e.apply(Operation::Reorder { from: 1, to: 2 }).unwrap(),
+            Applied::Done
+        );
+        assert_eq!(e.line().commits_of(0).len(), 1, "a shrinks to one commit");
+        assert_eq!(e.line().commits_of(1).len(), 2, "b gains the moved commit");
+        let b_subjects: Vec<String> = e
+            .line()
+            .commits_of(1)
+            .iter()
+            .map(|c| c.subject.clone())
+            .collect();
+        assert!(
+            b_subjects.contains(&"one".to_string()),
+            "the moved commit joined b: {b_subjects:?}"
+        );
+    });
+}
+
+/// A branch whose middle commit, when reordered, textually conflicts with the
+/// one it crosses. c0 lays down three lines; c1 and c2 both edit line 2.
+fn conflicting_reorder_repo() -> TempDir {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    write_commit(dir, "f.txt", "L1\nL2\nL3\n", "base three lines");
+    write_commit(dir, "f.txt", "L1\nA\nL3\n", "edit to A");
+    write_commit(dir, "f.txt", "L1\nB\nL3\n", "edit to B");
+    tmp
+}
+
+#[test]
+fn a_conflicting_reorder_can_be_undone_cleanly() {
+    let tmp = conflicting_reorder_repo();
+    let dir = tmp.path();
+    let a_before = sha(dir, "a");
+
+    with_engine(dir, |e| {
+        // Moving "edit to B" before "edit to A" conflicts on line 2.
+        assert_eq!(
+            e.apply(Operation::Reorder { from: 2, to: 1 }).unwrap(),
+            Applied::Conflict
+        );
+        assert!(e.conflicted());
+        assert!(rebase_active(dir), "left in the mid-rebase state");
+
+        e.undo_conflict().unwrap();
+        assert!(!e.conflicted());
+        assert!(!rebase_active(dir), "undo aborted the rebase");
+    });
+
+    assert_eq!(sha(dir, "a"), a_before, "repo restored exactly after undo");
+}
+
+#[test]
+fn a_conflicting_reorder_leaves_a_resolvable_mid_rebase_state() {
+    let tmp = conflicting_reorder_repo();
+    let dir = tmp.path();
+
+    with_engine(dir, |e| {
+        assert_eq!(
+            e.apply(Operation::Reorder { from: 2, to: 1 }).unwrap(),
+            Applied::Conflict
+        );
+    });
+
+    // The user resolves in the shell (the "resolve" escape hatch) and finishes
+    // the rebase with their normal git workflow.
+    assert!(rebase_active(dir));
+    std::fs::write(dir.join("f.txt"), "L1\nA\nL3\n").unwrap();
+    git(dir, &["add", "f.txt"]);
+    rebase_continue(dir);
+    assert!(!rebase_active(dir), "the rebase finished");
+
+    // Re-entering loads the reordered line cleanly.
+    with_engine(dir, |e| {
+        let subjects: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["base three lines", "edit to B", "edit to A"]);
     });
 }
 

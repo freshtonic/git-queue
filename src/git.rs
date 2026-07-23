@@ -435,6 +435,76 @@ pub fn rebase_reorder_persist(
     drive_rebase_to_completion(top_branch)
 }
 
+/// The outcome of a TUI history-rewriting rebase.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Rewrite {
+    /// The rebase finished; the line was rewritten.
+    Clean,
+    /// The rebase stopped at a conflict, leaving the standard mid-rebase state
+    /// in place for the user to resolve (or for the caller to `--abort`).
+    Conflict,
+}
+
+/// Rewrite the whole line `base..top_branch` with an interactive rebase driven
+/// by a **caller-supplied todo** (`pick`/`update-ref` lines). The todo is
+/// installed via a `cp`-based `GIT_SEQUENCE_EDITOR`, so this needs no external
+/// helper binary and works when called in-process (unlike the CLI's
+/// `reorder-todo` path, which re-invokes git-queue). Unlike
+/// [`rebase_reorder_persist`] it **stops** at the first conflict (ADR-0002: the
+/// TUI leaves the standard mid-rebase state rather than persisting markers).
+pub fn rebase_with_todo_stop(base: &str, top_branch: &str, todo: &str) -> Result<Rewrite> {
+    let git_dir = out(&["rev-parse", "--git-dir"])?;
+    let todo_path = std::path::Path::new(&git_dir).join("git-queue-todo");
+    std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
+
+    // git invokes `$GIT_SEQUENCE_EDITOR <todofile>`, so `cp <our-todo>` becomes
+    // `cp <our-todo> <todofile>` — overwriting git's generated todo with ours.
+    let editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "rebase",
+        "-i",
+        "--update-refs",
+        "--empty=keep",
+        "--onto",
+        base,
+        base,
+        top_branch,
+    ]);
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env("GIT_EDITOR", "true")
+        .env(GUARD_ENV, "1")
+        .env("GIT_SEQUENCE_EDITOR", editor);
+    let status = cmd.status().context("failed to spawn `git rebase`")?;
+    let _ = std::fs::remove_file(&todo_path);
+    if status.success() {
+        Ok(Rewrite::Clean)
+    } else if rebase_in_progress() {
+        Ok(Rewrite::Conflict)
+    } else {
+        bail!("the rebase could not start (no rebase in progress)");
+    }
+}
+
+/// Single-quote a string for a POSIX shell (git runs the sequence editor via
+/// the shell). Embedded single quotes are escaped as `'\''`.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// Abort an in-progress rebase, returning refs to their pre-rebase state.
+pub fn rebase_abort() -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.args(["rebase", "--abort"]);
+    quiet_git(&mut cmd);
+    let status = cmd.status().context("failed to spawn `git rebase --abort`")?;
+    if !status.success() {
+        bail!("`git rebase --abort` failed");
+    }
+    Ok(())
+}
+
 /// Apply `shas` (front-first) on top of `branch` with conflict markers
 /// persisted, leaving HEAD on `branch`. The cherry-pick analogue of
 /// [`rebase_persist`].

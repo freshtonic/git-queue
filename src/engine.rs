@@ -175,6 +175,22 @@ pub struct Engine {
     /// summary — a pure read-only session leaves the repo, and the output,
     /// untouched).
     touched: bool,
+    /// When a rewriting operation conflicts, the pre-operation snapshot is
+    /// parked here (and a rebase is left in progress) until the caller either
+    /// undoes the conflict or suspends to the shell to resolve it.
+    pending_conflict: Option<Snapshot>,
+}
+
+/// The outcome of applying an operation.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Applied {
+    /// The operation completed and the model is up to date.
+    Done,
+    /// The operation conflicted: the repo is in a mid-rebase state. The caller
+    /// must resolve it — [`Engine::undo_conflict`] to back out cleanly, or
+    /// suspend to the shell (the user finishes the rebase, then re-runs
+    /// `git queue tui`).
+    Conflict,
 }
 
 /// A branch's full restorable state: its ref and the queue metadata that moves
@@ -210,6 +226,12 @@ impl Engine {
     /// in-process without a terminal.
     pub fn load() -> Result<Engine> {
         git::ensure_repo()?;
+        if git::rebase_in_progress() {
+            bail!(
+                "a rebase is in progress — finish resolving it (`git status`, then \
+                 `git rebase --continue` or `--abort`), then re-run `git queue tui`"
+            );
+        }
         if !git::worktree_clean() {
             bail!(
                 "working tree has uncommitted changes; commit or stash them before \
@@ -239,6 +261,7 @@ impl Engine {
             undo: Vec::new(),
             redo: Vec::new(),
             touched: false,
+            pending_conflict: None,
         })
     }
 
@@ -338,18 +361,113 @@ impl Engine {
             .collect()
     }
 
-    /// Apply an operation. Boundary edits and undo/redo are handled here;
-    /// history-rewriting variants land in later tickets.
-    pub fn apply(&mut self, op: Operation) -> Result<()> {
+    /// Apply an operation. Boundary edits, undo/redo, and reorder are handled
+    /// here; the remaining history-rewriting variants land in later tickets.
+    ///
+    /// Most operations return [`Applied::Done`]; a rewriting operation that
+    /// conflicts returns [`Applied::Conflict`] with a rebase in progress (see
+    /// [`Engine::undo_conflict`] / [`Engine::conflicted`]).
+    pub fn apply(&mut self, op: Operation) -> Result<Applied> {
+        if self.pending_conflict.is_some() {
+            bail!("a conflict is pending; resolve it in your shell or undo it first");
+        }
         match op {
-            Operation::RenameBranch { boundary, name } => self.rename_branch(boundary, &name),
-            Operation::AddBoundary { index, name } => self.add_boundary(index, &name),
-            Operation::RemoveBoundary { boundary } => self.remove_boundary(boundary),
-            Operation::MoveBoundary { boundary, delta } => self.move_boundary(boundary, delta),
-            Operation::Undo => self.undo(),
-            Operation::Redo => self.redo(),
+            Operation::RenameBranch { boundary, name } => {
+                self.rename_branch(boundary, &name)?;
+                Ok(Applied::Done)
+            }
+            Operation::AddBoundary { index, name } => {
+                self.add_boundary(index, &name)?;
+                Ok(Applied::Done)
+            }
+            Operation::RemoveBoundary { boundary } => {
+                self.remove_boundary(boundary)?;
+                Ok(Applied::Done)
+            }
+            Operation::MoveBoundary { boundary, delta } => {
+                self.move_boundary(boundary, delta)?;
+                Ok(Applied::Done)
+            }
+            Operation::Reorder { from, to } => self.reorder(from, to),
+            Operation::Undo => {
+                self.undo()?;
+                Ok(Applied::Done)
+            }
+            Operation::Redo => {
+                self.redo()?;
+                Ok(Applied::Done)
+            }
             other => bail!("operation not yet supported: {other:?}"),
         }
+    }
+
+    /// Whether a conflicted operation is awaiting resolution.
+    pub fn conflicted(&self) -> bool {
+        self.pending_conflict.is_some()
+    }
+
+    /// Back out a conflicted operation: abort the rebase and restore the
+    /// pre-operation snapshot exactly.
+    pub fn undo_conflict(&mut self) -> Result<()> {
+        let Some(snap) = self.pending_conflict.take() else {
+            bail!("no conflict to undo");
+        };
+        if git::rebase_in_progress() {
+            git::rebase_abort()?;
+        }
+        self.restore(&snap)?;
+        Ok(())
+    }
+
+    // ---- reorder (history-rewriting) ----
+
+    /// Move the commit at `from` to sit at index `to` within the line,
+    /// rebasing immediately. The commit keeps its Stable-Commit-Id; crossing a
+    /// boundary reassigns it to the branch whose run it lands in (via
+    /// `--update-refs`, exactly like `git queue move`).
+    fn reorder(&mut self, from: usize, to: usize) -> Result<Applied> {
+        let n = self.line.commits.len();
+        if from >= n || to >= n {
+            bail!("reorder index out of range");
+        }
+        if from == to {
+            return Ok(Applied::Done);
+        }
+
+        let todo = reorder_todo(&self.line, from, to);
+        let snap = self.snapshot()?;
+        let base = self.line.base.clone();
+        let top = self.line.boundaries.last().unwrap().name.clone();
+        let land = self.current.clone();
+        match git::rebase_with_todo_stop(&base, &top, &todo)? {
+            git::Rewrite::Clean => {
+                self.finish_rewrite(&land)?;
+                self.undo.push(snap);
+                self.redo.clear();
+                self.touched = true;
+                Ok(Applied::Done)
+            }
+            git::Rewrite::Conflict => {
+                self.pending_conflict = Some(snap);
+                self.touched = true;
+                Ok(Applied::Conflict)
+            }
+        }
+    }
+
+    /// After a clean rewriting rebase: refresh each branch's rebase anchor to
+    /// its parent's new tip, land HEAD on `land`, snap the worktree, reload.
+    fn finish_rewrite(&mut self, land: &str) -> Result<()> {
+        let names: Vec<String> = self.line.boundaries.iter().map(|b| b.name.clone()).collect();
+        let mut parent = self.line.base.clone();
+        for b in &names {
+            meta::set_parent_sha(b, &git::rev_parse(&parent)?)?;
+            parent = b.clone();
+        }
+        git::checkout_quiet(land)?;
+        git::reset_hard_head()?;
+        self.reload()?;
+        Ok(())
     }
 
     // ---- boundary operations (ref-only; no commit is rewritten) ----
@@ -601,6 +719,58 @@ impl Engine {
     }
 }
 
+/// Build the interactive-rebase todo for `reorder(from, to)` over `line`.
+///
+/// Emits the picks in the current front → tip order with an `update-ref` line
+/// after each **non-leaf** branch's tip (the leaf branch updates implicitly),
+/// then relocates only the moved commit's `pick` line to directly follow the
+/// commit that precedes its target position (or to the front). Moving just the
+/// pick — and leaving every `update-ref` line where it sits — is what makes a
+/// commit that crosses a boundary join the branch it lands in and shrink the
+/// branch it left (mirrors the CLI's `reorder-todo`). Pure, so it is
+/// unit-tested without a repo.
+fn reorder_todo(line: &EditableLine, from: usize, to: usize) -> String {
+    let commits = &line.commits;
+    let pick = |i: usize| format!("pick {} {}", commits[i].sha, commits[i].subject);
+
+    // `update-ref` after each non-leaf branch's tip commit.
+    let last = line.boundaries.len() - 1;
+    let mut ref_after: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (bi, b) in line.boundaries.iter().enumerate() {
+        if bi != last {
+            ref_after.insert(b.end - 1, b.name.as_str());
+        }
+    }
+
+    // The full todo in current order.
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..commits.len() {
+        lines.push(pick(i));
+        if let Some(name) = ref_after.get(&i) {
+            lines.push(format!("update-ref refs/heads/{name}"));
+        }
+    }
+
+    // Relocate the moved pick to follow the target's preceding commit.
+    let moved_line = pick(from);
+    lines.retain(|l| l != &moved_line);
+    let mut order: Vec<usize> = (0..commits.len()).collect();
+    let m = order.remove(from);
+    order.insert(to, m);
+    let idx = if to == 0 {
+        0
+    } else {
+        let anchor = pick(order[to - 1]);
+        lines
+            .iter()
+            .position(|l| *l == anchor)
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    };
+    lines.insert(idx, moved_line);
+    lines.join("\n") + "\n"
+}
+
 /// The queue name a set of line branches belongs to: an explicit `queueName`
 /// membership wins, else a `queue/<name>/…` prefix. `None` for a plain,
 /// unnamed (e.g. provisional untracked) line.
@@ -671,5 +841,27 @@ mod tests {
         assert_eq!(line.boundary_of(0), 0);
         assert_eq!(line.boundary_of(1), 0);
         assert_eq!(line.boundary_of(2), 1);
+    }
+
+    #[test]
+    fn reorder_todo_moves_a_pick_across_a_boundary_update_ref() {
+        // a owns c0,c1 (update-ref after c1); b (leaf) owns c2.
+        // Moving c1 (index 1) to index 2 relocates only its pick, leaving
+        // `update-ref a` after c0 — so a shrinks to [c0] and c1 joins b.
+        let todo = reorder_todo(&sample(), 1, 2);
+        assert_eq!(
+            todo,
+            "pick c0 c0\nupdate-ref refs/heads/a\npick c2 c2\npick c1 c1\n"
+        );
+    }
+
+    #[test]
+    fn reorder_todo_to_the_front_puts_the_pick_first() {
+        // Move the leaf's commit (index 2) to the front.
+        let todo = reorder_todo(&sample(), 2, 0);
+        assert_eq!(
+            todo,
+            "pick c2 c2\npick c0 c0\npick c1 c1\nupdate-ref refs/heads/a\n"
+        );
     }
 }
