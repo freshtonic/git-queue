@@ -495,6 +495,32 @@ fn edit_divides_a_branch_into_a_queue() {
 }
 
 #[test]
+fn tui_without_a_tty_errors_and_points_to_edit() {
+    // The test harness pipes stdout, so `tui` must hit its non-TTY guard —
+    // a recognised subcommand (not a clap parse error) that exits non-zero
+    // and directs the user to `git queue edit`.
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    commit(dir, "c1.txt");
+
+    let out = queue(dir).arg("tui").output().unwrap();
+    assert!(
+        !out.status.success(),
+        "tui without a TTY should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("interactive terminal"),
+        "expected a non-TTY message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("git queue edit"),
+        "expected a pointer to `git queue edit`, got: {stderr}"
+    );
+}
+
+#[test]
 fn describe_stores_and_clears_description() {
     let tmp = new_repo();
     let dir = tmp.path();

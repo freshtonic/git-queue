@@ -1,6 +1,7 @@
 //! `git queue` — manage queues of dependent branches and their numbered PRs.
 
 mod commands;
+pub mod engine;
 mod gh;
 mod git;
 mod ident;
@@ -88,6 +89,11 @@ enum Command {
         #[arg(long)]
         queue: Option<String>,
     },
+    /// Interactively shape the current queue line in a terminal UI.
+    #[command(
+        long_about = "Opens the current queue line in an interactive, keyboard-driven terminal editor: reorder, squash, split, reword and delete commits, and edit branch boundaries, with per-operation undo/redo. Unlike `edit` — which is ref-only, scriptable, and never rewrites a commit — `tui` rewrites history immediately, so the panes always show true, materialised state. It requires an interactive terminal (errors and points you to `edit` otherwise), a clean worktree, and a non-empty queue, and refuses a forked line (rewriting shared history is out of scope)."
+    )]
+    Tui,
     /// Describe the current QUEUE (the "About this queue" section of its PRs).
     #[command(
         long_about = "Sets the QUEUE's description — the \"About this queue\" section rendered into every PR of the queue on the next submit/sync. Use it for the narrative that spans the whole queue: what the series achieves and how the pieces fit. Opens `$EDITOR` without `-m`; an empty message clears it."
@@ -395,6 +401,7 @@ pub fn run() {
         Command::Log => commands::log(),
         Command::Checkout { commit } => commands::checkout(&commit),
         Command::Edit { queue } => commands::edit(queue.as_deref()),
+        Command::Tui => commands::tui(),
         Command::Describe { message } => commands::describe(message),
         Command::DescribeBranch { message } => commands::describe_branch(message),
         Command::Track {

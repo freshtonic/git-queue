@@ -1,5 +1,6 @@
 //! Implementations of each `git queue` subcommand.
 
+use crate::engine::Engine;
 use crate::queue::{Line, Queue};
 use crate::render::{self, Entry, PrRef};
 use crate::{gh, git, ident, meta, requeue};
@@ -444,6 +445,38 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
         p = name.clone();
     }
     println!("Now on `{land}`. Run `git queue sync` to update the PRs.");
+    Ok(())
+}
+
+/// `git queue tui` — open the current queue line in the interactive editor.
+///
+/// The interactive view is not built yet (this is the engine-scaffold ticket):
+/// the command wires up the subcommand, enforces the non-TTY guard here, and
+/// loads the headless engine — which applies the clean-worktree, empty-queue
+/// and forked-line guards. Once loaded it prints a short summary of the line
+/// so the plumbing is observably wired end to end.
+pub fn tui() -> Result<()> {
+    git::ensure_repo()?;
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        bail!(
+            "`git queue tui` needs an interactive terminal; use `git queue edit` \
+             for a non-interactive, scriptable queue editor"
+        );
+    }
+
+    let engine = Engine::load()?;
+    let line = engine.line();
+
+    println!(
+        "Loaded queue line over `{}`: {} commit(s) across {} branch(es).",
+        line.base,
+        line.commits.len(),
+        line.boundaries.len()
+    );
+    for (i, b) in line.boundaries.iter().enumerate() {
+        println!("  [{}] — {} commit(s)", b.name, line.commits_of(i).len());
+    }
+    println!("(The interactive editor is not built yet.)");
     Ok(())
 }
 
