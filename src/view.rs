@@ -28,7 +28,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph,
+    Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io;
@@ -119,6 +119,7 @@ struct App {
     msg_scroll: u16,
     diff_scroll: u16,
     show_help: bool,
+    help_scroll: u16,
     /// The selected commit's cached message and diff (recomputed on move).
     message: String,
     diff: String,
@@ -177,6 +178,7 @@ impl App {
             msg_scroll: 0,
             diff_scroll: 0,
             show_help: false,
+            help_scroll: 0,
             message: String::new(),
             diff: String::new(),
             list_state: ListState::default(),
@@ -668,7 +670,17 @@ fn event_loop(app: &mut App, terminal: &mut Terminal<Backend>) -> Result<()> {
 fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     // Modal states consume input first, in priority order.
     if app.show_help {
-        app.show_help = false; // any key dismisses help
+        // Scroll the help; any other key dismisses it.
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
+            KeyCode::Char('k') | KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
+            KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
+            KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
+            _ => {
+                app.show_help = false;
+                app.help_scroll = 0;
+            }
+        }
         return Ok(());
     }
     if app.split.is_some() {
@@ -1178,7 +1190,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     draw_footer(f, app, outer[2]);
 
     if app.show_help {
-        draw_help(f, body);
+        draw_help(f, body, app.help_scroll);
     }
 }
 
@@ -1453,57 +1465,165 @@ fn draw_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut st.list_state);
 }
 
-fn draw_help(f: &mut ratatui::Frame, area: Rect) {
-    let bindings = [
-        ("j / ↓", "select next commit"),
-        ("k / ↑", "select previous commit"),
-        ("g / G", "select first / last commit"),
-        ("Tab", "cycle pane focus"),
-        ("Ctrl-d / Ctrl-u", "scroll focused pane"),
-        ("PgDn / PgUp", "scroll focused pane"),
-        ("J / K", "move (reorder) the selected commit down / up"),
-        ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
-        ("s", "squash into the older neighbour"),
-        ("S", "split the commit (line-level selector)"),
-        ("D", "delete the selected commit"),
-        ("r", "rename the selected commit's branch"),
-        ("a", "start a new branch at the selected commit"),
-        ("x", "dissolve the selected commit's branch"),
-        ("< / >", "shift the branch boundary by a commit"),
-        ("1 / 2", "hide/show the message / diff pane"),
-        ("u", "undo"),
-        ("Ctrl-r", "redo"),
-        ("mouse click", "select commit / focus pane / open PR link"),
-        ("mouse drag", "drag a pane divider to resize"),
-        ("mouse wheel", "scroll pane under cursor"),
-        ("?", "toggle this help"),
-        ("q / Esc", "quit (asks if operations are pending)"),
-    ];
-    let mut lines = vec![Line::from(Span::styled(
-        "git queue tui — keybindings",
-        Style::default().add_modifier(Modifier::BOLD),
-    ))];
-    lines.push(Line::from(""));
-    for (k, desc) in bindings {
+/// Compact key → one-liner, for the obvious navigation/view keys.
+const HELP_KEYS: &[(&str, &str)] = &[
+    ("j / k  ·  ↓ / ↑", "select the next / previous commit"),
+    ("g / G", "select the first / last commit"),
+    ("Tab", "cycle focus between visible panes"),
+    ("Ctrl-d / Ctrl-u  ·  PgDn / PgUp", "scroll the focused pane"),
+    ("1 / 2", "hide or show the message / diff pane"),
+    ("?", "toggle this help  ·  q / Esc  quit"),
+];
+
+/// Key → (title, longer explanation), for the operations that aren't obvious.
+const HELP_OPS: &[(&str, &str, &str)] = &[
+    (
+        "J / K",
+        "Reorder",
+        "Move the selected commit one step toward the tip / front. History is \
+         rewritten immediately, keeping the commit's Stable-Commit-Id. Crossing a \
+         branch boundary reassigns the commit to the branch it lands in. If the \
+         rebase conflicts you're asked to Resolve (drop to the shell) or Undo.",
+    ),
+    (
+        "e",
+        "Reword",
+        "Make the message pane editable for the selected commit. Typing changes \
+         nothing until you apply with Ctrl-S, which rewrites the message \
+         (preserving the id) and rebases the commits after it. Leaving with \
+         unapplied edits asks apply/discard.",
+    ),
+    (
+        "s",
+        "Squash",
+        "Fold the selected commit into the one before it (its older neighbour). \
+         The older commit keeps its id; the two descriptions are combined \
+         (you're prompted to trim when both are non-empty). Squashing across a \
+         branch boundary lands the result in the older branch, and offers to \
+         dissolve the newer branch if that empties it.",
+    ),
+    (
+        "S",
+        "Split",
+        "Divide the selected commit into two. The diff pane becomes a selector: \
+         Space toggles which added/removed lines peel into a new commit. The \
+         older piece keeps the original id and message; the peeled piece gets a \
+         message you write and a fresh id. Repeat on the remainder for more \
+         pieces.",
+    ),
+    (
+        "D",
+        "Delete",
+        "Remove the selected commit; the commits after it replay onto its parent \
+         (with the resolve/undo escape hatch on conflict). If deleting empties a \
+         branch, you're offered to dissolve it.",
+    ),
+    (
+        "a",
+        "New branch",
+        "Start a new branch at the selected commit: that commit becomes the new \
+         branch's front, and the new branch takes the commits from there up to \
+         the current branch's tip. The current branch keeps the commits before \
+         it. Ref-only — no commit is rewritten.",
+    ),
+    (
+        "r",
+        "Rename branch",
+        "Rename the branch that owns the selected commit. Ref-only.",
+    ),
+    (
+        "x",
+        "Dissolve branch",
+        "Remove the selected commit's branch, folding its commits into a \
+         neighbour (its child, or its parent if it's the tip). The commits stay; \
+         only the branch ref and its PR association go. Ref-only.",
+    ),
+    (
+        "< / >",
+        "Shift boundary",
+        "Move the boundary below the selected commit's branch by one commit, \
+         shifting a commit between the two adjacent branches. Ref-only.",
+    ),
+    (
+        "u  ·  Ctrl-r",
+        "Undo / Redo",
+        "Undo or redo any operation from this session — unlimited. Refs and queue \
+         metadata are restored exactly; git's reflog is the durable backstop \
+         across sessions.",
+    ),
+];
+
+fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
+    let cyan = Style::default().fg(Color::Cyan);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+
+    let mut lines: Vec<Line> = Vec::new();
+    let section = |lines: &mut Vec<Line>, title: &str| {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            title.to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    };
+
+    lines.push(Line::from(Span::styled(
+        "git queue tui — help",
+        bold.add_modifier(Modifier::UNDERLINED),
+    )));
+
+    section(&mut lines, "Navigate & view");
+    for (k, desc) in HELP_KEYS {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {k:<16}"), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("  {:<26} ", k), cyan),
+            Span::raw(*desc),
+        ]));
+    }
+
+    section(&mut lines, "Operations");
+    for (k, title, explanation) in HELP_OPS {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10} ", k), cyan),
+            Span::styled(title.to_string(), bold),
+        ]));
+        // The explanation wraps under a hanging indent.
+        for para in wrap_text(explanation, (area.width as usize).saturating_sub(20).max(20)) {
+            lines.push(Line::from(Span::styled(format!("             {para}"), dim)));
+        }
+        lines.push(Line::from(""));
+    }
+
+    section(&mut lines, "Mouse");
+    for (k, desc) in [
+        ("click", "select a commit · focus a pane · open a PR link (#N)"),
+        ("drag", "drag a pane divider to resize"),
+        ("wheel", "scroll the pane under the cursor"),
+    ] {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<10} ", k), cyan),
             Span::raw(desc),
         ]));
     }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  (press any key to dismiss)",
-        Style::default().fg(Color::DarkGray),
+        "  j/k or ↑/↓ scroll · any other key closes",
+        dim,
     )));
 
-    let popup = centered_rect(60, 60, area);
+    let popup = centered_rect(78, 84, area);
     f.render_widget(Clear, popup);
-    let p = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
-            .title(" help "),
-    );
+    let p = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" help "),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(p, popup);
 }
 
@@ -2026,6 +2146,32 @@ mod tests {
             assert!(app.msg_edit.is_none());
             assert!(app.status.is_empty(), "no error: {}", app.status);
             assert_eq!(app.commit_count(), before + 1, "split produced a second commit");
+        });
+    }
+
+    #[test]
+    fn help_shows_operation_explanations_and_scrolls() {
+        with_app(|app| {
+            press(app, '?');
+            assert!(app.show_help);
+            press(app, 'j'); // scroll down
+            assert_eq!(app.help_scroll, 1);
+            press(app, 'k');
+            assert_eq!(app.help_scroll, 0);
+
+            let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let text = buffer_text(terminal.backend());
+            assert!(text.contains("Reorder"), "operation titles are shown");
+            assert!(
+                text.contains("Stable-Commit-Id"),
+                "longer explanations are shown"
+            );
+
+            // A non-scroll key closes the help.
+            press(app, 'q');
+            assert!(!app.show_help);
+            assert!(!app.quit, "closing help does not quit");
         });
     }
 
