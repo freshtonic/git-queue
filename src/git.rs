@@ -493,6 +493,52 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Rewrite `base..top_branch` with a caller-supplied todo (one commit marked
+/// `reword`) and supply the new commit message from `message`. Both are
+/// installed via `cp`-based editors, so no helper binary is needed. A reword is
+/// message-only and cannot conflict; a stop is treated as an error and aborted.
+pub fn rebase_with_todo_message(
+    base: &str,
+    top_branch: &str,
+    todo: &str,
+    message: &str,
+) -> Result<()> {
+    let git_dir = out(&["rev-parse", "--git-dir"])?;
+    let dir = std::path::Path::new(&git_dir);
+    let todo_path = dir.join("git-queue-todo");
+    let msg_path = dir.join("git-queue-msg");
+    std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
+    std::fs::write(&msg_path, message).context("failed to stage the commit message")?;
+
+    let seq_editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
+    let msg_editor = format!("cp {}", shell_single_quote(&msg_path.to_string_lossy()));
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "rebase",
+        "-i",
+        "--update-refs",
+        "--onto",
+        base,
+        base,
+        top_branch,
+    ]);
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(GUARD_ENV, "1")
+        .env("GIT_SEQUENCE_EDITOR", seq_editor)
+        .env("GIT_EDITOR", msg_editor);
+    let status = cmd.status().context("failed to spawn `git rebase`")?;
+    let _ = std::fs::remove_file(&todo_path);
+    let _ = std::fs::remove_file(&msg_path);
+    if status.success() {
+        return Ok(());
+    }
+    if rebase_in_progress() {
+        let _ = rebase_abort();
+    }
+    bail!("the reword did not apply cleanly");
+}
+
 /// Abort an in-progress rebase, returning refs to their pre-rebase state.
 pub fn rebase_abort() -> Result<()> {
     let mut cmd = Command::new("git");

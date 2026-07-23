@@ -15,6 +15,7 @@
 //! [boundaries]: Boundary
 
 use crate::git;
+use crate::ident;
 use crate::meta;
 use crate::queue::Queue;
 use anyhow::{bail, Result};
@@ -389,6 +390,10 @@ impl Engine {
                 Ok(Applied::Done)
             }
             Operation::Reorder { from, to } => self.reorder(from, to),
+            Operation::Reword { index, message } => {
+                self.reword(index, &message)?;
+                Ok(Applied::Done)
+            }
             Operation::Undo => {
                 self.undo()?;
                 Ok(Applied::Done)
@@ -453,6 +458,29 @@ impl Engine {
                 Ok(Applied::Conflict)
             }
         }
+    }
+
+    // ---- reword (message-only rewrite) ----
+
+    /// Rewrite the message of the commit at `index`, preserving its
+    /// Stable-Commit-Id and rebasing descendants (message-only, so the replay
+    /// is clean). One undo entry.
+    fn reword(&mut self, index: usize, new_text: &str) -> Result<()> {
+        if index >= self.line.commits.len() {
+            bail!("reword index out of range");
+        }
+        let message = with_preserved_id(new_text, self.line.commits[index].id.as_deref());
+        let todo = reword_todo(&self.line, index);
+        let snap = self.snapshot()?;
+        let base = self.line.base.clone();
+        let top = self.line.boundaries.last().unwrap().name.clone();
+        let land = self.current.clone();
+        git::rebase_with_todo_message(&base, &top, &todo, &message)?;
+        self.finish_rewrite(&land)?;
+        self.undo.push(snap);
+        self.redo.clear();
+        self.touched = true;
+        Ok(())
     }
 
     /// After a clean rewriting rebase: refresh each branch's rebase anchor to
@@ -771,6 +799,47 @@ fn reorder_todo(line: &EditableLine, from: usize, to: usize) -> String {
     lines.join("\n") + "\n"
 }
 
+/// Build the rebase todo for `reword(index)`: the line's picks front → tip with
+/// an `update-ref` after each non-leaf branch tip, and the target commit's line
+/// marked `reword` so git stops to take the new message. Pure; unit-tested.
+fn reword_todo(line: &EditableLine, index: usize) -> String {
+    let commits = &line.commits;
+    let last = line.boundaries.len() - 1;
+    let mut ref_after: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (bi, b) in line.boundaries.iter().enumerate() {
+        if bi != last {
+            ref_after.insert(b.end - 1, b.name.as_str());
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for (i, c) in commits.iter().enumerate() {
+        let verb = if i == index { "reword" } else { "pick" };
+        lines.push(format!("{verb} {} {}", c.sha, c.subject));
+        if let Some(name) = ref_after.get(&i) {
+            lines.push(format!("update-ref refs/heads/{name}"));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// The final reword message: the user's text with any `Stable-Commit-Id` lines
+/// stripped, then the original id re-appended as the sole trailer — so the
+/// change keeps its identity no matter how the user edited the pane. A commit
+/// that had no id keeps none.
+fn with_preserved_id(new_text: &str, id: Option<&str>) -> String {
+    let prefix = format!("{}:", ident::TRAILER);
+    let body = new_text
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(&prefix))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = body.trim_end();
+    match id {
+        Some(id) => format!("{body}\n\n{}: {id}\n", ident::TRAILER),
+        None => format!("{body}\n"),
+    }
+}
+
 /// The queue name a set of line branches belongs to: an explicit `queueName`
 /// membership wins, else a `queue/<name>/…` prefix. `None` for a plain,
 /// unnamed (e.g. provisional untracked) line.
@@ -863,5 +932,30 @@ mod tests {
             todo,
             "pick c2 c2\npick c0 c0\npick c1 c1\nupdate-ref refs/heads/a\n"
         );
+    }
+
+    #[test]
+    fn reword_todo_marks_the_target_and_keeps_the_rest() {
+        let todo = reword_todo(&sample(), 0);
+        assert_eq!(
+            todo,
+            "reword c0 c0\npick c1 c1\nupdate-ref refs/heads/a\npick c2 c2\n"
+        );
+    }
+
+    #[test]
+    fn with_preserved_id_reattaches_the_original_trailer() {
+        // A fresh message gains the original id.
+        assert_eq!(
+            with_preserved_id("hello world", Some("q-abc")),
+            "hello world\n\nStable-Commit-Id: q-abc\n"
+        );
+        // Any id line the user's text carried is replaced by the original.
+        assert_eq!(
+            with_preserved_id("subject\n\nStable-Commit-Id: q-typo", Some("q-abc")),
+            "subject\n\nStable-Commit-Id: q-abc\n"
+        );
+        // An unstamped commit stays unstamped.
+        assert_eq!(with_preserved_id("just text", None), "just text\n");
     }
 }

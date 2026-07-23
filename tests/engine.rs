@@ -350,6 +350,44 @@ fn reorder_across_a_boundary_reassigns_the_commit() {
     });
 }
 
+#[test]
+fn reword_preserves_ids_rebases_descendants_and_is_undoable() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f0.txt", "zero");
+    queue_commit(dir, "f1.txt", "one");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "f2.txt", "two");
+    let b_tip_before = sha(dir, "b");
+
+    with_engine(dir, |e| {
+        let ids_before = ids(e);
+        let shas_before: Vec<String> = e.line().commits.iter().map(|c| c.sha.clone()).collect();
+
+        assert_eq!(
+            e.apply(Operation::Reword {
+                index: 0,
+                message: "reworded front".into(),
+            })
+            .unwrap(),
+            Applied::Done
+        );
+        assert_eq!(e.line().commits[0].subject, "reworded front");
+        assert_eq!(ids(e), ids_before, "every id preserved across the reword");
+        let shas_after: Vec<String> = e.line().commits.iter().map(|c| c.sha.clone()).collect();
+        assert_ne!(shas_after, shas_before, "the commits were rewritten");
+        assert_eq!(names(e), vec!["a", "b"]);
+        assert_ne!(sha(dir, "b"), b_tip_before, "descendant branch b rebased");
+
+        e.apply(Operation::Undo).unwrap();
+        assert_eq!(e.line().commits[0].subject, "zero", "undo restores the message");
+        assert_eq!(ids(e), ids_before);
+    });
+
+    assert_eq!(sha(dir, "b"), b_tip_before, "undo restored b's exact tip");
+}
+
 /// A branch whose middle commit, when reordered, textually conflicts with the
 /// one it crosses. c0 lays down three lines; c1 and c2 both edit line 2.
 fn conflicting_reorder_repo() -> TempDir {

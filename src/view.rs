@@ -86,6 +86,13 @@ struct App {
     confirm_quit: bool,
     /// Showing the "conflict — resolve or undo?" prompt.
     conflict_prompt: bool,
+    /// The editable message buffer, when the message pane is being edited. The
+    /// reword applies only on an explicit action; this is dirty when it differs
+    /// from `message`.
+    msg_edit: Option<String>,
+    /// Showing the "apply / discard your message edit?" prompt (raised when
+    /// leaving the editor with an unapplied buffer).
+    msg_apply_discard: bool,
     /// Set when the user chose to resolve a conflict in the shell: quit without
     /// the normal exit summary and print resolution instructions instead.
     suspend: bool,
@@ -113,6 +120,8 @@ impl App {
             input: None,
             confirm_quit: false,
             conflict_prompt: false,
+            msg_edit: None,
+            msg_apply_discard: false,
             suspend: false,
             status: String::new(),
             quit: false,
@@ -145,6 +154,36 @@ impl App {
                 self.after_change();
             }
             Ok(Applied::Conflict) => self.conflict_prompt = true,
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// Begin editing the selected commit's message in a local buffer.
+    fn start_message_edit(&mut self) {
+        self.msg_edit = Some(self.message.clone());
+        self.focus = Pane::Message;
+    }
+
+    /// Whether the edit buffer differs from the committed message.
+    fn message_dirty(&self) -> bool {
+        self.msg_edit.as_ref().is_some_and(|b| b != &self.message)
+    }
+
+    /// Apply the buffered message as a reword. Keeps the buffer on error so the
+    /// user can retry; clears it on success.
+    fn apply_reword(&mut self) {
+        let Some(buffer) = self.msg_edit.clone() else {
+            return;
+        };
+        match self.engine.apply(Operation::Reword {
+            index: self.selected,
+            message: buffer,
+        }) {
+            Ok(_) => {
+                self.msg_edit = None;
+                self.msg_apply_discard = false;
+                self.after_change();
+            }
             Err(e) => self.status = format!("{e:#}"),
         }
     }
@@ -328,6 +367,12 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     if app.conflict_prompt {
         return handle_conflict_key(app, key);
     }
+    if app.msg_apply_discard {
+        return handle_msg_prompt_key(app, key);
+    }
+    if app.msg_edit.is_some() {
+        return handle_msg_edit_key(app, key);
+    }
     if app.input.is_some() {
         return handle_input_key(app, key);
     }
@@ -335,6 +380,54 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         return handle_quit_confirm_key(app, key);
     }
     handle_normal_key(app, key)
+}
+
+/// Editing the message pane. The reword applies only on Ctrl-S; Esc leaves
+/// (prompting apply/discard if the buffer is dirty).
+fn handle_msg_edit_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('s') if ctrl => app.apply_reword(),
+        KeyCode::Esc => {
+            if app.message_dirty() {
+                app.msg_apply_discard = true;
+            } else {
+                app.msg_edit = None;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(b) = app.msg_edit.as_mut() {
+                b.push('\n');
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(b) = app.msg_edit.as_mut() {
+                b.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(b) = app.msg_edit.as_mut() {
+                b.push(c);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The apply/discard choice when leaving the message editor with unapplied
+/// edits.
+fn handle_msg_prompt_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Char('a') | KeyCode::Char('y') => app.apply_reword(),
+        KeyCode::Char('d') | KeyCode::Char('n') => {
+            app.msg_edit = None;
+            app.msg_apply_discard = false;
+        }
+        KeyCode::Esc => app.msg_apply_discard = false, // cancel: back to editing
+        _ => {}
+    }
+    Ok(())
 }
 
 fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
@@ -379,6 +472,7 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
                 buffer: String::new(),
             });
         }
+        KeyCode::Char('e') => app.start_message_edit(),
         KeyCode::Char('x') => app.apply_op(Operation::RemoveBoundary {
             boundary: app.selected_boundary(),
         }),
@@ -473,9 +567,14 @@ fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 }
 
 fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
-    // While a modal (help / prompt / quit-guard / conflict) is up, ignore the
-    // mouse.
-    if app.show_help || app.input.is_some() || app.confirm_quit || app.conflict_prompt {
+    // While a modal (help / prompt / quit-guard / conflict / message edit) is
+    // up, ignore the mouse.
+    if app.show_help
+        || app.input.is_some()
+        || app.confirm_quit
+        || app.conflict_prompt
+        || app.msg_edit.is_some()
+    {
         return Ok(());
     }
     let at = Rect::new(m.column, m.row, 1, 1);
@@ -588,6 +687,18 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
+    } else if app.msg_apply_discard {
+        (
+            "unapplied message edit — [a]pply / [d]iscard / Esc cancel".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app.msg_edit.is_some() {
+        (
+            "editing message — Ctrl-S apply · Esc leave".to_string(),
+            Style::default().fg(Color::Cyan),
+        )
     } else if let Some(input) = &app.input {
         (
             format!("{}: {}\u{2588}", input.prompt.label(), input.buffer),
@@ -604,8 +715,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  J/K reorder  r rename  a add-branch  x dissolve  </> shift  \
-             u undo  C-r redo  ? help  q quit"
+            "j/k move  J/K reorder  e message  r rename  a add-branch  x dissolve  \
+             </> shift  u undo  C-r redo  ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -666,9 +777,15 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_message(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let p = Paragraph::new(app.message.as_str())
-        .block(pane_block("message", app.focus == Pane::Message))
-        .scroll((app.msg_scroll, 0));
+    let (title, body, scroll) = match &app.msg_edit {
+        // A block cursor marks the edit point (buffer end).
+        Some(buffer) => ("message*", format!("{buffer}\u{2588}"), 0),
+        None => ("message", app.message.clone(), app.msg_scroll),
+    };
+    let editing = app.msg_edit.is_some();
+    let p = Paragraph::new(body)
+        .block(pane_block(title, editing || app.focus == Pane::Message))
+        .scroll((scroll, 0));
     f.render_widget(p, area);
 }
 
@@ -703,6 +820,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("Ctrl-d / Ctrl-u", "scroll focused pane"),
         ("PgDn / PgUp", "scroll focused pane"),
         ("J / K", "reorder the selected commit down / up"),
+        ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
         ("r", "rename the selected commit's branch"),
         ("a", "add a boundary after the selected commit"),
         ("x", "dissolve the selected commit's branch"),
@@ -1052,5 +1170,66 @@ mod tests {
     /// Abort any rebase left in progress by a test (best-effort cleanup).
     fn git_queue_git_abort() -> std::io::Result<std::process::ExitStatus> {
         Command::new("git").args(["rebase", "--abort"]).status()
+    }
+
+    fn ctrl(app: &mut App, c: char) {
+        handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)).unwrap();
+    }
+
+    #[test]
+    fn editing_and_applying_rewords_the_selected_commit() {
+        with_app(|app| {
+            let before = app.message.clone();
+            press(app, 'e');
+            assert!(app.msg_edit.is_some(), "entered edit mode");
+            // The user rewrites the whole message.
+            app.msg_edit = Some("a brand new subject".into());
+            ctrl(app, 's'); // apply
+            assert!(app.msg_edit.is_none(), "applied and left edit mode");
+            assert!(app.status.is_empty(), "no error: {}", app.status);
+            assert_eq!(
+                app.engine.line().commits[app.selected].subject,
+                "a brand new subject"
+            );
+            assert_ne!(app.message, before, "the pane refreshed to the new message");
+        });
+    }
+
+    #[test]
+    fn typing_does_not_touch_git_until_apply() {
+        with_app(|app| {
+            let tip_before = app.engine.line().commits[app.selected].sha.clone();
+            press(app, 'e');
+            press(app, 'X');
+            press(app, 'Y');
+            assert!(app.message_dirty());
+            // No apply yet: the commit is untouched.
+            assert_eq!(app.engine.line().commits[app.selected].sha, tip_before);
+        });
+    }
+
+    #[test]
+    fn leaving_a_dirty_edit_prompts_apply_or_discard() {
+        with_app(|app| {
+            press(app, 'e');
+            press(app, 'Z'); // dirty the buffer
+            assert!(app.message_dirty());
+            key(app, KeyCode::Esc); // navigate away
+            assert!(app.msg_apply_discard, "apply/discard prompt raised");
+
+            press(app, 'd'); // discard
+            assert!(app.msg_edit.is_none());
+            assert!(!app.msg_apply_discard);
+        });
+    }
+
+    #[test]
+    fn leaving_a_clean_edit_needs_no_prompt() {
+        with_app(|app| {
+            press(app, 'e');
+            key(app, KeyCode::Esc);
+            assert!(app.msg_edit.is_none(), "left edit mode directly");
+            assert!(!app.msg_apply_discard);
+        });
     }
 }
