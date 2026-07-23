@@ -11,7 +11,7 @@
 //! serialises those loads across the parallel test runner).
 
 use assert_cmd::Command;
-use git_queue::engine::{Boundary, Engine};
+use git_queue::engine::{Boundary, Engine, Operation};
 use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::Mutex;
@@ -28,6 +28,29 @@ fn git(dir: &Path, args: &[&str]) {
         .status()
         .expect("spawn git");
     assert!(status.success(), "git {args:?} failed");
+}
+
+/// Capture trimmed stdout of a raw git command in `dir`.
+fn git_out(dir: &Path, args: &[&str]) -> String {
+    let out = StdCommand::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn sha(dir: &Path, rev: &str) -> String {
+    git_out(dir, &["rev-parse", rev])
+}
+
+fn branch_exists(dir: &Path, name: &str) -> bool {
+    StdCommand::new("git")
+        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success()
 }
 
 /// Our binary, rooted in `dir`.
@@ -74,6 +97,164 @@ fn load_in(dir: &Path) -> anyhow::Result<Engine> {
     let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_current_dir(dir).unwrap();
     Engine::load()
+}
+
+/// Load an engine and run `f` against it with the cwd lock held for the whole
+/// call — every `apply` mutates git in the process cwd, so the lock must span
+/// them all.
+fn with_engine<T>(dir: &Path, f: impl FnOnce(&mut Engine) -> T) -> T {
+    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_current_dir(dir).unwrap();
+    let mut engine = Engine::load().expect("engine loads");
+    f(&mut engine)
+}
+
+fn names(e: &Engine) -> Vec<String> {
+    e.line().boundaries.iter().map(|b| b.name.clone()).collect()
+}
+
+fn ids(e: &Engine) -> Vec<Option<String>> {
+    e.line().commits.iter().map(|c| c.id.clone()).collect()
+}
+
+#[test]
+fn rename_branch_is_ref_only_and_reparents_children() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "a change");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "b.txt", "b change");
+    let a_sha = sha(dir, "a");
+
+    with_engine(dir, |e| {
+        let ids_before = ids(e);
+        e.apply(Operation::RenameBranch {
+            boundary: 0,
+            name: "api".into(),
+        })
+        .unwrap();
+        assert_eq!(names(e), vec!["api", "b"]);
+        assert_eq!(ids_before, ids(e), "commit ids unchanged (ref-only)");
+    });
+
+    assert!(!branch_exists(dir, "a"), "old name gone");
+    assert_eq!(sha(dir, "api"), a_sha, "api sits at a's old tip (no rewrite)");
+    assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "api");
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
+}
+
+#[test]
+fn add_boundary_splits_a_branch_ref_only() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "feat"]).assert().success();
+    queue_commit(dir, "c0.txt", "zero");
+    queue_commit(dir, "c1.txt", "one");
+    queue_commit(dir, "c2.txt", "two");
+    let tip = sha(dir, "feat");
+
+    with_engine(dir, |e| {
+        let c0 = e.line().commits[0].sha.clone();
+        e.apply(Operation::AddBoundary {
+            index: 0,
+            name: "api".into(),
+        })
+        .unwrap();
+        assert_eq!(names(e), vec!["api", "feat"]);
+        assert_eq!(e.line().commits_of(0).len(), 1, "api owns the first commit");
+        assert_eq!(e.line().commits_of(1).len(), 2, "feat keeps the rest");
+        assert_eq!(e.line().commits[0].sha, c0, "commit not rewritten");
+    });
+
+    assert_eq!(sha(dir, "feat"), tip, "feat still at its original tip");
+    assert_eq!(git_out(dir, &["config", "branch.feat.queueParent"]), "api");
+    assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
+}
+
+#[test]
+fn remove_boundary_dissolves_into_neighbour() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "a change");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "b.txt", "b change");
+    let b_tip = sha(dir, "b");
+
+    with_engine(dir, |e| {
+        let shas: Vec<_> = e.line().commits.iter().map(|c| c.sha.clone()).collect();
+        e.apply(Operation::RemoveBoundary { boundary: 0 }).unwrap();
+        assert_eq!(names(e), vec!["b"], "a dissolved into b");
+        assert_eq!(e.line().commits.len(), 2, "b now owns both commits");
+        let after: Vec<_> = e.line().commits.iter().map(|c| c.sha.clone()).collect();
+        assert_eq!(shas, after, "commits not rewritten");
+    });
+
+    assert!(!branch_exists(dir, "a"), "dissolved branch deleted");
+    assert_eq!(sha(dir, "b"), b_tip, "b's tip unchanged");
+    assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "main");
+}
+
+#[test]
+fn move_boundary_reassigns_commits_between_branches() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "c0.txt", "zero");
+    queue_commit(dir, "c1.txt", "one");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "c2.txt", "two");
+
+    with_engine(dir, |e| {
+        let c0 = e.line().commits[0].sha.clone();
+        // a owns [c0, c1], b owns [c2]; shift the boundary front-ward by one.
+        e.apply(Operation::MoveBoundary {
+            boundary: 0,
+            delta: -1,
+        })
+        .unwrap();
+        assert_eq!(e.line().commits_of(0).len(), 1, "a keeps only c0");
+        assert_eq!(e.line().commits_of(1).len(), 2, "b gains c1");
+        assert_eq!(sha(dir, "a"), c0, "a's ref moved back to c0 (no rewrite)");
+    });
+}
+
+#[test]
+fn undo_and_redo_restore_exact_refs_and_metadata() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "a change");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "b.txt", "b change");
+    // A cached PR on b, so we can prove metadata is restored, not just refs.
+    git(dir, &["config", "branch.b.queuePr", "77"]);
+    let a_sha = sha(dir, "a");
+
+    with_engine(dir, |e| {
+        e.apply(Operation::RenameBranch {
+            boundary: 0,
+            name: "api".into(),
+        })
+        .unwrap();
+        assert!(branch_exists(dir, "api") && !branch_exists(dir, "a"));
+
+        e.apply(Operation::Undo).unwrap();
+        assert_eq!(names(e), vec!["a", "b"], "undo restores the branches");
+        assert!(!branch_exists(dir, "api"));
+        assert_eq!(sha(dir, "a"), a_sha, "a back at its exact old sha");
+        assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "a");
+        assert_eq!(
+            git_out(dir, &["config", "branch.b.queuePr"]),
+            "77",
+            "cached PR restored"
+        );
+
+        e.apply(Operation::Redo).unwrap();
+        assert_eq!(names(e), vec!["api", "b"], "redo reapplies");
+        assert!(branch_exists(dir, "api"));
+    });
 }
 
 #[test]

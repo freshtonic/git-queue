@@ -15,8 +15,10 @@
 //! [boundaries]: Boundary
 
 use crate::git;
+use crate::meta;
 use crate::queue::Queue;
 use anyhow::{bail, Result};
+use std::collections::HashSet;
 
 /// One commit of the loaded queue line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +154,49 @@ pub enum Operation {
 #[derive(Debug)]
 pub struct Engine {
     line: EditableLine,
+    /// The queue name new branches are recorded under and (when the line is
+    /// namespaced) prefixed with.
+    qname: String,
+    /// Whether short branch names are namespaced to `queue/<qname>/<short>`.
+    namespaced: bool,
+    /// The branch HEAD is on; it follows renames/dissolves and is the landing
+    /// point on exit.
+    current: String,
+    /// The branch the TUI launched from (for the exit summary).
     launched_from: String,
+    /// Branches present at load with their cached PR numbers, so exit can warn
+    /// about dissolved branches that had an open PR.
+    original: Vec<(String, Option<u64>)>,
+    /// Snapshots taken before each applied operation; undo restores the top.
+    undo: Vec<Snapshot>,
+    /// Snapshots of undone operations, for redo.
+    redo: Vec<Snapshot>,
+    /// Whether any operation has mutated git this session (gates the exit
+    /// summary — a pure read-only session leaves the repo, and the output,
+    /// untouched).
+    touched: bool,
+}
+
+/// A branch's full restorable state: its ref and the queue metadata that moves
+/// with it. Captured before every operation so undo can put it back exactly —
+/// the rewritten commit *objects* survive in git until GC (ADR-0002), so
+/// restoring a ref to its old sha brings the old commit back too.
+#[derive(Debug, Clone)]
+struct BranchSnap {
+    name: String,
+    sha: String,
+    parent: String,
+    parent_sha: Option<String>,
+    queue: Option<String>,
+    pr: Option<u64>,
+    description: Option<String>,
+}
+
+/// A whole-line snapshot: every branch's state plus which branch HEAD was on.
+#[derive(Debug, Clone)]
+struct Snapshot {
+    branches: Vec<BranchSnap>,
+    head: String,
 }
 
 impl Engine {
@@ -175,14 +219,35 @@ impl Engine {
 
         let queue = Queue::load()?;
         let branch = git::current_branch()?;
+        let (branches, base) = Self::scope(&queue, &branch)?;
+        let line = Self::build_line(base, &branches)?;
+        if line.commits.is_empty() {
+            bail!("the queue has no commits to edit");
+        }
 
-        // Scope: the current queue line. An untracked branch opens as one
-        // provisional section over trunk, exactly as `edit` treats it.
-        let (branches, base) = if queue.is_tracked(&branch) {
-            let line = queue.line_through(&branch)?;
-            // Refuse a forked line: rewriting commits shared with a sibling
-            // line could orphan it, and forked-line editing is out of scope in
-            // v1. A fork is any branch in the editing range with more than one
+        let qname = branch_queue_name(&branches).unwrap_or_else(|| branch.replace('/', "-"));
+        let namespaced = branches.iter().any(|b| b.starts_with("queue/"));
+        let original = branches.iter().map(|b| (b.clone(), meta::pr(b))).collect();
+
+        Ok(Engine {
+            line,
+            qname,
+            namespaced,
+            current: branch.clone(),
+            launched_from: branch,
+            original,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            touched: false,
+        })
+    }
+
+    /// Resolve the current queue line's branches and base, refusing a forked
+    /// line. An untracked branch resolves to one provisional section over trunk.
+    fn scope(queue: &Queue, branch: &str) -> Result<(Vec<String>, String)> {
+        if queue.is_tracked(branch) {
+            let line = queue.line_through(branch)?;
+            // A fork is any branch in the editing range with more than one
             // tracked child (covers a fork above *or* below the current
             // branch, which `line.fork_at` alone would miss).
             if line.branches.iter().any(|b| queue.children(b).len() > 1) {
@@ -192,17 +257,19 @@ impl Engine {
                      boundary changes, or checkout a single unforked line first"
                 );
             }
-            (line.branches, line.base)
+            Ok((line.branches, line.base))
         } else {
-            (vec![branch.clone()], queue.trunk.clone())
-        };
+            Ok((vec![branch.to_string()], queue.trunk.clone()))
+        }
+    }
 
-        // Every commit of the line, front → tip, recording where each branch's
-        // run ends as a boundary.
+    /// Build the commit sequence (front → tip) and the per-branch boundaries
+    /// over it, by walking each branch's run.
+    fn build_line(base: String, branches: &[String]) -> Result<EditableLine> {
         let mut commits = Vec::new();
         let mut boundaries = Vec::new();
         let mut parent = base.clone();
-        for b in &branches {
+        for b in branches {
             for (sha, id, subject) in git::commits_between_with_ids(&parent, b)? {
                 commits.push(Commit { sha, id, subject });
             }
@@ -212,18 +279,10 @@ impl Engine {
             });
             parent = b.clone();
         }
-
-        if commits.is_empty() {
-            bail!("the queue has no commits to edit");
-        }
-
-        Ok(Engine {
-            line: EditableLine {
-                base,
-                commits,
-                boundaries,
-            },
-            launched_from: branch,
+        Ok(EditableLine {
+            base,
+            commits,
+            boundaries,
         })
     }
 
@@ -232,17 +291,333 @@ impl Engine {
         &self.line
     }
 
-    /// The branch the TUI was launched from — HEAD is returned here (or its
-    /// nearest surviving neighbour) on exit.
+    /// The branch the TUI was launched from.
     pub fn launched_from(&self) -> &str {
         &self.launched_from
     }
 
-    /// Apply an operation to the line. No variant is handled yet — this ticket
-    /// only establishes the seam; later tickets implement each in turn.
-    pub fn apply(&mut self, op: Operation) -> Result<()> {
-        bail!("operation not yet supported: {op:?}");
+    /// The branch HEAD is currently on (the exit landing point).
+    pub fn landing_branch(&self) -> &str {
+        &self.current
     }
+
+    /// The queue name new branches are recorded under.
+    pub fn queue_name(&self) -> &str {
+        &self.qname
+    }
+
+    /// Whether any operation is on the undo stack (drives the quit-guard).
+    pub fn has_pending(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Whether any operation has mutated git this session.
+    pub fn changed(&self) -> bool {
+        self.touched
+    }
+
+    /// The final branch chain, front → tip, as `(parent, branch)` pairs.
+    pub fn layout(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut parent = self.line.base.clone();
+        for b in &self.line.boundaries {
+            out.push((parent.clone(), b.name.clone()));
+            parent = b.name.clone();
+        }
+        out
+    }
+
+    /// Branches that were present at load but have since been dissolved, and
+    /// that carried a cached PR number — the exit summary warns about these.
+    pub fn dissolved_with_prs(&self) -> Vec<(String, u64)> {
+        let present: HashSet<&str> = self.line.boundaries.iter().map(|b| b.name.as_str()).collect();
+        self.original
+            .iter()
+            .filter(|(name, _)| !present.contains(name.as_str()))
+            .filter_map(|(name, pr)| pr.map(|n| (name.clone(), n)))
+            .collect()
+    }
+
+    /// Apply an operation. Boundary edits and undo/redo are handled here;
+    /// history-rewriting variants land in later tickets.
+    pub fn apply(&mut self, op: Operation) -> Result<()> {
+        match op {
+            Operation::RenameBranch { boundary, name } => self.rename_branch(boundary, &name),
+            Operation::AddBoundary { index, name } => self.add_boundary(index, &name),
+            Operation::RemoveBoundary { boundary } => self.remove_boundary(boundary),
+            Operation::MoveBoundary { boundary, delta } => self.move_boundary(boundary, delta),
+            Operation::Undo => self.undo(),
+            Operation::Redo => self.redo(),
+            other => bail!("operation not yet supported: {other:?}"),
+        }
+    }
+
+    // ---- boundary operations (ref-only; no commit is rewritten) ----
+
+    /// Rename the branch at `boundary`.
+    fn rename_branch(&mut self, boundary: usize, new_name: &str) -> Result<()> {
+        let resolved = self.resolve_name(new_name);
+        let old = self.line.boundaries[boundary].name.clone();
+        if resolved == old {
+            return Ok(());
+        }
+        if git::branch_exists(&resolved) {
+            bail!("branch `{resolved}` already exists; pick a different name");
+        }
+        let mut segs = self.line.boundaries.clone();
+        segs[boundary].name = resolved.clone();
+        let land = if self.current == old {
+            resolved
+        } else {
+            self.current.clone()
+        };
+        self.commit_op(segs, land)
+    }
+
+    /// Add a boundary after commit `index`, creating a new front-ward branch
+    /// `name`; the branch that owned `index` keeps the tip-ward remainder.
+    fn add_boundary(&mut self, index: usize, name: &str) -> Result<()> {
+        let resolved = self.resolve_name(name);
+        if git::branch_exists(&resolved) {
+            bail!("branch `{resolved}` already exists; pick a different name");
+        }
+        let b = self.line.boundary_of(index);
+        let end = self.line.boundaries[b].end;
+        if index + 1 >= end {
+            bail!(
+                "cannot add a boundary after the last commit of `{}` — it would leave \
+                 an empty branch",
+                self.line.boundaries[b].name
+            );
+        }
+        let mut segs = self.line.boundaries.clone();
+        segs.insert(
+            b,
+            Boundary {
+                name: resolved,
+                end: index + 1,
+            },
+        );
+        let land = self.current.clone();
+        self.commit_op(segs, land)
+    }
+
+    /// Remove the boundary at `boundary`, dissolving that branch into its
+    /// neighbour (its child, or its parent when it is the tip).
+    fn remove_boundary(&mut self, boundary: usize) -> Result<()> {
+        if self.line.boundaries.len() < 2 {
+            bail!("cannot dissolve the only branch of the line");
+        }
+        let removed = self.line.boundaries[boundary].name.clone();
+        let is_tip = boundary == self.line.boundaries.len() - 1;
+        let survivor = if is_tip {
+            self.line.boundaries[boundary - 1].name.clone()
+        } else {
+            self.line.boundaries[boundary + 1].name.clone()
+        };
+        let mut segs = self.line.boundaries.clone();
+        segs.remove(boundary);
+        // Removing the tip boundary would leave its commits unowned; extend the
+        // new last branch to cover them.
+        segs.last_mut().unwrap().end = self.line.commits.len();
+        let land = if self.current == removed {
+            survivor
+        } else {
+            self.current.clone()
+        };
+        self.commit_op(segs, land)
+    }
+
+    /// Shift the boundary at `boundary` by `delta` commits, moving commits
+    /// between it and the next branch.
+    fn move_boundary(&mut self, boundary: usize, delta: isize) -> Result<()> {
+        if boundary + 1 >= self.line.boundaries.len() {
+            bail!("the last branch's boundary is fixed at the tip");
+        }
+        let lower = if boundary == 0 {
+            0
+        } else {
+            self.line.boundaries[boundary - 1].end as isize
+        };
+        let upper = self.line.boundaries[boundary + 1].end as isize;
+        let new_end = self.line.boundaries[boundary].end as isize + delta;
+        if new_end <= lower || new_end >= upper {
+            bail!("that shift would empty a branch");
+        }
+        let mut segs = self.line.boundaries.clone();
+        segs[boundary].end = new_end as usize;
+        let land = self.current.clone();
+        self.commit_op(segs, land)
+    }
+
+    // ---- undo / redo ----
+
+    fn undo(&mut self) -> Result<()> {
+        let Some(snap) = self.undo.pop() else {
+            bail!("nothing to undo");
+        };
+        let redo = self.snapshot()?;
+        self.restore(&snap)?;
+        self.redo.push(redo);
+        Ok(())
+    }
+
+    fn redo(&mut self) -> Result<()> {
+        let Some(snap) = self.redo.pop() else {
+            bail!("nothing to redo");
+        };
+        let undo = self.snapshot()?;
+        self.restore(&snap)?;
+        self.undo.push(undo);
+        Ok(())
+    }
+
+    // ---- shared mutation machinery ----
+
+    /// Namespace a short branch name to `queue/<qname>/<short>` when the line
+    /// is namespaced; names with a `/`, existing line branches, and plain-named
+    /// queues stay as-is (the same rule as `edit`/`create`).
+    fn resolve_name(&self, n: &str) -> String {
+        if n.contains('/') || self.line.boundaries.iter().any(|b| b.name == n) || !self.namespaced {
+            n.to_string()
+        } else {
+            format!("queue/{}/{n}", self.qname)
+        }
+    }
+
+    /// Snapshot before an operation, apply it by materialising the new segment
+    /// layout, land HEAD on `land`, reload the model, and push the undo entry.
+    fn commit_op(&mut self, segments: Vec<Boundary>, land: String) -> Result<()> {
+        let snap = self.snapshot()?;
+        self.materialise(&segments)?;
+        git::checkout_quiet(&land)?;
+        self.reload()?;
+        self.undo.push(snap);
+        self.redo.clear();
+        self.touched = true;
+        Ok(())
+    }
+
+    /// Rewrite branch refs and parent pointers to match `segments` over the
+    /// current (fixed) commit sequence, and delete branches that dropped out.
+    /// Ref-only: no commit object is rewritten. Leaves HEAD detached.
+    fn materialise(&self, segments: &[Boundary]) -> Result<()> {
+        git::detach_head()?;
+        let target: HashSet<&str> = segments.iter().map(|s| s.name.as_str()).collect();
+        let mut parent = self.line.base.clone();
+        for s in segments {
+            let tip_sha = self.line.commits[s.end - 1].sha.clone();
+            if git::branch_exists(&s.name) {
+                git::force_ref(&s.name, &tip_sha)?;
+            } else {
+                git::create_branch(&s.name, &tip_sha)?;
+            }
+            meta::set_parent(&s.name, &parent)?;
+            meta::set_parent_sha(&s.name, &git::rev_parse(&parent)?)?;
+            meta::set_branch_queue(&s.name, &self.qname)?;
+            parent = s.name.clone();
+        }
+        for old in self.line.boundaries.iter().map(|b| b.name.clone()) {
+            if !target.contains(old.as_str()) {
+                meta::untrack(&old);
+                git::run(&["branch", "-q", "-D", &old])?;
+            }
+        }
+        meta::touch_queue(&self.qname);
+        Ok(())
+    }
+
+    /// Capture the whole line's restorable state.
+    fn snapshot(&self) -> Result<Snapshot> {
+        let mut branches = Vec::new();
+        for b in self.line.boundaries.iter().map(|x| &x.name) {
+            branches.push(BranchSnap {
+                name: b.clone(),
+                sha: git::rev_parse(b)?,
+                parent: meta::parent(b).unwrap_or_else(|| self.line.base.clone()),
+                parent_sha: meta::parent_sha(b),
+                queue: meta::branch_queue(b),
+                pr: meta::pr(b),
+                description: meta::description(b),
+            });
+        }
+        Ok(Snapshot {
+            branches,
+            head: self.current.clone(),
+        })
+    }
+
+    /// Restore a snapshot: delete branches the operation created, put every
+    /// snapshotted branch's ref and metadata back, and return HEAD. Reloads.
+    fn restore(&mut self, snap: &Snapshot) -> Result<()> {
+        git::detach_head()?;
+        let keep: HashSet<&str> = snap.branches.iter().map(|b| b.name.as_str()).collect();
+        for b in self
+            .line
+            .boundaries
+            .iter()
+            .map(|x| x.name.clone())
+            .collect::<Vec<_>>()
+        {
+            if !keep.contains(b.as_str()) {
+                meta::untrack(&b);
+                git::run(&["branch", "-q", "-D", &b])?;
+            }
+        }
+        for bs in &snap.branches {
+            if git::branch_exists(&bs.name) {
+                git::force_ref(&bs.name, &bs.sha)?;
+            } else {
+                git::create_branch(&bs.name, &bs.sha)?;
+            }
+            meta::set_parent(&bs.name, &bs.parent)?;
+            if let Some(s) = &bs.parent_sha {
+                meta::set_parent_sha(&bs.name, s)?;
+            }
+            if let Some(q) = &bs.queue {
+                meta::set_branch_queue(&bs.name, q)?;
+            }
+            if let Some(pr) = bs.pr {
+                meta::set_pr(&bs.name, pr)?;
+            }
+            if let Some(d) = &bs.description {
+                meta::set_description(&bs.name, d)?;
+            }
+        }
+        git::checkout_quiet(&snap.head)?;
+        self.reload()?;
+        Ok(())
+    }
+
+    /// Rebuild the in-memory model from the current git state (after HEAD has
+    /// been put on a valid line branch). Runs no guards.
+    fn reload(&mut self) -> Result<()> {
+        let queue = Queue::load()?;
+        let branch = git::current_branch()?;
+        let (branches, base) = Self::scope(&queue, &branch)?;
+        self.line = Self::build_line(base, &branches)?;
+        self.current = branch;
+        Ok(())
+    }
+}
+
+/// The queue name a set of line branches belongs to: an explicit `queueName`
+/// membership wins, else a `queue/<name>/…` prefix. `None` for a plain,
+/// unnamed (e.g. provisional untracked) line.
+fn branch_queue_name(branches: &[String]) -> Option<String> {
+    for b in branches {
+        if let Some(n) = meta::branch_queue(b) {
+            return Some(n);
+        }
+    }
+    for b in branches {
+        if let Some(rest) = b.strip_prefix("queue/") {
+            if let Some((n, _)) = rest.split_once('/') {
+                return Some(n.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]

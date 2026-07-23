@@ -11,7 +11,7 @@
 //! ordering) live in [`render`](crate::render) and [`engine`](crate::engine)
 //! so they can be unit-tested; the code here is the ratatui wiring around them.
 
-use crate::engine::{Engine, Row};
+use crate::engine::{Engine, Operation, Row};
 use crate::git;
 use crate::render::{classify_diff_line, DiffLine};
 use anyhow::Result;
@@ -39,6 +39,29 @@ enum Pane {
     Diff,
 }
 
+/// A pending single-line text prompt in the footer (branch name entry).
+#[derive(Debug, Clone)]
+enum Prompt {
+    /// Rename the branch at this boundary to the entered name.
+    Rename { boundary: usize },
+    /// Add a boundary after this commit, naming the new branch.
+    AddBoundary { index: usize },
+}
+
+impl Prompt {
+    fn label(&self) -> &'static str {
+        match self {
+            Prompt::Rename { .. } => "rename branch to",
+            Prompt::AddBoundary { .. } => "new branch name",
+        }
+    }
+}
+
+struct Input {
+    prompt: Prompt,
+    buffer: String,
+}
+
 /// The view's mutable state over one engine session.
 struct App {
     engine: Engine,
@@ -57,6 +80,12 @@ struct App {
     queue_area: Rect,
     message_area: Rect,
     diff_area: Rect,
+    /// An active footer text prompt (rename / add-boundary), if any.
+    input: Option<Input>,
+    /// Showing the "quit with pending operations?" guard.
+    confirm_quit: bool,
+    /// Transient status/error line shown in the footer.
+    status: String,
     /// Whether the user asked to quit.
     quit: bool,
 }
@@ -76,10 +105,36 @@ impl App {
             queue_area: Rect::default(),
             message_area: Rect::default(),
             diff_area: Rect::default(),
+            input: None,
+            confirm_quit: false,
+            status: String::new(),
             quit: false,
         };
         app.refresh_selection()?;
         Ok(app)
+    }
+
+    /// The boundary (branch) index owning the selected commit.
+    fn selected_boundary(&self) -> usize {
+        self.engine.line().boundary_of(self.selected)
+    }
+
+    /// Apply an operation, folding any error into the status line and keeping
+    /// the selection valid.
+    fn apply_op(&mut self, op: Operation) {
+        match self.engine.apply(op) {
+            Ok(()) => {
+                self.status.clear();
+                let last = self.commit_count().saturating_sub(1);
+                if self.selected > last {
+                    self.selected = last;
+                }
+                if let Err(e) = self.refresh_selection() {
+                    self.status = format!("{e:#}");
+                }
+            }
+            Err(e) => self.status = format!("{e:#}"),
+        }
     }
 
     /// Recompute the message and diff for the currently selected commit, and
@@ -125,9 +180,40 @@ pub fn run(engine: Engine) -> Result<()> {
     let mut app = App::new(engine)?;
     let mut term = TerminalGuard::new()?;
     let res = event_loop(&mut app, &mut term.terminal);
-    // The guard's Drop restores the terminal; surface the loop's error after.
+    // The guard's Drop restores the terminal; print the exit summary only once
+    // the alternate screen is gone.
     drop(term);
-    res
+    res?;
+    print_exit_summary(&app.engine);
+    Ok(())
+}
+
+/// After a session that changed anything, print the new branch layout, the
+/// `sync` reminder, and warnings for dissolved branches that still have a PR.
+/// A pure read-only session prints nothing.
+fn print_exit_summary(engine: &Engine) {
+    if !engine.changed() {
+        return;
+    }
+    let layout = engine.layout();
+    println!(
+        "Queue `{}` now has {} branch(es):",
+        engine.queue_name(),
+        layout.len()
+    );
+    for (parent, branch) in &layout {
+        println!("  {parent} ← {branch}");
+    }
+    println!(
+        "Now on `{}`. Run `git queue sync` to update the PRs.",
+        engine.landing_branch()
+    );
+    for (branch, pr) in engine.dissolved_with_prs() {
+        println!(
+            "note: dissolved `{branch}` still has an open PR #{pr} — close it, or \
+             repurpose it manually."
+        );
+    }
 }
 
 type Backend = ratatui::backend::CrosstermBackend<io::Stdout>;
@@ -192,31 +278,124 @@ fn event_loop(app: &mut App, terminal: &mut Terminal<Backend>) -> Result<()> {
 }
 
 fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
-    // The help overlay swallows input: any key dismisses it.
+    // Modal states consume input first, in priority order.
     if app.show_help {
-        app.show_help = false;
+        app.show_help = false; // any key dismisses help
         return Ok(());
     }
+    if app.input.is_some() {
+        return handle_input_key(app, key);
+    }
+    if app.confirm_quit {
+        return handle_quit_confirm_key(app, key);
+    }
+    handle_normal_key(app, key)
+}
+
+fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        // Quitting with operations on the stack asks first.
+        KeyCode::Char('q') | KeyCode::Esc => {
+            if app.engine.has_pending() {
+                app.confirm_quit = true;
+            } else {
+                app.quit = true;
+            }
+        }
         KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('j') | KeyCode::Down => app.select(app.selected + 1)?,
         KeyCode::Char('k') | KeyCode::Up => app.select(app.selected.saturating_sub(1))?,
         KeyCode::Char('g') => app.select(0)?,
         KeyCode::Char('G') => app.select(app.commit_count().saturating_sub(1))?,
         KeyCode::Tab => app.focus = next_pane(app.focus),
+        // Ctrl-modified bindings must precede their bare-key namesakes so the
+        // guard wins (Ctrl-d/u scroll; Ctrl-r redoes; bare r/u are ops).
         KeyCode::Char('d') if ctrl => scroll_focused(app, 10),
         KeyCode::Char('u') if ctrl => scroll_focused(app, -10),
+        KeyCode::Char('r') if ctrl => app.apply_op(Operation::Redo),
         KeyCode::PageDown => scroll_focused(app, 10),
         KeyCode::PageUp => scroll_focused(app, -10),
+
+        // ---- boundary operations (ref-only) ----
+        KeyCode::Char('r') => {
+            app.input = Some(Input {
+                prompt: Prompt::Rename {
+                    boundary: app.selected_boundary(),
+                },
+                buffer: String::new(),
+            });
+        }
+        KeyCode::Char('a') => {
+            app.input = Some(Input {
+                prompt: Prompt::AddBoundary {
+                    index: app.selected,
+                },
+                buffer: String::new(),
+            });
+        }
+        KeyCode::Char('x') => app.apply_op(Operation::RemoveBoundary {
+            boundary: app.selected_boundary(),
+        }),
+        KeyCode::Char('>') => app.apply_op(Operation::MoveBoundary {
+            boundary: app.selected_boundary(),
+            delta: 1,
+        }),
+        KeyCode::Char('<') => app.apply_op(Operation::MoveBoundary {
+            boundary: app.selected_boundary(),
+            delta: -1,
+        }),
+
+        // ---- undo ----
+        KeyCode::Char('u') => app.apply_op(Operation::Undo),
         _ => {}
     }
     Ok(())
 }
 
+fn handle_input_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => app.input = None,
+        KeyCode::Enter => {
+            if let Some(input) = app.input.take() {
+                let name = input.buffer.trim().to_string();
+                if name.is_empty() {
+                    app.status = "name cannot be empty".into();
+                } else {
+                    let op = match input.prompt {
+                        Prompt::Rename { boundary } => Operation::RenameBranch { boundary, name },
+                        Prompt::AddBoundary { index } => Operation::AddBoundary { index, name },
+                    };
+                    app.apply_op(op);
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(input) = app.input.as_mut() {
+                input.buffer.pop();
+            }
+        }
+        KeyCode::Char(c) => {
+            if let Some(input) = app.input.as_mut() {
+                input.buffer.push(c);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.quit = true,
+        _ => app.confirm_quit = false,
+    }
+    Ok(())
+}
+
 fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
-    if app.show_help {
+    // While a modal (help / prompt / quit-guard) is up, ignore the mouse.
+    if app.show_help || app.input.is_some() || app.confirm_quit {
         return Ok(());
     }
     let at = Rect::new(m.column, m.row, 1, 1);
@@ -289,10 +468,17 @@ fn intersects(area: Rect, col: u16, row: u16) -> bool {
 }
 
 fn draw(f: &mut ratatui::Frame, app: &mut App) {
+    // Reserve a one-row footer for prompts / status / hints.
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(f.area());
+    let body = outer[0];
+
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(f.area());
+        .split(body);
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -305,10 +491,39 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     draw_queue(f, app, chunks[0]);
     draw_message(f, app, right[0]);
     draw_diff(f, app, right[1]);
+    draw_footer(f, app, outer[1]);
 
     if app.show_help {
-        draw_help(f, f.area());
+        draw_help(f, body);
     }
+}
+
+/// The footer line: an active prompt, the quit-guard, a status/error message,
+/// or the default key hint — in that priority.
+fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let (text, style) = if let Some(input) = &app.input {
+        (
+            format!("{}: {}\u{2588}", input.prompt.label(), input.buffer),
+            Style::default().fg(Color::Cyan),
+        )
+    } else if app.confirm_quit {
+        (
+            "quit with unsaved operations? [y/N]".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if !app.status.is_empty() {
+        (app.status.clone(), Style::default().fg(Color::Red))
+    } else {
+        (
+            "j/k move  r rename  a add-branch  x dissolve  </> shift  u undo  \
+             C-r redo  ? help  q quit"
+                .to_string(),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+    f.render_widget(Paragraph::new(Span::styled(text, style)), area);
 }
 
 fn pane_block(title: &str, focused: bool) -> Block<'_> {
@@ -400,10 +615,16 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("Tab", "cycle pane focus"),
         ("Ctrl-d / Ctrl-u", "scroll focused pane"),
         ("PgDn / PgUp", "scroll focused pane"),
+        ("r", "rename the selected commit's branch"),
+        ("a", "add a boundary after the selected commit"),
+        ("x", "dissolve the selected commit's branch"),
+        ("< / >", "shift the branch boundary by a commit"),
+        ("u", "undo"),
+        ("Ctrl-r", "redo"),
         ("mouse click", "select commit / focus pane"),
         ("mouse wheel", "scroll pane under cursor"),
         ("?", "toggle this help"),
-        ("q / Esc", "quit"),
+        ("q / Esc", "quit (asks if operations are pending)"),
     ];
     let mut lines = vec![Line::from(Span::styled(
         "git queue tui — keybindings",
@@ -499,10 +720,29 @@ mod tests {
         tmp
     }
 
-    fn app_in(dir: &Path) -> App {
+    /// Build an app over a fresh feature-branch repo and run `f` with the cwd
+    /// lock held for the whole call — `App`'s git reads and every op mutate the
+    /// process cwd, so the lock must span them all.
+    fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> T {
+        let tmp = repo_with_feature_branch();
         let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_current_dir(dir).unwrap();
-        App::new(Engine::load().expect("engine loads")).expect("app builds")
+        std::env::set_current_dir(tmp.path()).unwrap();
+        let mut app = App::new(Engine::load().expect("engine loads")).expect("app builds");
+        f(&mut app)
+    }
+
+    fn press(app: &mut App, c: char) {
+        handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)).unwrap();
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE)).unwrap();
+    }
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            press(app, c);
+        }
     }
 
     fn buffer_text(backend: &TestBackend) -> String {
@@ -514,52 +754,124 @@ mod tests {
             .collect()
     }
 
+    fn boundary_names(app: &App) -> Vec<String> {
+        app.engine
+            .line()
+            .boundaries
+            .iter()
+            .map(|b| b.name.clone())
+            .collect()
+    }
+
     #[test]
     fn renders_the_three_panes_with_queue_message_and_diff() {
-        let tmp = repo_with_feature_branch();
-        let mut app = app_in(tmp.path());
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let text = buffer_text(terminal.backend());
+        with_app(|app| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let text = buffer_text(terminal.backend());
 
-        assert!(text.contains("queue"), "queue pane titled");
-        assert!(text.contains("message"), "message pane titled");
-        assert!(text.contains("diff"), "diff pane titled");
-        assert!(text.contains("feature"), "branch header shown: {text:?}");
-        assert!(
-            text.contains("add feature work"),
-            "commit subject shown in queue/message"
-        );
-        assert!(text.contains("the feature"), "diff content shown");
+            assert!(text.contains("queue"), "queue pane titled");
+            assert!(text.contains("message"), "message pane titled");
+            assert!(text.contains("diff"), "diff pane titled");
+            assert!(text.contains("feature"), "branch header shown: {text:?}");
+            assert!(
+                text.contains("add feature work"),
+                "commit subject shown in queue/message"
+            );
+            assert!(text.contains("the feature"), "diff content shown");
+        });
     }
 
     #[test]
     fn q_quits_and_help_toggles() {
-        let tmp = repo_with_feature_branch();
-        let mut app = app_in(tmp.path());
+        with_app(|app| {
+            press(app, '?');
+            assert!(app.show_help);
+            // Any key dismisses help rather than acting.
+            press(app, 'q');
+            assert!(!app.show_help);
+            assert!(!app.quit, "the key that dismisses help does not also quit");
 
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)).unwrap();
-        assert!(app.show_help);
-        // Any key dismisses help rather than acting.
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)).unwrap();
-        assert!(!app.show_help);
-        assert!(!app.quit, "the key that dismisses help does not also quit");
-
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)).unwrap();
-        assert!(app.quit);
+            press(app, 'q');
+            assert!(app.quit);
+        });
     }
 
     #[test]
     fn j_and_k_move_the_selection() {
-        let tmp = repo_with_feature_branch();
-        let mut app = app_in(tmp.path());
-        assert_eq!(app.selected, 0);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).unwrap();
-        assert_eq!(app.selected, 1);
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)).unwrap();
-        assert_eq!(app.selected, 0);
-        // Can't move above the front.
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)).unwrap();
-        assert_eq!(app.selected, 0);
+        with_app(|app| {
+            assert_eq!(app.selected, 0);
+            press(app, 'j');
+            assert_eq!(app.selected, 1);
+            press(app, 'k');
+            assert_eq!(app.selected, 0);
+            // Can't move above the front.
+            press(app, 'k');
+            assert_eq!(app.selected, 0);
+        });
+    }
+
+    #[test]
+    fn add_boundary_via_prompt_splits_the_branch() {
+        with_app(|app| {
+            assert_eq!(boundary_names(app), vec!["feature"]);
+            // Select the front commit, add a boundary after it.
+            key(app, KeyCode::Char('g'));
+            press(app, 'a');
+            assert!(app.input.is_some(), "prompt opened");
+            type_str(app, "api");
+            key(app, KeyCode::Enter);
+            assert!(app.input.is_none(), "prompt closed after apply");
+            assert!(app.status.is_empty(), "no error: {}", app.status);
+            assert_eq!(boundary_names(app), vec!["api", "feature"]);
+        });
+    }
+
+    #[test]
+    fn quit_guard_prompts_once_operations_are_pending() {
+        with_app(|app| {
+            // Make a change so the undo stack is non-empty.
+            key(app, KeyCode::Char('g'));
+            press(app, 'a');
+            type_str(app, "api");
+            key(app, KeyCode::Enter);
+            assert!(app.engine.has_pending());
+
+            press(app, 'q');
+            assert!(app.confirm_quit, "quitting with pending ops asks first");
+            assert!(!app.quit);
+            // Confirming quits.
+            press(app, 'y');
+            assert!(app.quit);
+        });
+    }
+
+    #[test]
+    fn undo_after_a_boundary_op_restores_the_single_branch() {
+        with_app(|app| {
+            key(app, KeyCode::Char('g'));
+            press(app, 'a');
+            type_str(app, "api");
+            key(app, KeyCode::Enter);
+            assert_eq!(boundary_names(app), vec!["api", "feature"]);
+
+            press(app, 'u'); // undo
+            assert_eq!(boundary_names(app), vec!["feature"]);
+            assert!(!app.engine.has_pending(), "undo emptied the stack");
+        });
+    }
+
+    #[test]
+    fn a_failed_op_surfaces_in_the_status_line() {
+        with_app(|app| {
+            // Adding a boundary after the last commit of the only branch is
+            // rejected (it would leave an empty branch).
+            key(app, KeyCode::Char('G'));
+            press(app, 'a');
+            type_str(app, "api");
+            key(app, KeyCode::Enter);
+            assert!(!app.status.is_empty(), "error shown in status line");
+            assert_eq!(boundary_names(app), vec!["feature"], "nothing changed");
+        });
     }
 }
