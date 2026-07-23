@@ -147,6 +147,19 @@ pub fn commits_between_with_ids(
         .collect())
 }
 
+/// The patch a single commit introduces — its own diff against its parent,
+/// with no colour and no message header. Handles a root commit (no parent).
+/// Used by the TUI diff pane.
+pub fn commit_diff(rev: &str) -> Result<String> {
+    out(&["show", "--no-color", "--format=", "--patch", rev])
+}
+
+/// The full commit message of `rev` (subject + body + trailers). Used by the
+/// TUI message pane.
+pub fn commit_message(rev: &str) -> Result<String> {
+    out(&["show", "--no-patch", "--format=%B", rev])
+}
+
 pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
     let raw = out(&[
         "log",

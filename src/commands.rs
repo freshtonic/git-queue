@@ -450,11 +450,10 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
 
 /// `git queue tui` — open the current queue line in the interactive editor.
 ///
-/// The interactive view is not built yet (this is the engine-scaffold ticket):
-/// the command wires up the subcommand, enforces the non-TTY guard here, and
-/// loads the headless engine — which applies the clean-worktree, empty-queue
-/// and forked-line guards. Once loaded it prints a short summary of the line
-/// so the plumbing is observably wired end to end.
+/// Enforces the non-TTY guard here (the engine is headless and never checks
+/// for a terminal), loads the headless engine — which applies the
+/// clean-worktree, empty-queue and forked-line guards — then hands off to the
+/// ratatui view.
 pub fn tui() -> Result<()> {
     git::ensure_repo()?;
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
@@ -465,19 +464,7 @@ pub fn tui() -> Result<()> {
     }
 
     let engine = Engine::load()?;
-    let line = engine.line();
-
-    println!(
-        "Loaded queue line over `{}`: {} commit(s) across {} branch(es).",
-        line.base,
-        line.commits.len(),
-        line.boundaries.len()
-    );
-    for (i, b) in line.boundaries.iter().enumerate() {
-        println!("  [{}] — {} commit(s)", b.name, line.commits_of(i).len());
-    }
-    println!("(The interactive editor is not built yet.)");
-    Ok(())
+    crate::view::run(engine)
 }
 
 /// Write the queue-edit file, open `$GIT_EDITOR` on it, and parse the result

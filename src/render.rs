@@ -308,9 +308,77 @@ pub fn status_tree(
     out
 }
 
+/// A classified line of a unified diff, so the TUI diff pane can colour
+/// `+`/`-`/hunk lines (ADR: our own colouring, no syntax highlighting) and
+/// render binary changes as a placeholder. The mapping to terminal styles
+/// lives in the view; this classification is pure and unit-tested.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DiffLine {
+    /// An added line (`+…`, but not the `+++` file header).
+    Added,
+    /// A removed line (`-…`, but not the `---` file header).
+    Removed,
+    /// A hunk header (`@@ … @@`).
+    Hunk,
+    /// File-level metadata (`diff --git`, `index`, `--- `, `+++ `, mode and
+    /// rename/copy lines).
+    FileHeader,
+    /// A binary-file change git renders as a placeholder rather than content.
+    Binary,
+    /// An unchanged context line (or anything unrecognised).
+    Context,
+}
+
+/// Classify one raw line of `git show`/`git diff` output. The `---`/`+++`
+/// file headers are matched before the `+`/`-` content cases, so they never
+/// read as removed/added lines.
+pub fn classify_diff_line(line: &str) -> DiffLine {
+    if line.starts_with("@@") {
+        DiffLine::Hunk
+    } else if line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("old mode")
+        || line.starts_with("new mode")
+        || line.starts_with("rename ")
+        || line.starts_with("copy ")
+        || line.starts_with("similarity ")
+        || line.starts_with("dissimilarity ")
+    {
+        DiffLine::FileHeader
+    } else if line.starts_with("Binary files") || line.starts_with("GIT binary patch") {
+        DiffLine::Binary
+    } else if line.starts_with('+') {
+        DiffLine::Added
+    } else if line.starts_with('-') {
+        DiffLine::Removed
+    } else {
+        DiffLine::Context
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_diff_lines_headers_before_content() {
+        use DiffLine::*;
+        assert_eq!(classify_diff_line("@@ -1,3 +1,4 @@ fn main"), Hunk);
+        assert_eq!(classify_diff_line("diff --git a/x b/x"), FileHeader);
+        assert_eq!(classify_diff_line("index 0000..1111 100644"), FileHeader);
+        // The file headers must win over the +/- content rules.
+        assert_eq!(classify_diff_line("--- a/x"), FileHeader);
+        assert_eq!(classify_diff_line("+++ b/x"), FileHeader);
+        assert_eq!(classify_diff_line("new file mode 100644"), FileHeader);
+        assert_eq!(classify_diff_line("+added line"), Added);
+        assert_eq!(classify_diff_line("-removed line"), Removed);
+        assert_eq!(classify_diff_line(" context"), Context);
+        assert_eq!(classify_diff_line("Binary files a/i.png and b/i.png differ"), Binary);
+    }
 
     #[test]
     fn strips_prior_number_prefix() {

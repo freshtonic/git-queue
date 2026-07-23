@@ -69,6 +69,42 @@ impl EditableLine {
         };
         &self.commits[start..self.boundaries[index].end]
     }
+
+    /// The boundary (branch) that owns the commit at `commit_index`.
+    pub fn boundary_of(&self, commit_index: usize) -> usize {
+        self.boundaries
+            .iter()
+            .position(|b| commit_index < b.end)
+            .unwrap_or(self.boundaries.len().saturating_sub(1))
+    }
+
+    /// The queue pane's rows, front (top) → tip (bottom): each branch header
+    /// followed by the commits it owns. Pure, so ordering is unit-tested
+    /// without a repo.
+    pub fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for (b, boundary) in self.boundaries.iter().enumerate() {
+            rows.push(Row::Branch { boundary: b });
+            let start = if b == 0 {
+                0
+            } else {
+                self.boundaries[b - 1].end
+            };
+            for index in start..boundary.end {
+                rows.push(Row::Commit { index });
+            }
+        }
+        rows
+    }
+}
+
+/// A row of the queue pane, indexing back into an [`EditableLine`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Row {
+    /// A branch header — the boundary at this index in `boundaries`.
+    Branch { boundary: usize },
+    /// A commit — at this index in `commits`.
+    Commit { index: usize },
 }
 
 /// An edit expressed as data. The view produces these from user input; the
@@ -206,5 +242,59 @@ impl Engine {
     /// only establishes the seam; later tickets implement each in turn.
     pub fn apply(&mut self, op: Operation) -> Result<()> {
         bail!("operation not yet supported: {op:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn commit(subject: &str) -> Commit {
+        Commit {
+            sha: subject.into(),
+            id: None,
+            subject: subject.into(),
+        }
+    }
+
+    /// Two branches: `a` owns commits 0,1; `b` owns commit 2.
+    fn sample() -> EditableLine {
+        EditableLine {
+            base: "main".into(),
+            commits: vec![commit("c0"), commit("c1"), commit("c2")],
+            boundaries: vec![
+                Boundary {
+                    name: "a".into(),
+                    end: 2,
+                },
+                Boundary {
+                    name: "b".into(),
+                    end: 3,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn rows_interleave_branch_headers_front_to_tip() {
+        let line = sample();
+        assert_eq!(
+            line.rows(),
+            vec![
+                Row::Branch { boundary: 0 },
+                Row::Commit { index: 0 },
+                Row::Commit { index: 1 },
+                Row::Branch { boundary: 1 },
+                Row::Commit { index: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn boundary_of_maps_commits_to_their_branch() {
+        let line = sample();
+        assert_eq!(line.boundary_of(0), 0);
+        assert_eq!(line.boundary_of(1), 0);
+        assert_eq!(line.boundary_of(2), 1);
     }
 }

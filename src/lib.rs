@@ -9,6 +9,7 @@ mod meta;
 mod queue;
 mod render;
 mod requeue;
+mod view;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
