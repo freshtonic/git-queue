@@ -550,6 +550,52 @@ pub fn rebase_with_todo_message(
     bail!("the reword did not apply cleanly");
 }
 
+/// Like [`rebase_with_todo_stop`] but also supplies the combined commit message
+/// (for a todo containing a `squash`). Stops at a conflict (ADR-0002): on the
+/// resolve path the user's own git supplies the message when they continue.
+pub fn rebase_squash_stop(
+    base: &str,
+    top_branch: &str,
+    todo: &str,
+    message: &str,
+) -> Result<Rewrite> {
+    let git_dir = out(&["rev-parse", "--git-dir"])?;
+    let dir = std::path::Path::new(&git_dir);
+    let todo_path = dir.join("git-queue-todo");
+    let msg_path = dir.join("git-queue-msg");
+    std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
+    std::fs::write(&msg_path, message).context("failed to stage the commit message")?;
+
+    let seq_editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
+    let msg_editor = format!("cp {}", shell_single_quote(&msg_path.to_string_lossy()));
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "rebase",
+        "-i",
+        "--update-refs",
+        "--empty=keep",
+        "--onto",
+        base,
+        base,
+        top_branch,
+    ]);
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env(GUARD_ENV, "1")
+        .env("GIT_SEQUENCE_EDITOR", seq_editor)
+        .env("GIT_EDITOR", msg_editor);
+    let status = cmd.status().context("failed to spawn `git rebase`")?;
+    let _ = std::fs::remove_file(&todo_path);
+    let _ = std::fs::remove_file(&msg_path);
+    if status.success() {
+        Ok(Rewrite::Clean)
+    } else if rebase_in_progress() {
+        Ok(Rewrite::Conflict)
+    } else {
+        bail!("the squash could not start (no rebase in progress)");
+    }
+}
+
 /// Abort an in-progress rebase, returning refs to their pre-rebase state.
 pub fn rebase_abort() -> Result<()> {
     let mut cmd = Command::new("git");

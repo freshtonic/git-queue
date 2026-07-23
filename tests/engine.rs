@@ -505,6 +505,72 @@ fn a_conflicting_delete_can_be_undone() {
     assert_eq!(sha(dir, "a"), a_before, "repo restored after undo");
 }
 
+#[test]
+fn squash_keeps_the_older_id_and_combines_descriptions() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "older body");
+    queue_commit(dir, "b.txt", "newer body");
+
+    with_engine(dir, |e| {
+        let older_id = e.line().commits[0].id.clone();
+        assert!(older_id.is_some());
+        assert_eq!(
+            e.apply(Operation::Squash {
+                index: 1,
+                message: None,
+            })
+            .unwrap(),
+            Applied::Done
+        );
+        assert_eq!(e.line().commits.len(), 1, "folded into one commit");
+        assert_eq!(e.line().commits[0].id, older_id, "older commit's id kept");
+    });
+
+    let msg = git_out(dir, &["show", "-s", "--format=%B", "a"]);
+    assert!(
+        msg.contains("older body") && msg.contains("newer body"),
+        "combined description: {msg}"
+    );
+    let files = git_out(dir, &["ls-tree", "-r", "--name-only", "a"]);
+    assert!(
+        files.contains("a.txt") && files.contains("b.txt"),
+        "both changes present: {files}"
+    );
+}
+
+#[test]
+fn cross_boundary_squash_lands_in_the_older_branch_and_empties_the_newer() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "a body");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "b.txt", "b body");
+
+    with_engine(dir, |e| {
+        assert_eq!(names(e), vec!["a", "b"]);
+        let a_id = e.line().commits[0].id.clone();
+        // Squash b's only commit into a's tip.
+        assert_eq!(
+            e.apply(Operation::Squash {
+                index: 1,
+                message: None,
+            })
+            .unwrap(),
+            Applied::Done
+        );
+        assert_eq!(e.line().commits_of(0).len(), 1, "a owns the combined commit");
+        assert_eq!(e.line().commits[0].id, a_id, "older branch's id kept");
+        assert_eq!(e.empty_branches(), vec![1], "b emptied — dissolve offered");
+
+        e.apply(Operation::RemoveBoundary { boundary: 1 }).unwrap();
+        assert_eq!(names(e), vec!["a"]);
+    });
+    assert!(!branch_exists(dir, "b"));
+}
+
 /// A branch whose middle commit, when reordered, textually conflicts with the
 /// one it crosses. c0 lays down three lines; c1 and c2 both edit line 2.
 fn conflicting_reorder_repo() -> TempDir {

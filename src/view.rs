@@ -62,6 +62,23 @@ struct Input {
     buffer: String,
 }
 
+/// What an in-progress message edit will do when applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MsgTarget {
+    /// Reword the selected commit.
+    Reword,
+    /// Squash the commit at `index` into its older neighbour, using the edited
+    /// text as the combined description.
+    Squash { index: usize },
+}
+
+/// An in-progress message edit: a buffer plus what applying it will do.
+#[derive(Debug, Clone)]
+struct MsgEdit {
+    buffer: String,
+    target: MsgTarget,
+}
+
 /// The view's mutable state over one engine session.
 struct App {
     engine: Engine,
@@ -86,10 +103,9 @@ struct App {
     confirm_quit: bool,
     /// Showing the "conflict — resolve or undo?" prompt.
     conflict_prompt: bool,
-    /// The editable message buffer, when the message pane is being edited. The
-    /// reword applies only on an explicit action; this is dirty when it differs
-    /// from `message`.
-    msg_edit: Option<String>,
+    /// The editable message buffer and its target, when the message pane is
+    /// being edited. Applies only on an explicit action (Ctrl-S).
+    msg_edit: Option<MsgEdit>,
     /// Showing the "apply / discard your message edit?" prompt (raised when
     /// leaving the editor with an unapplied buffer).
     msg_apply_discard: bool,
@@ -183,30 +199,77 @@ impl App {
 
     /// Begin editing the selected commit's message in a local buffer.
     fn start_message_edit(&mut self) {
-        self.msg_edit = Some(self.message.clone());
+        self.msg_edit = Some(MsgEdit {
+            buffer: self.message.clone(),
+            target: MsgTarget::Reword,
+        });
         self.focus = Pane::Message;
     }
 
-    /// Whether the edit buffer differs from the committed message.
+    /// Whether a reword edit buffer differs from the committed message. A squash
+    /// edit is never "dirty" — leaving it simply cancels the pending squash.
     fn message_dirty(&self) -> bool {
-        self.msg_edit.as_ref().is_some_and(|b| b != &self.message)
+        self.msg_edit
+            .as_ref()
+            .is_some_and(|e| e.target == MsgTarget::Reword && e.buffer != self.message)
     }
 
-    /// Apply the buffered message as a reword. Keeps the buffer on error so the
-    /// user can retry; clears it on success.
-    fn apply_reword(&mut self) {
-        let Some(buffer) = self.msg_edit.clone() else {
+    /// Apply the buffered message edit (reword or squash). Keeps a reword buffer
+    /// on error so the user can retry; clears it on success.
+    fn apply_message_edit(&mut self) {
+        let Some(edit) = self.msg_edit.clone() else {
             return;
         };
-        match self.engine.apply(Operation::Reword {
-            index: self.selected,
-            message: buffer,
-        }) {
-            Ok(_) => {
+        match edit.target {
+            MsgTarget::Reword => match self.engine.apply(Operation::Reword {
+                index: self.selected,
+                message: edit.buffer,
+            }) {
+                Ok(_) => {
+                    self.msg_edit = None;
+                    self.msg_apply_discard = false;
+                    self.after_change();
+                }
+                Err(e) => self.status = format!("{e:#}"),
+            },
+            MsgTarget::Squash { index } => {
                 self.msg_edit = None;
                 self.msg_apply_discard = false;
-                self.after_change();
+                self.apply_squash(index, Some(edit.buffer));
             }
+        }
+    }
+
+    /// Squash the selected commit into its older neighbour, prompting for a
+    /// combined message first when both descriptions are non-empty.
+    fn squash_selected(&mut self) {
+        if self.selected == 0 {
+            self.status = "the front commit has nothing older to squash into".into();
+            return;
+        }
+        let index = self.selected;
+        match self.engine.squash_needs_message(index) {
+            Ok(true) => {
+                let buffer = self.engine.squash_default_message(index).unwrap_or_default();
+                self.msg_edit = Some(MsgEdit {
+                    buffer,
+                    target: MsgTarget::Squash { index },
+                });
+                self.focus = Pane::Message;
+            }
+            Ok(false) => self.apply_squash(index, None),
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    fn apply_squash(&mut self, index: usize, message: Option<String>) {
+        match self.engine.apply(Operation::Squash { index, message }) {
+            Ok(Applied::Done) => {
+                self.selected = index - 1; // follow the combined commit
+                self.after_change();
+                self.check_dissolve();
+            }
+            Ok(Applied::Conflict) => self.conflict_prompt = true,
             Err(e) => self.status = format!("{e:#}"),
         }
     }
@@ -413,27 +476,27 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 fn handle_msg_edit_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('s') if ctrl => app.apply_reword(),
+        KeyCode::Char('s') if ctrl => app.apply_message_edit(),
         KeyCode::Esc => {
             if app.message_dirty() {
                 app.msg_apply_discard = true;
             } else {
-                app.msg_edit = None;
+                app.msg_edit = None; // clean reword, or cancel a squash
             }
         }
         KeyCode::Enter => {
-            if let Some(b) = app.msg_edit.as_mut() {
-                b.push('\n');
+            if let Some(e) = app.msg_edit.as_mut() {
+                e.buffer.push('\n');
             }
         }
         KeyCode::Backspace => {
-            if let Some(b) = app.msg_edit.as_mut() {
-                b.pop();
+            if let Some(e) = app.msg_edit.as_mut() {
+                e.buffer.pop();
             }
         }
         KeyCode::Char(c) => {
-            if let Some(b) = app.msg_edit.as_mut() {
-                b.push(c);
+            if let Some(e) = app.msg_edit.as_mut() {
+                e.buffer.push(c);
             }
         }
         _ => {}
@@ -445,7 +508,7 @@ fn handle_msg_edit_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 /// edits.
 fn handle_msg_prompt_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Char('a') | KeyCode::Char('y') => app.apply_reword(),
+        KeyCode::Char('a') | KeyCode::Char('y') => app.apply_message_edit(),
         KeyCode::Char('d') | KeyCode::Char('n') => {
             app.msg_edit = None;
             app.msg_apply_discard = false;
@@ -499,6 +562,7 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
             });
         }
         KeyCode::Char('e') => app.start_message_edit(),
+        KeyCode::Char('s') => app.squash_selected(),
         KeyCode::Char('D') => app.delete_selected(),
         KeyCode::Char('x') => app.apply_op(Operation::RemoveBoundary {
             boundary: app.selected_boundary(),
@@ -777,8 +841,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  J/K reorder  e message  D delete  r rename  a add-branch  \
-             x dissolve  </> shift  u undo  C-r redo  ? help  q quit"
+            "j/k move  J/K reorder  e message  s squash  D delete  r rename  \
+             a add-branch  x dissolve  </> shift  u undo  C-r redo  ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -848,7 +912,13 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 fn draw_message(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let (title, body, scroll) = match &app.msg_edit {
         // A block cursor marks the edit point (buffer end).
-        Some(buffer) => ("message*", format!("{buffer}\u{2588}"), 0),
+        Some(edit) => {
+            let title = match edit.target {
+                MsgTarget::Reword => "message*",
+                MsgTarget::Squash { .. } => "squash message*",
+            };
+            (title, format!("{}\u{2588}", edit.buffer), 0)
+        }
         None => ("message", app.message.clone(), app.msg_scroll),
     };
     let editing = app.msg_edit.is_some();
@@ -890,6 +960,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("PgDn / PgUp", "scroll focused pane"),
         ("J / K", "reorder the selected commit down / up"),
         ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
+        ("s", "squash into the older neighbour"),
         ("D", "delete the selected commit"),
         ("r", "rename the selected commit's branch"),
         ("a", "add a boundary after the selected commit"),
@@ -1319,7 +1390,10 @@ mod tests {
             press(app, 'e');
             assert!(app.msg_edit.is_some(), "entered edit mode");
             // The user rewrites the whole message.
-            app.msg_edit = Some("a brand new subject".into());
+            app.msg_edit = Some(MsgEdit {
+                buffer: "a brand new subject".into(),
+                target: MsgTarget::Reword,
+            });
             ctrl(app, 's'); // apply
             assert!(app.msg_edit.is_none(), "applied and left edit mode");
             assert!(app.status.is_empty(), "no error: {}", app.status);
@@ -1366,6 +1440,44 @@ mod tests {
             key(app, KeyCode::Esc);
             assert!(app.msg_edit.is_none(), "left edit mode directly");
             assert!(!app.msg_apply_discard);
+        });
+    }
+
+    #[test]
+    fn squashing_the_front_commit_is_rejected() {
+        with_app(|app| {
+            key(app, KeyCode::Char('g')); // front commit
+            press(app, 's');
+            assert!(app.msg_edit.is_none());
+            assert!(!app.status.is_empty(), "reports there is nothing older");
+        });
+    }
+
+    #[test]
+    fn squash_prompts_for_a_combined_message_then_folds() {
+        with_app(|app| {
+            let before = app.commit_count();
+            key(app, KeyCode::Char('G')); // last commit
+            press(app, 's');
+            assert!(app.msg_edit.is_some(), "combined-message prompt opened");
+            ctrl(app, 's'); // apply with the default combined message
+            assert!(app.msg_edit.is_none());
+            assert!(app.status.is_empty(), "no error: {}", app.status);
+            assert_eq!(app.commit_count(), before - 1, "folded into one commit");
+            assert_eq!(app.selected, 0, "selection follows the combined commit");
+        });
+    }
+
+    #[test]
+    fn cross_boundary_squash_offers_to_dissolve_the_emptied_branch() {
+        with_app_over(repo_with_two_branches(), |app| {
+            key(app, KeyCode::Char('G')); // b's only commit
+            press(app, 's');
+            assert!(app.msg_edit.is_some());
+            ctrl(app, 's'); // squash into a
+            assert_eq!(app.dissolve_prompt, Some(1), "b emptied, dissolve offered");
+            press(app, 'y');
+            assert_eq!(boundary_names(app), vec!["a"]);
         });
     }
 }

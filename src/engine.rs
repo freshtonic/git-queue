@@ -135,8 +135,13 @@ pub enum Operation {
     /// reassigning it to whichever branch's run it lands in.
     Reorder { from: usize, to: usize },
     /// Squash the commit at `index` into its adjacent, older (front-ward)
-    /// neighbour.
-    Squash { index: usize },
+    /// neighbour. `message` is the combined description when the caller
+    /// prompted for one (both were non-empty); `None` lets the engine pick the
+    /// non-empty side or concatenate.
+    Squash {
+        index: usize,
+        message: Option<String>,
+    },
     /// Split the commit at `index` into two pieces (line-level selection is
     /// carried by the view; repeatable for N pieces).
     Split { index: usize },
@@ -412,6 +417,7 @@ impl Engine {
                 Ok(Applied::Done)
             }
             Operation::Delete { index } => self.delete(index),
+            Operation::Squash { index, message } => self.squash(index, message.as_deref()),
             Operation::Undo => {
                 self.undo()?;
                 Ok(Applied::Done)
@@ -564,6 +570,76 @@ impl Engine {
     /// The branch name at `boundary`.
     pub fn branch_name(&self, boundary: usize) -> &str {
         &self.line.boundaries[boundary].name
+    }
+
+    // ---- squash (history-rewriting) ----
+
+    /// Whether squashing the commit at `index` into its older neighbour needs a
+    /// combined-message prompt — true only when *both* descriptions are
+    /// non-empty (otherwise the non-empty side is used, or the result is empty).
+    pub fn squash_needs_message(&self, index: usize) -> Result<bool> {
+        if index == 0 || index >= self.line.commits.len() {
+            bail!("no older commit to squash into");
+        }
+        let older = message_body(&self.line.commits[index - 1].sha)?;
+        let newer = message_body(&self.line.commits[index].sha)?;
+        Ok(!older.trim().is_empty() && !newer.trim().is_empty())
+    }
+
+    /// The default combined description shown in the squash prompt: the older
+    /// body then the newer, blank line between (each without its id trailer).
+    pub fn squash_default_message(&self, index: usize) -> Result<String> {
+        if index == 0 || index >= self.line.commits.len() {
+            bail!("no older commit to squash into");
+        }
+        Ok(combine_bodies(
+            &message_body(&self.line.commits[index - 1].sha)?,
+            &message_body(&self.line.commits[index].sha)?,
+        ))
+    }
+
+    /// Squash the commit at `index` into its adjacent older neighbour. The
+    /// older commit keeps its Stable-Commit-Id; the newer is absorbed. A
+    /// cross-boundary squash lands the result in the older branch and may empty
+    /// the newer one (see [`Engine::empty_branches`]).
+    fn squash(&mut self, index: usize, message: Option<&str>) -> Result<Applied> {
+        if index == 0 {
+            bail!("the front commit has no older neighbour to squash into");
+        }
+        if index >= self.line.commits.len() {
+            bail!("squash index out of range");
+        }
+        // Combined body: the caller's trimmed text, else the non-empty side or
+        // a concatenation; then the older commit's id, preserved.
+        let body = match message {
+            Some(m) => m.to_string(),
+            None => combine_bodies(
+                &message_body(&self.line.commits[index - 1].sha)?,
+                &message_body(&self.line.commits[index].sha)?,
+            ),
+        };
+        let final_message = with_preserved_id(&body, self.line.commits[index - 1].id.as_deref());
+
+        let todo = squash_todo(&self.line, index);
+        let snap = self.snapshot()?;
+        let base = self.line.base.clone();
+        let top = self.line.boundaries.last().unwrap().name.clone();
+        let land = self.current.clone();
+        match git::rebase_squash_stop(&base, &top, &todo, &final_message)? {
+            git::Rewrite::Clean => {
+                self.finish_rewrite(&land)?;
+                self.auto_drop_empties(&land)?;
+                self.undo.push(snap);
+                self.redo.clear();
+                self.touched = true;
+                Ok(Applied::Done)
+            }
+            git::Rewrite::Conflict => {
+                self.pending_conflict = Some(snap);
+                self.touched = true;
+                Ok(Applied::Conflict)
+            }
+        }
     }
 
     // ---- reword (message-only rewrite) ----
@@ -953,6 +1029,65 @@ fn drop_todo(line: &EditableLine, drop: &HashSet<usize>) -> String {
     lines.join("\n") + "\n"
 }
 
+/// Build the rebase todo for `squash(index)`: the line's picks front → tip with
+/// the target marked `squash` so it folds into the previous commit. For a
+/// cross-boundary squash the older branch's `update-ref` is deferred to *after*
+/// the squash line, so that branch captures the combined commit (and the newer
+/// branch may end up empty). Pure; unit-tested.
+fn squash_todo(line: &EditableLine, index: usize) -> String {
+    let commits = &line.commits;
+    let last = line.boundaries.len() - 1;
+    let mut ref_after: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (bi, b) in line.boundaries.iter().enumerate() {
+        if bi != last {
+            ref_after.insert(b.end - 1, b.name.as_str());
+        }
+    }
+    let cross = line.boundary_of(index - 1) != line.boundary_of(index);
+
+    let mut lines: Vec<String> = Vec::new();
+    for (i, c) in commits.iter().enumerate() {
+        let verb = if i == index { "squash" } else { "pick" };
+        lines.push(format!("{verb} {} {}", c.sha, c.subject));
+        if let Some(name) = ref_after.get(&i) {
+            // Defer the older branch's ref past the squash so it lands there.
+            if !(cross && i == index - 1) {
+                lines.push(format!("update-ref refs/heads/{name}"));
+            }
+        }
+        if cross && i == index {
+            if let Some(name) = ref_after.get(&(index - 1)) {
+                lines.push(format!("update-ref refs/heads/{name}"));
+            }
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
+/// A commit's message with its `Stable-Commit-Id` trailer lines removed and
+/// surrounding whitespace trimmed — the human-authored description.
+fn message_body(sha: &str) -> Result<String> {
+    let prefix = format!("{}:", ident::TRAILER);
+    let msg = git::commit_message(sha)?;
+    Ok(msg
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(&prefix))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string())
+}
+
+/// Combine two descriptions for a squash: the non-empty one when only one has
+/// text, else both with a blank line between.
+fn combine_bodies(older: &str, newer: &str) -> String {
+    match (older.trim(), newer.trim()) {
+        ("", n) => n.to_string(),
+        (o, "") => o.to_string(),
+        (o, n) => format!("{o}\n\n{n}"),
+    }
+}
+
 /// The final reword message: the user's text with any `Stable-Commit-Id` lines
 /// stripped, then the original id re-appended as the sole trailer — so the
 /// change keeps its identity no matter how the user edited the pane. A commit
@@ -1076,6 +1211,34 @@ mod tests {
             todo,
             "pick c0 c0\nupdate-ref refs/heads/a\npick c2 c2\n"
         );
+    }
+
+    #[test]
+    fn squash_todo_same_branch_folds_into_the_previous_pick() {
+        // Squash c1 into c0 (both in a): a's update-ref stays after the squash.
+        let todo = squash_todo(&sample(), 1);
+        assert_eq!(
+            todo,
+            "pick c0 c0\nsquash c1 c1\nupdate-ref refs/heads/a\npick c2 c2\n"
+        );
+    }
+
+    #[test]
+    fn squash_todo_across_a_boundary_defers_the_older_ref() {
+        // Squash c2 (b) into c1 (a's tip): a's update-ref moves past the squash
+        // so a captures the combined commit; b (leaf) ends up empty.
+        let todo = squash_todo(&sample(), 2);
+        assert_eq!(
+            todo,
+            "pick c0 c0\npick c1 c1\nsquash c2 c2\nupdate-ref refs/heads/a\n"
+        );
+    }
+
+    #[test]
+    fn combine_bodies_picks_the_nonempty_side_or_joins() {
+        assert_eq!(combine_bodies("older", "newer"), "older\n\nnewer");
+        assert_eq!(combine_bodies("", "newer"), "newer");
+        assert_eq!(combine_bodies("older", ""), "older");
     }
 
     #[test]
