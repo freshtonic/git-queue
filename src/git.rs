@@ -160,6 +160,17 @@ pub fn commit_message(rev: &str) -> Result<String> {
     out(&["show", "--no-patch", "--format=%B", rev])
 }
 
+/// git's canonical empty tree object — the parent stand-in for a root commit.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// True if `rev` introduces no change: its tree equals its (first) parent's,
+/// or — for a root commit — the empty tree.
+pub fn commit_is_empty(rev: &str) -> bool {
+    let parent = out(&["rev-parse", "--verify", "--quiet", &format!("{rev}^")])
+        .unwrap_or_else(|_| EMPTY_TREE.to_string());
+    ok(&["diff", "--quiet", &parent, rev])
+}
+
 pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
     let raw = out(&[
         "log",

@@ -93,6 +93,8 @@ struct App {
     /// Showing the "apply / discard your message edit?" prompt (raised when
     /// leaving the editor with an unapplied buffer).
     msg_apply_discard: bool,
+    /// A branch (boundary index) left empty by a delete, offered for dissolve.
+    dissolve_prompt: Option<usize>,
     /// Set when the user chose to resolve a conflict in the shell: quit without
     /// the normal exit summary and print resolution instructions instead.
     suspend: bool,
@@ -122,6 +124,7 @@ impl App {
             conflict_prompt: false,
             msg_edit: None,
             msg_apply_discard: false,
+            dissolve_prompt: None,
             suspend: false,
             status: String::new(),
             quit: false,
@@ -143,6 +146,26 @@ impl App {
             Ok(Applied::Conflict) => self.conflict_prompt = true,
             Err(e) => self.status = format!("{e:#}"),
         }
+    }
+
+    /// Delete the selected commit; on success, offer to dissolve any branch it
+    /// emptied.
+    fn delete_selected(&mut self) {
+        match self.engine.apply(Operation::Delete {
+            index: self.selected,
+        }) {
+            Ok(Applied::Done) => {
+                self.after_change();
+                self.check_dissolve();
+            }
+            Ok(Applied::Conflict) => self.conflict_prompt = true,
+            Err(e) => self.status = format!("{e:#}"),
+        }
+    }
+
+    /// Raise the dissolve prompt if a branch is now empty.
+    fn check_dissolve(&mut self) {
+        self.dissolve_prompt = self.engine.empty_branches().into_iter().next();
     }
 
     /// Reorder the selected commit to `to`, following it with the selection.
@@ -367,6 +390,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     if app.conflict_prompt {
         return handle_conflict_key(app, key);
     }
+    if app.dissolve_prompt.is_some() {
+        return handle_dissolve_key(app, key);
+    }
     if app.msg_apply_discard {
         return handle_msg_prompt_key(app, key);
     }
@@ -473,6 +499,7 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
             });
         }
         KeyCode::Char('e') => app.start_message_edit(),
+        KeyCode::Char('D') => app.delete_selected(),
         KeyCode::Char('x') => app.apply_op(Operation::RemoveBoundary {
             boundary: app.selected_boundary(),
         }),
@@ -544,6 +571,27 @@ fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     Ok(())
 }
 
+/// The dissolve choice for a branch a delete left empty.
+fn handle_dissolve_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    let Some(boundary) = app.dissolve_prompt else {
+        return Ok(());
+    };
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+            app.dissolve_prompt = None;
+            match app.engine.apply(Operation::RemoveBoundary { boundary }) {
+                Ok(_) => {
+                    app.after_change();
+                    app.check_dissolve(); // a delete may have emptied more than one
+                }
+                Err(e) => app.status = format!("{e:#}"),
+            }
+        }
+        _ => app.dissolve_prompt = None, // keep the empty branch
+    }
+    Ok(())
+}
+
 /// The resolve-or-undo choice after a conflicting operation.
 fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     match key.code {
@@ -574,6 +622,7 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
         || app.confirm_quit
         || app.conflict_prompt
         || app.msg_edit.is_some()
+        || app.dissolve_prompt.is_some()
     {
         return Ok(());
     }
@@ -687,6 +736,19 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
+    } else if let Some(b) = app.dissolve_prompt {
+        let name = app.engine.branch_name(b).to_string();
+        let pr = app
+            .engine
+            .pr_of(b)
+            .map(|n| format!(" (has open PR #{n})"))
+            .unwrap_or_default();
+        (
+            format!("branch `{name}` is now empty{pr} — dissolve it? [y/N]"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
     } else if app.msg_apply_discard {
         (
             "unapplied message edit — [a]pply / [d]iscard / Esc cancel".to_string(),
@@ -715,8 +777,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  J/K reorder  e message  r rename  a add-branch  x dissolve  \
-             </> shift  u undo  C-r redo  ? help  q quit"
+            "j/k move  J/K reorder  e message  D delete  r rename  a add-branch  \
+             x dissolve  </> shift  u undo  C-r redo  ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -757,10 +819,17 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     Some(id) => id.chars().take(10).collect::<String>(),
                     None => "(no id)".to_string(),
                 };
-                ListItem::new(Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!("  {id:<10} "), Style::default().fg(Color::Blue)),
                     Span::raw(c.subject.clone()),
-                ]))
+                ];
+                if c.empty {
+                    spans.push(Span::styled(
+                        "  (empty)",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
             }
         })
         .collect();
@@ -821,6 +890,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("PgDn / PgUp", "scroll focused pane"),
         ("J / K", "reorder the selected commit down / up"),
         ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
+        ("D", "delete the selected commit"),
         ("r", "rename the selected commit's branch"),
         ("a", "add a boundary after the selected commit"),
         ("x", "dissolve the selected commit's branch"),
@@ -900,6 +970,35 @@ mod tests {
             .unwrap()
             .success();
         assert!(ok, "git {args:?} failed");
+    }
+
+    /// A two-branch tracked queue (`a` ← `b`), built via the real binary.
+    fn repo_with_two_branches() -> tempfile::TempDir {
+        use assert_cmd::Command as Bin;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "t@example.com"]);
+        git(dir, &["config", "user.name", "T"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        git(dir, &["add", "seed.txt"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+        let bin = |args: &[&str]| {
+            Bin::cargo_bin("git-queue")
+                .unwrap()
+                .current_dir(dir)
+                .args(args)
+                .assert()
+                .success();
+        };
+        for (branch, file) in [("a", "a.txt"), ("b", "b.txt")] {
+            bin(&["create", branch]);
+            std::fs::write(dir.join(file), file).unwrap();
+            git(dir, &["add", file]);
+            bin(&["commit", "-m", &format!("{branch} work")]);
+        }
+        tmp
     }
 
     /// A repo on an untracked `feature` branch with two commits — loads as one
@@ -1174,6 +1273,43 @@ mod tests {
 
     fn ctrl(app: &mut App, c: char) {
         handle_key(app, KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)).unwrap();
+    }
+
+    #[test]
+    fn shift_d_deletes_the_selected_commit() {
+        with_app(|app| {
+            let before = app.commit_count();
+            key(app, KeyCode::Char('g')); // front commit
+            press(app, 'D');
+            assert!(app.status.is_empty(), "no error: {}", app.status);
+            assert_eq!(app.commit_count(), before - 1, "one commit removed");
+        });
+    }
+
+    #[test]
+    fn deleting_a_branches_last_commit_offers_dissolve() {
+        with_app_over(repo_with_two_branches(), |app| {
+            assert_eq!(boundary_names(app), vec!["a", "b"]);
+            key(app, KeyCode::Char('G')); // b's commit (the tip)
+            press(app, 'D');
+            assert_eq!(app.dissolve_prompt, Some(1), "b emptied — dissolve offered");
+
+            press(app, 'y'); // dissolve
+            assert!(app.dissolve_prompt.is_none());
+            assert_eq!(boundary_names(app), vec!["a"]);
+        });
+    }
+
+    #[test]
+    fn declining_dissolve_keeps_the_empty_branch() {
+        with_app_over(repo_with_two_branches(), |app| {
+            key(app, KeyCode::Char('G'));
+            press(app, 'D');
+            assert_eq!(app.dissolve_prompt, Some(1));
+            press(app, 'n'); // keep it
+            assert!(app.dissolve_prompt.is_none());
+            assert_eq!(boundary_names(app), vec!["a", "b"], "b kept, now empty");
+        });
     }
 
     #[test]

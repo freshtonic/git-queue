@@ -98,6 +98,17 @@ fn write_commit(dir: &Path, file: &str, content: &str, msg: &str) {
     queue(dir).args(["commit", "-m", msg]).assert().success();
 }
 
+/// Record an empty commit on the current branch (optionally message-less).
+fn empty_commit(dir: &Path, message: &str, allow_empty_message: bool) {
+    let mut args = vec!["commit", "--allow-empty", "-q"];
+    if allow_empty_message {
+        args.push("--allow-empty-message");
+    }
+    args.push("-m");
+    args.push(message);
+    git(dir, &args);
+}
+
 fn rebase_active(dir: &Path) -> bool {
     dir.join(".git/rebase-merge").exists() || dir.join(".git/rebase-apply").exists()
 }
@@ -386,6 +397,112 @@ fn reword_preserves_ids_rebases_descendants_and_is_undoable() {
     });
 
     assert_eq!(sha(dir, "b"), b_tip_before, "undo restored b's exact tip");
+}
+
+#[test]
+fn delete_removes_a_commit_rebases_descendants_and_is_undoable() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f0.txt", "zero");
+    queue_commit(dir, "f1.txt", "one");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "f2.txt", "two");
+    let b_before = sha(dir, "b");
+
+    with_engine(dir, |e| {
+        assert_eq!(
+            e.apply(Operation::Delete { index: 1 }).unwrap(),
+            Applied::Done
+        );
+        let subjects: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["zero", "two"], "commit 'one' removed");
+        assert_ne!(sha(dir, "b"), b_before, "descendant branch b rebased");
+
+        e.apply(Operation::Undo).unwrap();
+        let restored: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(restored, vec!["zero", "one", "two"]);
+    });
+    assert_eq!(sha(dir, "b"), b_before, "undo restored b exactly");
+}
+
+#[test]
+fn deleting_a_branches_only_commit_empties_it_for_dissolve() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "a.txt", "a-commit");
+    queue(dir).args(["create", "b"]).assert().success();
+    queue_commit(dir, "b.txt", "b-commit");
+
+    with_engine(dir, |e| {
+        // Delete b's only commit.
+        e.apply(Operation::Delete { index: 1 }).unwrap();
+        assert_eq!(e.empty_branches(), vec![1], "b is now empty");
+
+        // Dissolve it.
+        e.apply(Operation::RemoveBoundary { boundary: 1 }).unwrap();
+        assert_eq!(names(e), vec!["a"]);
+    });
+    assert!(!branch_exists(dir, "b"));
+}
+
+#[test]
+fn an_empty_described_commit_is_kept_and_marked_empty() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f0.txt", "real");
+    empty_commit(dir, "marker", false); // empty but described
+
+    with_engine(dir, |e| {
+        assert_eq!(e.line().commits.len(), 2);
+        assert!(e.line().commits[1].empty && e.line().commits[1].described());
+
+        // Deleting the real commit must not auto-drop the described empty.
+        e.apply(Operation::Delete { index: 0 }).unwrap();
+        assert_eq!(e.line().commits.len(), 1, "the described empty survives");
+        assert_eq!(e.line().commits[0].subject, "marker");
+        assert!(e.line().commits[0].empty);
+    });
+}
+
+#[test]
+fn an_empty_description_less_commit_is_auto_dropped() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    queue_commit(dir, "f0.txt", "real");
+    empty_commit(dir, "", true); // empty and description-less (mid-line)
+    queue_commit(dir, "f1.txt", "second");
+
+    with_engine(dir, |e| {
+        assert_eq!(e.line().commits.len(), 3, "loads all three commits");
+
+        // Any rewrite triggers the auto-drop of the empty, undescribed commit.
+        e.apply(Operation::Delete { index: 0 }).unwrap();
+        let subjects: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["second"], "empty, undescribed commit dropped");
+    });
+}
+
+#[test]
+fn a_conflicting_delete_can_be_undone() {
+    let tmp = conflicting_reorder_repo();
+    let dir = tmp.path();
+    let a_before = sha(dir, "a");
+
+    with_engine(dir, |e| {
+        // Deleting "edit to A" makes "edit to B" conflict (its context changed).
+        assert_eq!(
+            e.apply(Operation::Delete { index: 1 }).unwrap(),
+            Applied::Conflict
+        );
+        assert!(rebase_active(dir));
+        e.undo_conflict().unwrap();
+        assert!(!rebase_active(dir));
+    });
+    assert_eq!(sha(dir, "a"), a_before, "repo restored after undo");
 }
 
 /// A branch whose middle commit, when reordered, textually conflicts with the

@@ -34,6 +34,17 @@ pub struct Commit {
     pub id: Option<String>,
     /// The commit's subject line.
     pub subject: String,
+    /// Whether the commit introduces no change (an empty commit). Rendered
+    /// `(empty)` when it still has a description; auto-dropped when it does not.
+    pub empty: bool,
+}
+
+impl Commit {
+    /// Whether the commit has a description (a non-empty subject). An empty,
+    /// description-less commit is auto-dropped; an empty *described* one is kept.
+    pub fn described(&self) -> bool {
+        !self.subject.trim().is_empty()
+    }
 }
 
 /// A branch [boundary](crate::queue) over the commit sequence: `name` owns the
@@ -295,7 +306,13 @@ impl Engine {
         let mut parent = base.clone();
         for b in branches {
             for (sha, id, subject) in git::commits_between_with_ids(&parent, b)? {
-                commits.push(Commit { sha, id, subject });
+                let empty = git::commit_is_empty(&sha);
+                commits.push(Commit {
+                    sha,
+                    id,
+                    subject,
+                    empty,
+                });
             }
             boundaries.push(Boundary {
                 name: b.clone(),
@@ -394,6 +411,7 @@ impl Engine {
                 self.reword(index, &message)?;
                 Ok(Applied::Done)
             }
+            Operation::Delete { index } => self.delete(index),
             Operation::Undo => {
                 self.undo()?;
                 Ok(Applied::Done)
@@ -458,6 +476,94 @@ impl Engine {
                 Ok(Applied::Conflict)
             }
         }
+    }
+
+    // ---- delete (history-rewriting) ----
+
+    /// Delete the commit at `index`: drop it from the line and replay
+    /// descendants (through the conflict escape hatch if needed). Explicit
+    /// delete always removes, empty or not. Afterwards, any commit left empty
+    /// *and* description-less is auto-dropped.
+    fn delete(&mut self, index: usize) -> Result<Applied> {
+        let n = self.line.commits.len();
+        if index >= n {
+            bail!("delete index out of range");
+        }
+        if n == 1 {
+            bail!("cannot delete the queue's only commit");
+        }
+        let mut drop = HashSet::new();
+        drop.insert(index);
+        let todo = drop_todo(&self.line, &drop);
+        let snap = self.snapshot()?;
+        let base = self.line.base.clone();
+        let top = self.line.boundaries.last().unwrap().name.clone();
+        let land = self.current.clone();
+        match git::rebase_with_todo_stop(&base, &top, &todo)? {
+            git::Rewrite::Clean => {
+                self.finish_rewrite(&land)?;
+                self.auto_drop_empties(&land)?;
+                self.undo.push(snap);
+                self.redo.clear();
+                self.touched = true;
+                Ok(Applied::Done)
+            }
+            git::Rewrite::Conflict => {
+                self.pending_conflict = Some(snap);
+                self.touched = true;
+                Ok(Applied::Conflict)
+            }
+        }
+    }
+
+    /// Drop any commit that is empty *and* description-less (jj's rule). An
+    /// empty commit that still has a description is kept and rendered
+    /// `(empty)`. Dropping empty commits cannot conflict.
+    fn auto_drop_empties(&mut self, land: &str) -> Result<()> {
+        for _ in 0..64 {
+            let drop: HashSet<usize> = self
+                .line
+                .commits
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.empty && !c.described())
+                .map(|(i, _)| i)
+                .collect();
+            if drop.is_empty() {
+                return Ok(());
+            }
+            let todo = drop_todo(&self.line, &drop);
+            let base = self.line.base.clone();
+            let top = self.line.boundaries.last().unwrap().name.clone();
+            match git::rebase_with_todo_stop(&base, &top, &todo)? {
+                git::Rewrite::Clean => self.finish_rewrite(land)?,
+                git::Rewrite::Conflict => {
+                    // Empty drops shouldn't conflict; if one does, don't leave a
+                    // dangling rebase.
+                    git::rebase_abort()?;
+                    bail!("auto-dropping empty commits unexpectedly conflicted");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Boundary indices whose branch currently owns no commits (e.g. after a
+    /// delete emptied it) — the view offers to dissolve these.
+    pub fn empty_branches(&self) -> Vec<usize> {
+        (0..self.line.boundaries.len())
+            .filter(|&i| self.line.commits_of(i).is_empty())
+            .collect()
+    }
+
+    /// The cached PR number of the branch at `boundary`, if any.
+    pub fn pr_of(&self, boundary: usize) -> Option<u64> {
+        meta::pr(&self.line.boundaries[boundary].name)
+    }
+
+    /// The branch name at `boundary`.
+    pub fn branch_name(&self, boundary: usize) -> &str {
+        &self.line.boundaries[boundary].name
     }
 
     // ---- reword (message-only rewrite) ----
@@ -822,6 +928,31 @@ fn reword_todo(line: &EditableLine, index: usize) -> String {
     lines.join("\n") + "\n"
 }
 
+/// Build the rebase todo that drops the commits in `drop`: every other pick in
+/// front → tip order, with the `update-ref` lines kept in place (so dropping a
+/// branch's tip shrinks it, and dropping a branch's only commit empties it).
+/// Pure; unit-tested.
+fn drop_todo(line: &EditableLine, drop: &HashSet<usize>) -> String {
+    let commits = &line.commits;
+    let last = line.boundaries.len() - 1;
+    let mut ref_after: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (bi, b) in line.boundaries.iter().enumerate() {
+        if bi != last {
+            ref_after.insert(b.end - 1, b.name.as_str());
+        }
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for (i, c) in commits.iter().enumerate() {
+        if !drop.contains(&i) {
+            lines.push(format!("pick {} {}", c.sha, c.subject));
+        }
+        if let Some(name) = ref_after.get(&i) {
+            lines.push(format!("update-ref refs/heads/{name}"));
+        }
+    }
+    lines.join("\n") + "\n"
+}
+
 /// The final reword message: the user's text with any `Stable-Commit-Id` lines
 /// stripped, then the original id re-appended as the sole trailer — so the
 /// change keeps its identity no matter how the user edited the pane. A commit
@@ -868,6 +999,7 @@ mod tests {
             sha: subject.into(),
             id: None,
             subject: subject.into(),
+            empty: false,
         }
     }
 
@@ -931,6 +1063,18 @@ mod tests {
         assert_eq!(
             todo,
             "pick c2 c2\npick c0 c0\npick c1 c1\nupdate-ref refs/heads/a\n"
+        );
+    }
+
+    #[test]
+    fn drop_todo_omits_the_dropped_pick_and_keeps_update_refs() {
+        // Dropping c1 (a's tip) leaves `update-ref a` after c0 — a shrinks.
+        let mut drop = HashSet::new();
+        drop.insert(1usize);
+        let todo = drop_todo(&sample(), &drop);
+        assert_eq!(
+            todo,
+            "pick c0 c0\nupdate-ref refs/heads/a\npick c2 c2\n"
         );
     }
 
