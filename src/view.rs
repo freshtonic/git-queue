@@ -11,9 +11,10 @@
 //! ordering) live in [`render`](crate::render) and [`engine`](crate::engine)
 //! so they can be unit-tested; the code here is the ratatui wiring around them.
 
-use crate::engine::{Applied, Engine, Operation, Row};
+use crate::engine::{Applied, Engine, Operation, Row, SplitKind, SplitLine};
 use crate::git;
 use crate::render::{classify_diff_line, DiffLine};
+use std::collections::HashSet;
 use anyhow::Result;
 use ratatui::crossterm::{
     event::{
@@ -63,13 +64,29 @@ struct Input {
 }
 
 /// What an in-progress message edit will do when applied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MsgTarget {
     /// Reword the selected commit.
     Reword,
     /// Squash the commit at `index` into its older neighbour, using the edited
     /// text as the combined description.
     Squash { index: usize },
+    /// Split the commit at `index`, peeling `selected` into a new commit whose
+    /// message is the edited text.
+    Split {
+        index: usize,
+        selected: HashSet<usize>,
+    },
+}
+
+/// The interactive split selector over a commit's diff.
+struct SplitState {
+    index: usize,
+    lines: Vec<SplitLine>,
+    /// `change_index`es peeled into the new (newer) commit.
+    selected: HashSet<usize>,
+    /// Cursor position within `lines` (always on a selectable line).
+    cursor: usize,
 }
 
 /// An in-progress message edit: a buffer plus what applying it will do.
@@ -111,6 +128,8 @@ struct App {
     msg_apply_discard: bool,
     /// A branch (boundary index) left empty by a delete, offered for dissolve.
     dissolve_prompt: Option<usize>,
+    /// The active split line-selector, if any.
+    split: Option<SplitState>,
     /// Set when the user chose to resolve a conflict in the shell: quit without
     /// the normal exit summary and print resolution instructions instead.
     suspend: bool,
@@ -141,6 +160,7 @@ impl App {
             msg_edit: None,
             msg_apply_discard: false,
             dissolve_prompt: None,
+            split: None,
             suspend: false,
             status: String::new(),
             quit: false,
@@ -237,6 +257,41 @@ impl App {
                 self.msg_apply_discard = false;
                 self.apply_squash(index, Some(edit.buffer));
             }
+            MsgTarget::Split { index, selected } => {
+                self.msg_edit = None;
+                self.msg_apply_discard = false;
+                match self.engine.apply(Operation::Split {
+                    index,
+                    selected,
+                    message: edit.buffer,
+                }) {
+                    Ok(_) => {
+                        self.selected = index; // the older piece keeps this slot
+                        self.after_change();
+                    }
+                    Err(e) => self.status = format!("{e:#}"),
+                }
+            }
+        }
+    }
+
+    /// Enter the split line-selector for the selected commit.
+    fn start_split(&mut self) {
+        match self.engine.split_lines(self.selected) {
+            Ok(lines) => {
+                let Some(cursor) = lines.iter().position(|l| l.change_index.is_some()) else {
+                    self.status = "this commit has no lines to split".into();
+                    return;
+                };
+                self.split = Some(SplitState {
+                    index: self.selected,
+                    lines,
+                    selected: HashSet::new(),
+                    cursor,
+                });
+                self.focus = Pane::Diff;
+            }
+            Err(e) => self.status = format!("{e:#}"),
         }
     }
 
@@ -450,6 +505,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         app.show_help = false; // any key dismisses help
         return Ok(());
     }
+    if app.split.is_some() {
+        return handle_split_key(app, key);
+    }
     if app.conflict_prompt {
         return handle_conflict_key(app, key);
     }
@@ -563,6 +621,7 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         }
         KeyCode::Char('e') => app.start_message_edit(),
         KeyCode::Char('s') => app.squash_selected(),
+        KeyCode::Char('S') => app.start_split(),
         KeyCode::Char('D') => app.delete_selected(),
         KeyCode::Char('x') => app.apply_op(Operation::RemoveBoundary {
             boundary: app.selected_boundary(),
@@ -635,6 +694,66 @@ fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     Ok(())
 }
 
+/// The interactive split selector: move the cursor over `+`/`-` lines, Space
+/// toggles which piece a line goes into, Enter confirms (then prompts for the
+/// peeled commit's message), Esc cancels.
+fn handle_split_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    let Some(st) = app.split.as_mut() else {
+        return Ok(());
+    };
+    match key.code {
+        KeyCode::Esc => app.split = None,
+        KeyCode::Char('j') | KeyCode::Down => {
+            if let Some(n) = next_selectable(&st.lines, st.cursor, 1) {
+                st.cursor = n;
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            if let Some(n) = next_selectable(&st.lines, st.cursor, -1) {
+                st.cursor = n;
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(ci) = st.lines[st.cursor].change_index {
+                if !st.selected.insert(ci) {
+                    st.selected.remove(&ci);
+                }
+            }
+        }
+        KeyCode::Enter => {
+            let total = st.lines.iter().filter(|l| l.change_index.is_some()).count();
+            if st.selected.is_empty() || st.selected.len() >= total {
+                app.status = "select some — but not all — lines to peel off".into();
+            } else {
+                let index = st.index;
+                let selected = st.selected.clone();
+                app.split = None;
+                app.msg_edit = Some(MsgEdit {
+                    buffer: String::new(),
+                    target: MsgTarget::Split { index, selected },
+                });
+                app.focus = Pane::Message;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The next selectable line index from `from` in direction `dir` (+1/-1).
+fn next_selectable(lines: &[SplitLine], from: usize, dir: isize) -> Option<usize> {
+    let mut i = from as isize;
+    loop {
+        i += dir;
+        if i < 0 || i as usize >= lines.len() {
+            return None;
+        }
+        if lines[i as usize].change_index.is_some() {
+            return Some(i as usize);
+        }
+    }
+}
+
 /// The dissolve choice for a branch a delete left empty.
 fn handle_dissolve_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     let Some(boundary) = app.dissolve_prompt else {
@@ -681,6 +800,24 @@ fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
     // While a modal (help / prompt / quit-guard / conflict / message edit) is
     // up, ignore the mouse.
+    // In the split selector, a left-click toggles the line under the cursor.
+    if let Some(st) = app.split.as_mut() {
+        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+            let inner_top = app.diff_area.y + 1;
+            if m.row >= inner_top {
+                let row = (m.row - inner_top) as usize;
+                if let Some(line) = st.lines.get(row) {
+                    if let Some(ci) = line.change_index {
+                        st.cursor = row;
+                        if !st.selected.insert(ci) {
+                            st.selected.remove(&ci);
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
     if app.show_help
         || app.input.is_some()
         || app.confirm_quit
@@ -782,7 +919,11 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     draw_queue(f, app, chunks[0]);
     draw_message(f, app, right[0]);
-    draw_diff(f, app, right[1]);
+    // The diff pane flips to the interactive selector during a split.
+    match &app.split {
+        Some(st) => draw_split(f, st, right[1]),
+        None => draw_diff(f, app, right[1]),
+    }
     draw_footer(f, app, outer[1]);
 
     if app.show_help {
@@ -793,7 +934,16 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 /// The footer line: an active prompt, the quit-guard, a status/error message,
 /// or the default key hint — in that priority.
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let (text, style) = if app.conflict_prompt {
+    let (text, style) = if let Some(st) = &app.split {
+        (
+            format!(
+                "split — Space toggle · j/k move · Enter confirm · Esc cancel  \
+                 ({} line(s) peeled)",
+                st.selected.len()
+            ),
+            Style::default().fg(Color::Cyan),
+        )
+    } else if app.conflict_prompt {
         (
             "conflict — [R]esolve in the shell, or [U]ndo the operation?".to_string(),
             Style::default()
@@ -841,8 +991,9 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k move  J/K reorder  e message  s squash  D delete  r rename  \
-             a add-branch  x dissolve  </> shift  u undo  C-r redo  ? help  q quit"
+            "j/k move  J/K reorder  e message  s squash  S split  D delete  \
+             r rename  a add-branch  x dissolve  </> shift  u undo  C-r redo  \
+             ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -916,6 +1067,7 @@ fn draw_message(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let title = match edit.target {
                 MsgTarget::Reword => "message*",
                 MsgTarget::Squash { .. } => "squash message*",
+                MsgTarget::Split { .. } => "new commit message*",
             };
             (title, format!("{}\u{2588}", edit.buffer), 0)
         }
@@ -950,6 +1102,42 @@ fn draw_diff(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+/// Render the interactive split selector into the diff pane: each `+`/`-` line
+/// gets a ○/◉ marker for its piece, the cursor line is highlighted.
+fn draw_split(f: &mut ratatui::Frame, st: &SplitState, area: Rect) {
+    let items: Vec<ListItem> = st
+        .lines
+        .iter()
+        .map(|l| {
+            let selected = l
+                .change_index
+                .is_some_and(|ci| st.selected.contains(&ci));
+            let (marker, style) = match l.kind {
+                SplitKind::Meta => ("  ", Style::default().fg(Color::DarkGray)),
+                SplitKind::Context => ("  ", Style::default()),
+                SplitKind::Added => (
+                    if selected { "◉ " } else { "○ " },
+                    Style::default().fg(Color::Green),
+                ),
+                SplitKind::Removed => (
+                    if selected { "◉ " } else { "○ " },
+                    Style::default().fg(Color::Red),
+                ),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(l.text.clone(), style),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(st.cursor));
+    let list = List::new(items)
+        .block(pane_block("split — Space toggles, Enter confirms", true))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, area, &mut state);
+}
+
 fn draw_help(f: &mut ratatui::Frame, area: Rect) {
     let bindings = [
         ("j / ↓", "next commit"),
@@ -961,6 +1149,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("J / K", "reorder the selected commit down / up"),
         ("e", "edit the message (Ctrl-S applies, Esc leaves)"),
         ("s", "squash into the older neighbour"),
+        ("S", "split the commit (line-level selector)"),
         ("D", "delete the selected commit"),
         ("r", "rename the selected commit's branch"),
         ("a", "add a boundary after the selected commit"),
@@ -1118,6 +1307,25 @@ mod tests {
             git(dir, &["add", "f.txt"]);
             git(dir, &["commit", "-q", "-m", msg]);
         }
+        tmp
+    }
+
+    /// An untracked `feature` branch with one commit that adds a three-line
+    /// file — splittable at the line level.
+    fn repo_with_multiline_commit() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        git(dir, &["init", "-q", "-b", "main"]);
+        git(dir, &["config", "user.email", "t@example.com"]);
+        git(dir, &["config", "user.name", "T"]);
+        git(dir, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.join("seed.txt"), "seed\n").unwrap();
+        git(dir, &["add", "seed.txt"]);
+        git(dir, &["commit", "-q", "-m", "seed"]);
+        git(dir, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(dir.join("f.txt"), "A\nB\nC\n").unwrap();
+        git(dir, &["add", "f.txt"]);
+        git(dir, &["commit", "-q", "-m", "abc"]);
         tmp
     }
 
@@ -1478,6 +1686,60 @@ mod tests {
             assert_eq!(app.dissolve_prompt, Some(1), "b emptied, dissolve offered");
             press(app, 'y');
             assert_eq!(boundary_names(app), vec!["a"]);
+        });
+    }
+
+    #[test]
+    fn split_selector_toggles_lines_and_peels_into_a_new_commit() {
+        with_app_over(repo_with_multiline_commit(), |app| {
+            let before = app.commit_count();
+            press(app, 'S');
+            assert!(app.split.is_some(), "entered the split selector");
+
+            // Toggle the line under the cursor into the peeled piece.
+            key(app, KeyCode::Char(' '));
+            assert_eq!(app.split.as_ref().unwrap().selected.len(), 1);
+
+            key(app, KeyCode::Enter); // confirm the selection
+            assert!(app.split.is_none());
+            assert!(app.msg_edit.is_some(), "prompts for the peeled commit's message");
+
+            press(app, 'p'); // type a message
+            ctrl(app, 's'); // apply
+            assert!(app.msg_edit.is_none());
+            assert!(app.status.is_empty(), "no error: {}", app.status);
+            assert_eq!(app.commit_count(), before + 1, "split produced a second commit");
+        });
+    }
+
+    #[test]
+    fn escape_cancels_the_split_selector() {
+        with_app_over(repo_with_multiline_commit(), |app| {
+            let before = app.commit_count();
+            press(app, 'S');
+            assert!(app.split.is_some());
+            key(app, KeyCode::Esc);
+            assert!(app.split.is_none(), "cancelled");
+            assert_eq!(app.commit_count(), before, "nothing changed");
+        });
+    }
+
+    #[test]
+    fn confirming_split_with_all_lines_selected_is_rejected() {
+        with_app_over(repo_with_multiline_commit(), |app| {
+            press(app, 'S');
+            // Toggle every selectable line.
+            loop {
+                key(app, KeyCode::Char(' '));
+                let st = app.split.as_ref().unwrap();
+                if next_selectable(&st.lines, st.cursor, 1).is_none() {
+                    break;
+                }
+                key(app, KeyCode::Char('j'));
+            }
+            key(app, KeyCode::Enter);
+            assert!(app.split.is_some(), "still in the selector");
+            assert!(!app.status.is_empty(), "rejected selecting all lines");
         });
     }
 }

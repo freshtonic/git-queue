@@ -12,6 +12,7 @@
 
 use assert_cmd::Command;
 use git_queue::engine::{Applied, Boundary, Engine, Operation};
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use std::sync::Mutex;
@@ -569,6 +570,97 @@ fn cross_boundary_squash_lands_in_the_older_branch_and_empties_the_newer() {
         assert_eq!(names(e), vec!["a"]);
     });
     assert!(!branch_exists(dir, "b"));
+}
+
+#[test]
+fn split_divides_a_commit_keeping_the_older_id_and_stamping_the_peeled_piece() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    // One commit that adds two lines to a new file.
+    write_commit(dir, "f.txt", "A\nB\n", "both lines");
+
+    with_engine(dir, |e| {
+        let c_id = e.line().commits[0].id.clone();
+        assert!(c_id.is_some());
+        // Peel the second added line (change index 1) into the newer commit.
+        assert_eq!(
+            e.apply(Operation::Split {
+                index: 0,
+                selected: HashSet::from([1]),
+                message: "the B line".into(),
+            })
+            .unwrap(),
+            Applied::Done
+        );
+        assert_eq!(e.line().commits.len(), 2, "split into two commits");
+
+        let older = &e.line().commits[0];
+        let newer = &e.line().commits[1];
+        assert_eq!(older.id, c_id, "older piece keeps the original id");
+        assert_eq!(older.subject, "both lines", "older keeps the message");
+        assert!(newer.id.is_some() && newer.id != c_id, "peeled piece freshly stamped");
+        assert_eq!(newer.subject, "the B line");
+    });
+
+    // Content divides: older has only A; the tip has both.
+    assert_eq!(git_out(dir, &["show", "HEAD~1:f.txt"]), "A");
+    assert_eq!(git_out(dir, &["show", "HEAD:f.txt"]), "A\nB");
+}
+
+#[test]
+fn split_repeats_to_produce_three_pieces() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    write_commit(dir, "f.txt", "A\nB\nC\n", "abc");
+
+    with_engine(dir, |e| {
+        // Peel C off the end.
+        e.apply(Operation::Split {
+            index: 0,
+            selected: HashSet::from([2]),
+            message: "third".into(),
+        })
+        .unwrap();
+        assert_eq!(e.line().commits.len(), 2);
+        // Peel B off the older remainder.
+        e.apply(Operation::Split {
+            index: 0,
+            selected: HashSet::from([1]),
+            message: "second".into(),
+        })
+        .unwrap();
+
+        let subjects: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
+        assert_eq!(subjects, vec!["abc", "second", "third"]);
+    });
+    assert_eq!(git_out(dir, &["show", "HEAD:f.txt"]), "A\nB\nC");
+}
+
+#[test]
+fn split_rejects_selecting_all_or_no_lines() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    queue(dir).args(["create", "a"]).assert().success();
+    write_commit(dir, "f.txt", "A\nB\n", "both");
+
+    with_engine(dir, |e| {
+        assert!(e
+            .apply(Operation::Split {
+                index: 0,
+                selected: HashSet::new(),
+                message: "x".into(),
+            })
+            .is_err());
+        assert!(e
+            .apply(Operation::Split {
+                index: 0,
+                selected: HashSet::from([0, 1]),
+                message: "x".into(),
+            })
+            .is_err());
+    });
 }
 
 /// A branch whose middle commit, when reordered, textually conflicts with the

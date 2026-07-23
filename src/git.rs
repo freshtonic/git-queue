@@ -163,6 +163,135 @@ pub fn commit_message(rev: &str) -> Result<String> {
 /// git's canonical empty tree object — the parent stand-in for a root commit.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+/// A commit's tree object sha.
+pub fn tree_of(rev: &str) -> Result<String> {
+    out(&["rev-parse", "--verify", &format!("{rev}^{{tree}}")])
+}
+
+/// The content of `path` at `rev`, or an empty string if it does not exist
+/// there (e.g. a file added by `rev`, read at its parent).
+pub fn file_at(rev: &str, path: &str) -> String {
+    out(&["show", &format!("{rev}:{path}")]).unwrap_or_default()
+}
+
+/// Write `content` as a loose blob and return its sha.
+fn hash_object(content: &str) -> Result<String> {
+    let mut cmd = Command::new("git")
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn `git hash-object`")?;
+    cmd.stdin
+        .take()
+        .unwrap()
+        .write_all(content.as_bytes())
+        .context("failed to write blob content")?;
+    let out = cmd.wait_with_output()?;
+    if !out.status.success() {
+        bail!("`git hash-object` failed");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Build a new tree from `base_tree`, applying `changes`: `Some(content)` sets
+/// a regular file (mode 100644), `None` removes it. Uses a temporary index so
+/// the real index is untouched.
+pub fn build_tree(base_tree: &str, changes: &[(String, Option<String>)]) -> Result<String> {
+    let git_dir = out(&["rev-parse", "--git-dir"])?;
+    let index_path = std::path::Path::new(&git_dir).join("git-queue-split-index");
+    let index = index_path.to_string_lossy().to_string();
+    let run_indexed = |args: &[&str]| -> Result<()> {
+        let mut c = Command::new("git");
+        c.args(args).env("GIT_INDEX_FILE", &index);
+        quiet_git(&mut c);
+        let status = c.status().context("failed to spawn `git`")?;
+        if !status.success() {
+            bail!("`git {}` failed", args.join(" "));
+        }
+        Ok(())
+    };
+    let result = (|| {
+        run_indexed(&["read-tree", base_tree])?;
+        for (path, content) in changes {
+            match content {
+                Some(text) => {
+                    let blob = hash_object(text)?;
+                    run_indexed(&[
+                        "update-index",
+                        "--add",
+                        "--cacheinfo",
+                        &format!("100644,{blob},{path}"),
+                    ])?;
+                }
+                None => {
+                    run_indexed(&["update-index", "--force-remove", path])?;
+                }
+            }
+        }
+        // write-tree with the temp index; capture its stdout.
+        let mut c = Command::new("git");
+        c.args(["write-tree"])
+            .env("GIT_INDEX_FILE", &index)
+            .env(GUARD_ENV, "1")
+            .stderr(Stdio::null());
+        let out = c.output().context("failed to spawn `git write-tree`")?;
+        if !out.status.success() {
+            bail!("`git write-tree` failed");
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    })();
+    let _ = std::fs::remove_file(&index_path);
+    result
+}
+
+/// Create a commit object from `tree` with parent `parent` and message
+/// `message`, returning its sha. No ref is moved.
+pub fn commit_tree(tree: &str, parent: &str, message: &str) -> Result<String> {
+    let mut cmd = Command::new("git")
+        .args(["commit-tree", tree, "-p", parent])
+        .env(GUARD_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn `git commit-tree`")?;
+    cmd.stdin
+        .take()
+        .unwrap()
+        .write_all(message.as_bytes())
+        .context("failed to write commit message")?;
+    let out = cmd.wait_with_output()?;
+    if !out.status.success() {
+        bail!("`git commit-tree` failed");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Cherry-pick `sha` onto `base` (detaching HEAD there first), returning the
+/// new commit's sha. Used to replay a split commit's descendants — which apply
+/// cleanly because the new tip has the same tree. Aborts and errors on the
+/// unexpected conflict.
+pub fn cherry_pick_onto(base: &str, sha: &str) -> Result<String> {
+    run(&["checkout", "-q", "--detach", base])?;
+    let mut pick = Command::new("git");
+    pick.args(["cherry-pick", "--allow-empty", sha]);
+    quiet_git(&mut pick);
+    let status = pick.status().context("failed to spawn `git cherry-pick`")?;
+    if !status.success() {
+        if cherry_pick_in_progress() {
+            let _ = Command::new("git")
+                .args(["cherry-pick", "--abort"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        bail!("replaying a split descendant unexpectedly conflicted");
+    }
+    out(&["rev-parse", "HEAD"])
+}
+
 /// True if `rev` introduces no change: its tree equals its (first) parent's,
 /// or — for a root commit — the empty tree.
 pub fn commit_is_empty(rev: &str) -> bool {

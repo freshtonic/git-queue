@@ -121,6 +121,171 @@ pub enum Row {
     Commit { index: usize },
 }
 
+/// The kind of a line in the split selector's rendering of a commit's diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitKind {
+    /// A file/hunk header — shown, not selectable.
+    Meta,
+    /// An unchanged context line — shown, not selectable.
+    Context,
+    /// An added (`+`) line — selectable.
+    Added,
+    /// A removed (`-`) line — selectable.
+    Removed,
+}
+
+/// One display line of the split selector. Selectable lines (`Added`/`Removed`)
+/// carry a dense `change_index` used to express the selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitLine {
+    pub kind: SplitKind,
+    pub text: String,
+    pub change_index: Option<usize>,
+}
+
+// --- internal diff model, shared by the selector and the split reconstruction ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LineKind {
+    Context,
+    Added,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HunkLine {
+    kind: LineKind,
+    text: String,
+    /// Dense index over all selectable (added/removed) lines in the diff.
+    change_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Hunk {
+    /// 0-based start line of this hunk's region within the *new* file version.
+    v_start: usize,
+    lines: Vec<HunkLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileDiff {
+    path: String,
+    hunks: Vec<Hunk>,
+    /// True when git rendered a binary change (no selectable lines).
+    binary: bool,
+}
+
+/// Parse a unified diff (from `git diff <parent> <commit>`) into per-file
+/// hunks, numbering the selectable (`+`/`-`) lines densely. Pure; unit-tested.
+fn parse_diff(diff: &str) -> Vec<FileDiff> {
+    let mut files: Vec<FileDiff> = Vec::new();
+    let mut change_counter = 0usize;
+    for raw in diff.lines() {
+        if let Some(rest) = raw.strip_prefix("diff --git ") {
+            // `a/<path> b/<path>` — take the b-side path.
+            let path = rest
+                .split_once(" b/")
+                .map(|(_, b)| b.to_string())
+                .unwrap_or_else(|| rest.to_string());
+            files.push(FileDiff {
+                path,
+                hunks: Vec::new(),
+                binary: false,
+            });
+        } else if raw.starts_with("Binary files") {
+            if let Some(f) = files.last_mut() {
+                f.binary = true;
+            }
+        } else if let Some(rest) = raw.strip_prefix("@@") {
+            // `@@ -a,b +c,d @@` — c is the 1-based new-file start line.
+            let v_start = rest
+                .split_once('+')
+                .and_then(|(_, r)| r.split([',', ' ']).next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|n| n.saturating_sub(1))
+                .unwrap_or(0);
+            if let Some(f) = files.last_mut() {
+                f.hunks.push(Hunk {
+                    v_start,
+                    lines: Vec::new(),
+                });
+            }
+        } else if raw.starts_with("+++") || raw.starts_with("---") {
+            // File-header markers; the path came from the `diff --git` line.
+        } else if let Some(f) = files.last_mut() {
+            let Some(hunk) = f.hunks.last_mut() else {
+                continue;
+            };
+            let (kind, text) = if let Some(t) = raw.strip_prefix('+') {
+                (LineKind::Added, t)
+            } else if let Some(t) = raw.strip_prefix('-') {
+                (LineKind::Removed, t)
+            } else if let Some(t) = raw.strip_prefix(' ') {
+                (LineKind::Context, t)
+            } else {
+                continue; // "\ No newline at end of file" and blanks
+            };
+            let change_index = if kind == LineKind::Context {
+                None
+            } else {
+                let i = change_counter;
+                change_counter += 1;
+                Some(i)
+            };
+            hunk.lines.push(HunkLine {
+                kind,
+                text: text.to_string(),
+                change_index,
+            });
+        }
+    }
+    files
+}
+
+/// Reconstruct the intermediate version of a file (`M`) for a split: the new
+/// version with the *selected* changes reverted — selected additions removed,
+/// selected removals restored. `selected` holds the `change_index`es peeled
+/// into the second (newer) commit. Pure; unit-tested.
+fn reconstruct_middle(file: &FileDiff, v_content: &str, selected: &HashSet<usize>) -> Option<String> {
+    if file.binary {
+        return None; // binary changes stay whole in the older piece
+    }
+    let mut v_lines: Vec<String> = v_content.lines().map(str::to_string).collect();
+    // Splice each hunk's region bottom-up so earlier line numbers stay valid.
+    for hunk in file.hunks.iter().rev() {
+        // Lines present in the new version within this hunk (context + added).
+        let v_len = hunk
+            .lines
+            .iter()
+            .filter(|l| matches!(l.kind, LineKind::Context | LineKind::Added))
+            .count();
+        let mut region: Vec<String> = Vec::new();
+        for l in &hunk.lines {
+            let selected_line = l.change_index.is_some_and(|i| selected.contains(&i));
+            let keep = match l.kind {
+                LineKind::Context => true,
+                // A selected removal is still present in M (the newer piece
+                // removes it); an unselected removal is gone (the older piece).
+                LineKind::Removed => selected_line,
+                // A selected addition is not yet in M; an unselected one is.
+                LineKind::Added => !selected_line,
+            };
+            if keep {
+                region.push(l.text.clone());
+            }
+        }
+        let end = (hunk.v_start + v_len).min(v_lines.len());
+        let start = hunk.v_start.min(v_lines.len());
+        v_lines.splice(start..end, region);
+    }
+    let mut result = v_lines.join("\n");
+    // Preserve a trailing newline (git files usually end with one).
+    if v_content.ends_with('\n') && !result.is_empty() {
+        result.push('\n');
+    }
+    Some(result)
+}
+
 /// An edit expressed as data. The view produces these from user input; the
 /// engine applies them. Every variant the TUI will ever perform is named here
 /// so undo becomes a snapshot↔operation pair and the engine stays directly
@@ -142,9 +307,15 @@ pub enum Operation {
         index: usize,
         message: Option<String>,
     },
-    /// Split the commit at `index` into two pieces (line-level selection is
-    /// carried by the view; repeatable for N pieces).
-    Split { index: usize },
+    /// Split the commit at `index` into two: the `selected` diff-line
+    /// `change_index`es are peeled into a new, newer commit with `message` and
+    /// a fresh id, while the older piece keeps the original id and message.
+    /// Repeatable on the remainder for N pieces.
+    Split {
+        index: usize,
+        selected: HashSet<usize>,
+        message: String,
+    },
     /// Rewrite the message of the commit at `index`, preserving its
     /// Stable-Commit-Id.
     Reword { index: usize, message: String },
@@ -418,6 +589,11 @@ impl Engine {
             }
             Operation::Delete { index } => self.delete(index),
             Operation::Squash { index, message } => self.squash(index, message.as_deref()),
+            Operation::Split {
+                index,
+                selected,
+                message,
+            } => self.split(index, &selected, &message),
             Operation::Undo => {
                 self.undo()?;
                 Ok(Applied::Done)
@@ -426,7 +602,6 @@ impl Engine {
                 self.redo()?;
                 Ok(Applied::Done)
             }
-            other => bail!("operation not yet supported: {other:?}"),
         }
     }
 
@@ -570,6 +745,150 @@ impl Engine {
     /// The branch name at `boundary`.
     pub fn branch_name(&self, boundary: usize) -> &str {
         &self.line.boundaries[boundary].name
+    }
+
+    // ---- split (history-rewriting) ----
+
+    /// The split selector's view of the commit at `index`: its diff flattened
+    /// into displayable lines, the `+`/`-` ones carrying a dense `change_index`.
+    pub fn split_lines(&self, index: usize) -> Result<Vec<SplitLine>> {
+        if index >= self.line.commits.len() {
+            bail!("split index out of range");
+        }
+        let diff = git::commit_diff(&self.line.commits[index].sha)?;
+        let mut out = Vec::new();
+        for f in parse_diff(&diff) {
+            out.push(SplitLine {
+                kind: SplitKind::Meta,
+                text: format!("── {} ──", f.path),
+                change_index: None,
+            });
+            if f.binary {
+                out.push(SplitLine {
+                    kind: SplitKind::Meta,
+                    text: "(binary — peeled into the new commit)".into(),
+                    change_index: None,
+                });
+                continue;
+            }
+            for h in &f.hunks {
+                out.push(SplitLine {
+                    kind: SplitKind::Meta,
+                    text: "@@".into(),
+                    change_index: None,
+                });
+                for l in &h.lines {
+                    let (kind, prefix) = match l.kind {
+                        LineKind::Added => (SplitKind::Added, '+'),
+                        LineKind::Removed => (SplitKind::Removed, '-'),
+                        LineKind::Context => (SplitKind::Context, ' '),
+                    };
+                    out.push(SplitLine {
+                        kind,
+                        text: format!("{prefix}{}", l.text),
+                        change_index: l.change_index,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The number of selectable (`+`/`-`) lines in the commit at `index`.
+    pub fn split_change_count(&self, index: usize) -> Result<usize> {
+        let diff = git::commit_diff(&self.line.commits[index].sha)?;
+        Ok(parse_diff(&diff)
+            .iter()
+            .flat_map(|f| &f.hunks)
+            .flat_map(|h| &h.lines)
+            .filter(|l| l.change_index.is_some())
+            .count())
+    }
+
+    /// Split the commit at `index` into two. The `selected` change-lines are
+    /// peeled into a new, newer commit (fresh id + `message`); the older piece
+    /// keeps the original id and message. Descendants replay cleanly (the new
+    /// tip has the same tree). One undo entry.
+    fn split(&mut self, index: usize, selected: &HashSet<usize>, message: &str) -> Result<Applied> {
+        if index >= self.line.commits.len() {
+            bail!("split index out of range");
+        }
+        let total = self.split_change_count(index)?;
+        if selected.is_empty() || selected.len() >= total {
+            bail!("select some — but not all — lines to peel into the new commit");
+        }
+
+        let c_sha = self.line.commits[index].sha.clone();
+        let parent_sha = if index == 0 {
+            git::rev_parse(&self.line.base)?
+        } else {
+            self.line.commits[index - 1].sha.clone()
+        };
+        let diff = git::commit_diff(&c_sha)?;
+        let files = parse_diff(&diff);
+
+        // Build the older piece's tree: parent + the *unselected* changes.
+        let parent_tree = git::tree_of(&parent_sha)?;
+        let mut changes: Vec<(String, Option<String>)> = Vec::new();
+        for f in &files {
+            let v = git::file_at(&c_sha, &f.path);
+            let Some(m) = reconstruct_middle(f, &v, selected) else {
+                continue; // binary: stays whole in the newer piece
+            };
+            let parent_has = !git::file_at(&parent_sha, &f.path).is_empty();
+            if m.is_empty() {
+                if parent_has {
+                    changes.push((f.path.clone(), None)); // removed in the older piece
+                }
+                // else: new file, fully peeled — absent from the older piece
+            } else {
+                changes.push((f.path.clone(), Some(m)));
+            }
+        }
+        let m_tree = git::build_tree(&parent_tree, &changes)?;
+
+        // Older piece keeps C's message (and id); newer piece is auto-stamped.
+        let older = git::commit_tree(&m_tree, &parent_sha, &git::commit_message(&c_sha)?)?;
+        let newer_msg = with_preserved_id(message, Some(&ident::new_id()));
+        let newer = git::commit_tree(&git::tree_of(&c_sha)?, &older, &newer_msg)?;
+
+        let snap = self.snapshot()?;
+        // Replay C's descendants onto the newer piece (clean: same tree).
+        let mut mapping: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut prev = newer.clone();
+        for c in &self.line.commits[index + 1..] {
+            prev = git::cherry_pick_onto(&prev, &c.sha)?;
+            mapping.insert(c.sha.clone(), prev.clone());
+        }
+
+        // Point every branch at its tip's new sha.
+        let boundaries = self.line.boundaries.clone();
+        let mut parent = self.line.base.clone();
+        for b in &boundaries {
+            let tip_old = &self.line.commits[b.end - 1].sha;
+            let new_tip = if *tip_old == c_sha {
+                newer.clone()
+            } else if let Some(n) = mapping.get(tip_old) {
+                n.clone()
+            } else {
+                tip_old.clone()
+            };
+            git::force_ref(&b.name, &new_tip)?;
+            meta::set_parent(&b.name, &parent)?;
+            meta::set_parent_sha(&b.name, &git::rev_parse(&parent)?)?;
+            parent = b.name.clone();
+        }
+
+        let land = self.current.clone();
+        git::checkout_quiet(&land)?;
+        git::reset_hard_head()?;
+        self.reload()?;
+        self.auto_drop_empties(&land)?;
+        self.undo.push(snap);
+        self.redo.clear();
+        self.touched = true;
+        Ok(Applied::Done)
     }
 
     // ---- squash (history-rewriting) ----
@@ -1239,6 +1558,64 @@ mod tests {
         assert_eq!(combine_bodies("older", "newer"), "older\n\nnewer");
         assert_eq!(combine_bodies("", "newer"), "newer");
         assert_eq!(combine_bodies("older", ""), "older");
+    }
+
+    #[test]
+    fn parse_diff_numbers_selectable_lines() {
+        let diff = [
+            "diff --git a/f.txt b/f.txt",
+            "--- a/f.txt",
+            "+++ b/f.txt",
+            "@@ -1,2 +1,2 @@",
+            "-old",
+            "+new",
+            " ctx",
+        ]
+        .join("\n")
+            + "\n";
+        let files = parse_diff(&diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "f.txt");
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(lines[0].kind, LineKind::Removed);
+        assert_eq!(lines[0].change_index, Some(0));
+        assert_eq!(lines[1].kind, LineKind::Added);
+        assert_eq!(lines[1].change_index, Some(1));
+        assert_eq!(lines[2].kind, LineKind::Context);
+        assert_eq!(lines[2].change_index, None);
+    }
+
+    #[test]
+    fn reconstruct_middle_reverts_only_selected_changes() {
+        let file = FileDiff {
+            path: "f".into(),
+            binary: false,
+            hunks: vec![Hunk {
+                v_start: 0,
+                lines: vec![
+                    HunkLine {
+                        kind: LineKind::Added,
+                        text: "A".into(),
+                        change_index: Some(0),
+                    },
+                    HunkLine {
+                        kind: LineKind::Added,
+                        text: "B".into(),
+                        change_index: Some(1),
+                    },
+                ],
+            }],
+        };
+        // Peel B -> the middle keeps only A.
+        assert_eq!(
+            reconstruct_middle(&file, "A\nB\n", &HashSet::from([1])),
+            Some("A\n".into())
+        );
+        // Peel A -> the middle keeps only B.
+        assert_eq!(
+            reconstruct_middle(&file, "A\nB\n", &HashSet::from([0])),
+            Some("B\n".into())
+        );
     }
 
     #[test]
