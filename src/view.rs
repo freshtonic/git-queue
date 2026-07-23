@@ -42,6 +42,15 @@ enum Pane {
     Diff,
 }
 
+/// A pane divider the user is dragging to resize.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Divider {
+    /// Between the queue (left) and the right column.
+    Vertical,
+    /// Between the message (top) and diff (bottom) in the right column.
+    Horizontal,
+}
+
 /// A pending single-line text prompt in the footer (branch name entry).
 #[derive(Debug, Clone)]
 enum Prompt {
@@ -119,6 +128,21 @@ struct App {
     queue_area: Rect,
     message_area: Rect,
     diff_area: Rect,
+    /// The whole body (all three panes) and the right column, for resize math.
+    body_area: Rect,
+    right_area: Rect,
+    /// Split ratios (percentages), adjustable by dragging the dividers: `h_split`
+    /// is the queue's width, `v_split` the message pane's height.
+    h_split: u16,
+    v_split: u16,
+    /// Whether the right-hand message / diff panes are shown. Hiding one gives
+    /// the other the full right column; hiding both lets the queue fill the body.
+    show_message: bool,
+    show_diff: bool,
+    /// The divider currently being dragged, if any.
+    drag: Option<Divider>,
+    /// The repository's web URL (for opening PR links), resolved once at start.
+    repo_url: Option<String>,
     /// An active footer text prompt (rename / add-boundary), if any.
     input: Option<Input>,
     /// Showing the "quit with pending operations?" guard.
@@ -159,6 +183,14 @@ impl App {
             queue_area: Rect::default(),
             message_area: Rect::default(),
             diff_area: Rect::default(),
+            body_area: Rect::default(),
+            right_area: Rect::default(),
+            h_split: 42,
+            v_split: 40,
+            show_message: true,
+            show_diff: true,
+            drag: None,
+            repo_url: git::github_repo_url(&crate::meta::remote()),
             input: None,
             confirm_quit: false,
             conflict_prompt: false,
@@ -402,6 +434,114 @@ impl App {
             .unwrap_or(0);
         (rows, selected_row)
     }
+
+    /// Whether a pane is currently visible.
+    fn pane_visible(&self, pane: Pane) -> bool {
+        match pane {
+            Pane::Queue => true,
+            Pane::Message => self.show_message,
+            Pane::Diff => self.show_diff,
+        }
+    }
+
+    /// Move keyboard focus to the next visible pane.
+    fn cycle_focus(&mut self) {
+        let order = [Pane::Queue, Pane::Message, Pane::Diff];
+        let cur = order.iter().position(|&p| p == self.focus).unwrap_or(0);
+        for step in 1..=order.len() {
+            let cand = order[(cur + step) % order.len()];
+            if self.pane_visible(cand) {
+                self.focus = cand;
+                return;
+            }
+        }
+    }
+
+    fn toggle_message_pane(&mut self) {
+        self.show_message = !self.show_message;
+        if !self.pane_visible(self.focus) {
+            self.focus = Pane::Queue;
+        }
+    }
+
+    fn toggle_diff_pane(&mut self) {
+        self.show_diff = !self.show_diff;
+        if !self.pane_visible(self.focus) {
+            self.focus = Pane::Queue;
+        }
+    }
+
+    /// The pane divider (if any) the cursor is on, for a resize drag.
+    fn divider_at(&self, col: u16, row: u16) -> Option<Divider> {
+        // Vertical divider: the shared border between the queue and the right
+        // column (only when a right pane is shown).
+        if self.right_area.width > 0 {
+            let vx = self.queue_area.right();
+            let in_rows = row >= self.body_area.y && row < self.body_area.bottom();
+            if in_rows && (col == vx || col + 1 == vx) {
+                return Some(Divider::Vertical);
+            }
+        }
+        // Horizontal divider: between message and diff (only when both shown).
+        if self.message_area.height > 0 && self.diff_area.height > 0 {
+            let hy = self.message_area.bottom();
+            let in_cols = col >= self.right_area.x && col < self.right_area.right();
+            if in_cols && (row == hy || row + 1 == hy) {
+                return Some(Divider::Horizontal);
+            }
+        }
+        None
+    }
+
+    /// Update the split ratio the user is dragging to the cursor position.
+    fn resize_to(&mut self, col: u16, row: u16) {
+        match self.drag {
+            Some(Divider::Vertical) if self.body_area.width > 0 => {
+                let rel = (col.saturating_sub(self.body_area.x)) as u32 * 100
+                    / self.body_area.width as u32;
+                self.h_split = (rel as u16).clamp(15, 80);
+            }
+            Some(Divider::Horizontal) if self.right_area.height > 0 => {
+                let rel = (row.saturating_sub(self.right_area.y)) as u32 * 100
+                    / self.right_area.height as u32;
+                self.v_split = (rel as u16).clamp(15, 85);
+            }
+            _ => {}
+        }
+    }
+
+    /// The PR URL if the cursor is on a branch header's PR link, else `None`.
+    fn pr_link_at(&self, col: u16, row: u16) -> Option<String> {
+        let repo = self.repo_url.as_ref()?;
+        let inner_top = self.queue_area.y + 1;
+        if row < inner_top {
+            return None;
+        }
+        let display_index = self.list_state.offset() + (row - inner_top) as usize;
+        let rows = self.engine.line().rows();
+        let Row::Branch { boundary } = rows.get(display_index)? else {
+            return None;
+        };
+        let n = self.engine.pr_of(*boundary)?;
+        let name = self.engine.branch_name(*boundary);
+        // Content starts after the left border (1) + highlight gutter (2).
+        let link_start = self.queue_area.x + 3 + format!("[{name}] ").chars().count() as u16;
+        (col >= link_start).then(|| format!("{repo}/pull/{n}"))
+    }
+}
+
+/// Open `url` in the user's default browser (best-effort).
+fn open_url(url: &str) {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Run the interactive editor over a loaded engine. Sets up the terminal,
@@ -619,7 +759,9 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         KeyCode::Char('k') | KeyCode::Up => app.select(app.selected.saturating_sub(1))?,
         KeyCode::Char('g') => app.select(0)?,
         KeyCode::Char('G') => app.select(app.commit_count().saturating_sub(1))?,
-        KeyCode::Tab => app.focus = next_pane(app.focus),
+        KeyCode::Tab => app.cycle_focus(),
+        KeyCode::Char('1') => app.toggle_message_pane(),
+        KeyCode::Char('2') => app.toggle_diff_pane(),
         // Ctrl-modified bindings must precede their bare-key namesakes so the
         // guard wins (Ctrl-d/u scroll; Ctrl-r redoes; bare r/u are ops).
         KeyCode::Char('d') if ctrl => scroll_focused(app, 10),
@@ -824,8 +966,25 @@ fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 }
 
 fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
-    // While a modal (help / prompt / quit-guard / conflict / message edit) is
-    // up, ignore the mouse.
+    // Pane-divider drags work regardless of mode (the panes stay visible).
+    match m.kind {
+        MouseEventKind::Up(_) => app.drag = None,
+        MouseEventKind::Drag(MouseButton::Left) if app.drag.is_some() => {
+            app.resize_to(m.column, m.row);
+            return Ok(());
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(d) = app.divider_at(m.column, m.row) {
+                app.drag = Some(d);
+                return Ok(());
+            }
+        }
+        _ => {}
+    }
+    if app.drag.is_some() {
+        return Ok(()); // swallow stray events mid-drag
+    }
+
     // In the split selector, a left-click toggles the line under the cursor.
     if let Some(st) = app.split.as_mut() {
         if let MouseEventKind::Down(MouseButton::Left) = m.kind {
@@ -858,9 +1017,14 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
     match m.kind {
         MouseEventKind::Down(MouseButton::Left) => {
             if intersects(app.queue_area, m.column, m.row) {
-                app.focus = Pane::Queue;
-                click_select_commit(app, m.row);
-                app.refresh_selection()?;
+                // A click on a branch's PR link opens it in the browser.
+                if let Some(url) = app.pr_link_at(m.column, m.row) {
+                    open_url(&url);
+                } else {
+                    app.focus = Pane::Queue;
+                    click_select_commit(app, m.row);
+                    app.refresh_selection()?;
+                }
             } else if intersects(app.message_area, m.column, m.row) {
                 app.focus = Pane::Message;
             } else if intersects(app.diff_area, m.column, m.row) {
@@ -910,52 +1074,133 @@ fn apply_scroll(current: u16, delta: i32) -> u16 {
     (current as i32 + delta).max(0) as u16
 }
 
-fn next_pane(p: Pane) -> Pane {
-    match p {
-        Pane::Queue => Pane::Message,
-        Pane::Message => Pane::Diff,
-        Pane::Diff => Pane::Queue,
-    }
-}
-
 fn intersects(area: Rect, col: u16, row: u16) -> bool {
     col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
 }
 
+/// Greedy word-wrap `s` to `width` columns, returning at least one line. Used to
+/// soft-wrap a commit subject that doesn't fit the queue pane.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 || s.chars().count() <= width {
+        return vec![s.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_len = 0usize;
+    for word in s.split_whitespace() {
+        let wlen = word.chars().count();
+        if cur_len == 0 {
+            cur.push_str(word);
+            cur_len = wlen;
+        } else if cur_len + 1 + wlen <= width {
+            cur.push(' ');
+            cur.push_str(word);
+            cur_len += 1 + wlen;
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_len = wlen;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 fn draw(f: &mut ratatui::Frame, app: &mut App) {
-    // Reserve a one-row footer for prompts / status / hints.
+    // A full-width header, the body, and a one-row footer.
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
         .split(f.area());
-    let body = outer[0];
+    draw_header(f, outer[0]);
+    let body = outer[1];
+    app.body_area = body;
 
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(body);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-        .split(chunks[1]);
+    let right_shown = app.show_message || app.show_diff;
 
-    app.queue_area = chunks[0];
-    app.message_area = right[0];
-    app.diff_area = right[1];
-
-    draw_queue(f, app, chunks[0]);
-    draw_message(f, app, right[0]);
-    // The diff pane flips to the interactive selector during a split.
-    if app.split.is_some() {
-        draw_split(f, app, right[1]);
+    // Horizontal split: the right column only exists if a right pane is shown.
+    let (queue_area, right_col) = if right_shown {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(app.h_split),
+                Constraint::Percentage(100 - app.h_split),
+            ])
+            .split(body);
+        (chunks[0], Some(chunks[1]))
     } else {
-        draw_diff(f, app, right[1]);
+        (body, None)
+    };
+    app.queue_area = queue_area;
+    app.right_area = right_col.unwrap_or_default();
+    // Reset the right-pane rects; only the visible ones get set below.
+    app.message_area = Rect::default();
+    app.diff_area = Rect::default();
+
+    draw_queue(f, app, queue_area);
+
+    if let Some(right) = right_col {
+        match (app.show_message, app.show_diff) {
+            (true, true) => {
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(app.v_split),
+                        Constraint::Percentage(100 - app.v_split),
+                    ])
+                    .split(right);
+                app.message_area = split[0];
+                app.diff_area = split[1];
+                draw_message(f, app, split[0]);
+                draw_diff_or_split(f, app, split[1]);
+            }
+            (true, false) => {
+                app.message_area = right;
+                draw_message(f, app, right);
+            }
+            (false, true) => {
+                app.diff_area = right;
+                draw_diff_or_split(f, app, right);
+            }
+            (false, false) => {}
+        }
     }
-    draw_footer(f, app, outer[1]);
+
+    draw_footer(f, app, outer[2]);
 
     if app.show_help {
         draw_help(f, body);
     }
+}
+
+/// The diff pane, or the interactive line-selector when a split is in progress.
+fn draw_diff_or_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    if app.split.is_some() {
+        draw_split(f, app, area);
+    } else {
+        draw_diff(f, app, area);
+    }
+}
+
+/// The full-width header bar.
+fn draw_header(f: &mut ratatui::Frame, area: Rect) {
+    let text = format!(" git-queue-tui v{}", env!("CARGO_PKG_VERSION"));
+    let header = Paragraph::new(text).style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(header, area);
 }
 
 /// The footer line: an active prompt, the quit-guard, a status/error message,
@@ -1019,8 +1264,8 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
     } else {
         (
             "j/k select  J/K reorder  e message  s squash  S split  D delete  \
-             r rename  a new-branch  x dissolve  </> shift  u undo  C-r redo  \
-             ? help  q quit"
+             r rename  a new-branch  x dissolve  1/2 hide panes  u undo  \
+             C-r redo  ? help  q quit"
                 .to_string(),
             Style::default().fg(Color::DarkGray),
         )
@@ -1046,33 +1291,70 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
 fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let line = app.engine.line();
     let (rows, selected_row) = app.rows_and_selected_row();
+    // Cached PR numbers per boundary (avoids borrowing the engine in the map).
+    let prs: Vec<Option<u64>> = (0..line.boundaries.len())
+        .map(|i| app.engine.pr_of(i))
+        .collect();
+
+    // Commit row prefix: `<id:10> <sha:8> `; continuation lines align under the
+    // subject. Wrap width is what's left of the pane after border + gutter.
+    const PREFIX_WIDTH: usize = 10 + 1 + 8 + 1; // id, space, short sha, space
+    let content_width = (area.width as usize).saturating_sub(2 + 2); // borders + gutter
+    let subject_width = content_width.saturating_sub(PREFIX_WIDTH).max(8);
+    let indent = " ".repeat(PREFIX_WIDTH);
+
     let items: Vec<ListItem> = rows
         .iter()
         .map(|r| match r {
-            Row::Branch { boundary } => ListItem::new(Line::from(Span::styled(
-                format!("[{}]", line.boundaries[*boundary].name),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ))),
+            Row::Branch { boundary } => {
+                let mut spans = vec![Span::styled(
+                    format!("[{}]", line.boundaries[*boundary].name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )];
+                // The PR number renders as a clickable link (click to open).
+                if let Some(n) = prs[*boundary] {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        format!("#{n}"),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::UNDERLINED),
+                    ));
+                }
+                ListItem::new(Line::from(spans))
+            }
             Row::Commit { index } => {
                 let c = &line.commits[*index];
                 let id = match &c.id {
                     Some(id) => id.chars().take(10).collect::<String>(),
                     None => "(no id)".to_string(),
                 };
-                // The leading gutter comes from the highlight symbol/spacing.
-                let mut spans = vec![
-                    Span::styled(format!("{id:<10} "), Style::default().fg(Color::Blue)),
-                    Span::raw(c.subject.clone()),
-                ];
+                let short: String = c.sha.chars().take(8).collect();
+                // Stable id first, then the short SHA.
+                let prefix = format!("{id:<10} {short:<8} ");
+                let mut subject = c.subject.clone();
                 if c.empty {
-                    spans.push(Span::styled(
-                        "  (empty)",
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                    subject.push_str("  (empty)");
                 }
-                ListItem::new(Line::from(spans))
+                // Soft-wrap the subject; continuation lines keep the indent.
+                let wrapped = wrap_text(&subject, subject_width);
+                let mut lines: Vec<Line> = Vec::new();
+                for (i, chunk) in wrapped.into_iter().enumerate() {
+                    if i == 0 {
+                        lines.push(Line::from(vec![
+                            Span::styled(prefix.clone(), Style::default().fg(Color::Blue)),
+                            Span::raw(chunk),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw(indent.clone()),
+                            Span::raw(chunk),
+                        ]));
+                    }
+                }
+                ListItem::new(lines)
             }
         })
         .collect();
@@ -1188,9 +1470,11 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect) {
         ("a", "start a new branch at the selected commit"),
         ("x", "dissolve the selected commit's branch"),
         ("< / >", "shift the branch boundary by a commit"),
+        ("1 / 2", "hide/show the message / diff pane"),
         ("u", "undo"),
         ("Ctrl-r", "redo"),
-        ("mouse click", "select commit / focus pane"),
+        ("mouse click", "select commit / focus pane / open PR link"),
+        ("mouse drag", "drag a pane divider to resize"),
         ("mouse wheel", "scroll pane under cursor"),
         ("?", "toggle this help"),
         ("q / Esc", "quit (asks if operations are pending)"),
@@ -1742,6 +2026,68 @@ mod tests {
             assert!(app.msg_edit.is_none());
             assert!(app.status.is_empty(), "no error: {}", app.status);
             assert_eq!(app.commit_count(), before + 1, "split produced a second commit");
+        });
+    }
+
+    #[test]
+    fn wrap_text_splits_on_word_boundaries() {
+        assert_eq!(wrap_text("short", 10), vec!["short"]);
+        assert_eq!(wrap_text("one two three", 7), vec!["one two", "three"]);
+        assert_eq!(wrap_text("anything", 0), vec!["anything"], "width 0 → one line");
+    }
+
+    #[test]
+    fn toggling_hides_and_restores_the_right_panes() {
+        with_app(|app| {
+            assert!(app.show_message && app.show_diff);
+            press(app, '1');
+            assert!(!app.show_message);
+            press(app, '2');
+            assert!(!app.show_diff, "both right panes hidden");
+            press(app, '1');
+            assert!(app.show_message, "restored");
+        });
+    }
+
+    #[test]
+    fn focus_cycling_skips_hidden_panes() {
+        with_app(|app| {
+            app.show_message = false;
+            app.focus = Pane::Queue;
+            app.cycle_focus();
+            assert_eq!(app.focus, Pane::Diff, "the hidden message pane is skipped");
+        });
+    }
+
+    #[test]
+    fn the_header_and_short_sha_render() {
+        with_app(|app| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let text = buffer_text(terminal.backend());
+            assert!(text.contains("git-queue-tui v"), "header rendered");
+            let short: String = app.engine.line().commits[app.selected]
+                .sha
+                .chars()
+                .take(8)
+                .collect();
+            assert!(text.contains(&short), "short sha shown alongside the id");
+        });
+    }
+
+    #[test]
+    fn dragging_the_vertical_divider_resizes_the_panes() {
+        with_app(|app| {
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap(); // populates the pane rects
+            let vx = app.queue_area.right();
+            let row = app.body_area.y + 1;
+            assert_eq!(app.divider_at(vx, row), Some(Divider::Vertical));
+
+            let before = app.h_split;
+            app.drag = Some(Divider::Vertical);
+            app.resize_to(app.body_area.x + app.body_area.width * 3 / 4, row);
+            assert!(app.h_split > before, "dragging right widened the queue");
         });
     }
 
