@@ -158,6 +158,13 @@ struct App {
     msg_apply_discard: bool,
     /// A branch (boundary index) left empty by a delete, offered for dissolve.
     dissolve_prompt: Option<usize>,
+    /// When moving a commit: the index of the picked-up commit. While `Some`,
+    /// `move_cursor` is the destination gap (0..=N) and the move applies on
+    /// Enter — one rebase, not one per keystroke.
+    move_from: Option<usize>,
+    /// The destination gap for a move: 0 = before the front commit, N = after
+    /// the tip. Gap `g` means "place just before commit `g`".
+    move_cursor: usize,
     /// The active split line-selector, if any.
     split: Option<SplitState>,
     /// Set when the user chose to resolve a conflict in the shell: quit without
@@ -199,6 +206,8 @@ impl App {
             msg_edit: None,
             msg_apply_discard: false,
             dissolve_prompt: None,
+            move_from: None,
+            move_cursor: 0,
             split: None,
             suspend: false,
             status: String::new(),
@@ -244,8 +253,40 @@ impl App {
     }
 
     /// Reorder the selected commit to `to`, following it with the selection.
-    fn reorder_to(&mut self, to: usize) {
-        let from = self.selected;
+    /// Pick up the selected commit to move it: enter move mode with the
+    /// destination cursor at the commit's current position.
+    fn start_move(&mut self) {
+        if self.commit_count() < 2 {
+            self.status = "nothing to reorder".into();
+            return;
+        }
+        self.move_from = Some(self.selected);
+        self.move_cursor = self.selected; // its own front gap
+    }
+
+    /// Move the destination cursor within the gaps `0..=N`.
+    fn move_cursor_by(&mut self, delta: isize) {
+        let n = self.commit_count();
+        let next = (self.move_cursor as isize + delta).clamp(0, n as isize);
+        self.move_cursor = next as usize;
+    }
+
+    fn cancel_move(&mut self) {
+        self.move_from = None;
+    }
+
+    /// Apply the pending move: place the picked-up commit at the cursor gap.
+    /// Placing it back where it started just cancels (no rebase).
+    fn place_move(&mut self) {
+        let Some(from) = self.move_from.take() else {
+            return;
+        };
+        let g = self.move_cursor;
+        // Gaps `from` and `from+1` are the commit's own position → no-op.
+        if g == from || g == from + 1 {
+            return;
+        }
+        let to = if g < from { g } else { g - 1 };
         match self.engine.apply(Operation::Reorder { from, to }) {
             Ok(Applied::Done) => {
                 self.selected = to;
@@ -686,6 +727,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     if app.split.is_some() {
         return handle_split_key(app, key);
     }
+    if app.move_from.is_some() {
+        return handle_move_key(app, key);
+    }
     if app.conflict_prompt {
         return handle_conflict_key(app, key);
     }
@@ -815,17 +859,8 @@ fn handle_normal_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
             delta: -1,
         }),
 
-        // ---- reorder (history-rewriting) ----
-        KeyCode::Char('J') => {
-            if app.selected + 1 < app.commit_count() {
-                app.reorder_to(app.selected + 1);
-            }
-        }
-        KeyCode::Char('K') => {
-            if app.selected > 0 {
-                app.reorder_to(app.selected - 1);
-            }
-        }
+        // ---- reorder: pick up the commit, then position and place it ----
+        KeyCode::Char(' ') => app.start_move(),
 
         // ---- undo ----
         KeyCode::Char('u') => app.apply_op(Operation::Undo),
@@ -934,6 +969,21 @@ fn next_selectable(lines: &[SplitLine], from: usize, dir: isize) -> Option<usize
     }
 }
 
+/// Positioning a picked-up commit: j/k move the destination cursor, Enter
+/// places it (one rebase), Esc cancels.
+fn handle_move_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => app.move_cursor_by(1),
+        KeyCode::Char('k') | KeyCode::Up => app.move_cursor_by(-1),
+        KeyCode::Char('g') => app.move_cursor = 0,
+        KeyCode::Char('G') => app.move_cursor = app.commit_count(),
+        KeyCode::Enter => app.place_move(),
+        KeyCode::Esc | KeyCode::Char('q') => app.cancel_move(),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// The dissolve choice for a branch a delete left empty.
 fn handle_dissolve_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     let Some(boundary) = app.dissolve_prompt else {
@@ -1023,6 +1073,7 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
         || app.conflict_prompt
         || app.msg_edit.is_some()
         || app.dissolve_prompt.is_some()
+        || app.move_from.is_some()
     {
         return Ok(());
     }
@@ -1088,6 +1139,18 @@ fn apply_scroll(current: u16, delta: i32) -> u16 {
 
 fn intersects(area: Rect, col: u16, row: u16) -> bool {
     col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
+}
+
+/// The insertion-cursor line shown between commits while moving one.
+fn move_cursor_item(inner_width: usize) -> ListItem<'static> {
+    let label = "▸ Enter: place here · Esc: cancel ";
+    let dashes = inner_width.saturating_sub(label.chars().count());
+    ListItem::new(Line::from(Span::styled(
+        format!("{label}{}", "─".repeat(dashes)),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )))
 }
 
 /// Greedy word-wrap `s` to `width` columns, returning at least one line. Used to
@@ -1218,7 +1281,21 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
 /// The footer line: an active prompt, the quit-guard, a status/error message,
 /// or the default key hint — in that priority.
 fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let (text, style) = if let Some(st) = &app.split {
+    let (text, style) = if let Some(from) = app.move_from {
+        let subject = app
+            .engine
+            .line()
+            .commits
+            .get(from)
+            .map(|c| c.subject.as_str())
+            .unwrap_or("commit");
+        (
+            format!("moving `{subject}` — j/k position · Enter place · Esc cancel"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(st) = &app.split {
         (
             format!(
                 "split — Space toggle · j/k move · Enter confirm · Esc cancel  \
@@ -1275,7 +1352,7 @@ fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
         (app.status.clone(), Style::default().fg(Color::Red))
     } else {
         (
-            "j/k select  J/K reorder  e message  s squash  S split  D delete  \
+            "j/k select  Space move  e message  s squash  S split  D delete  \
              r rename  a new-branch  x dissolve  1/2 hide panes  u undo  \
              C-r redo  ? help  q quit"
                 .to_string(),
@@ -1301,6 +1378,9 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
 }
 
 fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    let move_from = app.move_from;
+    let move_cursor = app.move_cursor;
+    let commit_count = app.commit_count();
     let line = app.engine.line();
     let (rows, selected_row) = app.rows_and_selected_row();
     // Cached PR numbers per boundary (avoids borrowing the engine in the map).
@@ -1315,9 +1395,18 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let subject_width = content_width.saturating_sub(PREFIX_WIDTH).max(8);
     let indent = " ".repeat(PREFIX_WIDTH);
 
-    let items: Vec<ListItem> = rows
-        .iter()
-        .map(|r| match r {
+    let mut items: Vec<ListItem> = Vec::new();
+    // The list row of the insertion cursor while moving (for scroll/highlight).
+    let mut cursor_row: Option<usize> = None;
+    for r in &rows {
+        // The insertion cursor sits just before the commit at `move_cursor`.
+        if let Row::Commit { index } = r {
+            if move_from.is_some() && *index == move_cursor {
+                cursor_row = Some(items.len());
+                items.push(move_cursor_item(content_width));
+            }
+        }
+        match r {
             Row::Branch { boundary } => {
                 let mut spans = vec![Span::styled(
                     format!("[{}]", line.boundaries[*boundary].name),
@@ -1335,7 +1424,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::UNDERLINED),
                     ));
                 }
-                ListItem::new(Line::from(spans))
+                items.push(ListItem::new(Line::from(spans)));
             }
             Row::Commit { index } => {
                 let c = &line.commits[*index];
@@ -1344,34 +1433,57 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                     None => "(no id)".to_string(),
                 };
                 let short: String = c.sha.chars().take(8).collect();
-                // Stable id first, then the short SHA.
                 let prefix = format!("{id:<10} {short:<8} ");
                 let mut subject = c.subject.clone();
                 if c.empty {
                     subject.push_str("  (empty)");
                 }
+                // The picked-up commit fades out while it's being moved.
+                let dim = move_from == Some(*index);
+                let prefix_style = if dim {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                } else {
+                    Style::default().fg(Color::Blue)
+                };
+                let text_style = if dim {
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                };
                 // Soft-wrap the subject; continuation lines keep the indent.
                 let wrapped = wrap_text(&subject, subject_width);
                 let mut lines: Vec<Line> = Vec::new();
                 for (i, chunk) in wrapped.into_iter().enumerate() {
                     if i == 0 {
                         lines.push(Line::from(vec![
-                            Span::styled(prefix.clone(), Style::default().fg(Color::Blue)),
-                            Span::raw(chunk),
+                            Span::styled(prefix.clone(), prefix_style),
+                            Span::styled(chunk, text_style),
                         ]));
                     } else {
                         lines.push(Line::from(vec![
                             Span::raw(indent.clone()),
-                            Span::raw(chunk),
+                            Span::styled(chunk, text_style),
                         ]));
                     }
                 }
-                ListItem::new(lines)
+                items.push(ListItem::new(lines));
             }
-        })
-        .collect();
+        }
+    }
+    // The cursor can also sit after the tip (gap == commit count).
+    if move_from.is_some() && move_cursor >= commit_count {
+        cursor_row = Some(items.len());
+        items.push(move_cursor_item(content_width));
+    }
 
-    app.list_state.select(Some(selected_row));
+    // While moving, track the cursor line (so it scrolls into view); otherwise
+    // the selected commit.
+    let highlight_row = if move_from.is_some() {
+        cursor_row
+    } else {
+        Some(selected_row)
+    };
+    app.list_state.select(highlight_row);
     let list = List::new(items)
         .block(pane_block("queue", app.focus == Pane::Queue))
         // A clear marker + reversed style so the selected commit is unmistakable.
@@ -1478,12 +1590,14 @@ const HELP_KEYS: &[(&str, &str)] = &[
 /// Key → (title, longer explanation), for the operations that aren't obvious.
 const HELP_OPS: &[(&str, &str, &str)] = &[
     (
-        "J / K",
-        "Reorder",
-        "Move the selected commit one step toward the tip / front. History is \
-         rewritten immediately, keeping the commit's Stable-Commit-Id. Crossing a \
-         branch boundary reassigns the commit to the branch it lands in. If the \
-         rebase conflicts you're asked to Resolve (drop to the shell) or Undo.",
+        "Space",
+        "Move (reorder)",
+        "Press Space to pick up the selected commit (it fades out); then j/k move \
+         an insertion cursor between commits, Enter places it there, Esc \
+         cancels. The rebase happens once, on place — not on every keystroke. \
+         The commit keeps its Stable-Commit-Id; crossing a branch boundary \
+         reassigns it to the branch it lands in. A conflict prompts Resolve \
+         (drop to the shell) or Undo.",
     ),
     (
         "e",
@@ -1925,7 +2039,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_j_reorders_and_the_selection_follows() {
+    fn pick_up_position_and_place_reorders_a_commit() {
         // feature.txt and more.txt touch different files, so this is clean.
         with_app(|app| {
             let subjects_before: Vec<String> = app
@@ -1936,8 +2050,14 @@ mod tests {
                 .map(|c| c.subject.clone())
                 .collect();
             key(app, KeyCode::Char('g')); // select the front commit
-            press(app, 'J'); // move it down one
+            press(app, ' '); // pick it up
+            assert_eq!(app.move_from, Some(0), "picked up the front commit");
+            press(app, 'j'); // cursor gap 0 → 1
+            press(app, 'j'); // → 2 (after the tip)
+            key(app, KeyCode::Enter); // place it there (one rebase)
+            assert!(app.move_from.is_none(), "move completed");
             assert_eq!(app.selected, 1, "selection follows the moved commit");
+
             let subjects_after: Vec<String> = app
                 .engine
                 .line()
@@ -1951,11 +2071,47 @@ mod tests {
     }
 
     #[test]
-    fn a_conflicting_reorder_raises_the_prompt_and_undo_backs_out() {
+    fn move_mode_renders_the_insertion_cursor() {
+        with_app(|app| {
+            press(app, ' '); // pick up
+            press(app, 'j'); // position the cursor
+            let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            terminal.draw(|f| draw(f, app)).unwrap();
+            let text = buffer_text(terminal.backend());
+            assert!(text.contains("place here"), "insertion cursor rendered");
+        });
+    }
+
+    #[test]
+    fn placing_a_commit_at_its_own_gap_is_a_no_op() {
+        with_app(|app| {
+            key(app, KeyCode::Char('g'));
+            press(app, ' '); // pick up commit 0, cursor at gap 0
+            key(app, KeyCode::Enter); // place at its own gap → cancel
+            assert!(app.move_from.is_none());
+            assert!(!app.engine.has_pending(), "no rebase happened");
+        });
+    }
+
+    #[test]
+    fn escape_cancels_a_move() {
+        with_app(|app| {
+            press(app, ' ');
+            assert!(app.move_from.is_some());
+            key(app, KeyCode::Esc);
+            assert!(app.move_from.is_none(), "move cancelled");
+            assert!(!app.engine.has_pending());
+        });
+    }
+
+    #[test]
+    fn a_conflicting_move_raises_the_prompt_and_undo_backs_out() {
         with_app_over(repo_with_conflict(), |app| {
-            // Move "edit to B" (last) up onto "edit to A" — a line-2 conflict.
+            // Place "edit to B" (last) before "edit to A" — a line-2 conflict.
             key(app, KeyCode::Char('G'));
-            press(app, 'K');
+            press(app, ' '); // pick up index 2
+            press(app, 'k'); // cursor gap 2 → 1
+            key(app, KeyCode::Enter); // place → conflict
             assert!(app.conflict_prompt, "the conflict prompt is raised");
             assert!(app.engine.conflicted());
 
@@ -1971,7 +2127,9 @@ mod tests {
     fn resolving_a_conflict_sets_suspend_and_quits() {
         with_app_over(repo_with_conflict(), |app| {
             key(app, KeyCode::Char('G'));
-            press(app, 'K');
+            press(app, ' ');
+            press(app, 'k');
+            key(app, KeyCode::Enter);
             assert!(app.conflict_prompt);
 
             press(app, 'r'); // resolve in the shell
@@ -2162,9 +2320,9 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(120, 44)).unwrap();
             terminal.draw(|f| draw(f, app)).unwrap();
             let text = buffer_text(terminal.backend());
-            assert!(text.contains("Reorder"), "operation titles are shown");
+            assert!(text.contains("reorder"), "operation titles are shown");
             assert!(
-                text.contains("Stable-Commit-Id"),
+                text.contains("fades"),
                 "longer explanations are shown"
             );
 
