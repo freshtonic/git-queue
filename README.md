@@ -34,37 +34,42 @@ with a shared queue map.
 ```sh
 git clone git@github.com:freshtonic/git-queue.git
 cd git-queue
-./install.sh          # cargo install (the binary) + install the man page
+cargo install --path .      # installs the `git-queue` binary
 git queue --version
+git queue setup             # optional: man page, completion, alias, hooks, gate
 ```
 
-`install.sh` runs `cargo install --path .` and then writes the man page to a
-directory on your `MANPATH` (`cargo install` only ever installs *binaries*, so
-the man page is placed separately). Afterwards both `man git-queue` and
-`git queue --help` work — git routes `git queue --help` to `man git-queue`
-(use `git queue help` for the inline CLI help).
+`cargo install` puts the `git-queue` binary on your `PATH`, so `git queue …`
+works immediately (git's standard subcommand mechanism). `git queue setup` then
+walks through the optional extras interactively (see below).
 
-Binary only, no man page:
+### `git queue setup`
 
 ```sh
-cargo install --path .
+git queue setup             # interactive
+git queue setup --undo      # reverse everything it did
 ```
 
-Two binaries are installed — `git-queue` and its alias `git-q` — so git
-dispatches both `git queue …` and the shorter `git q …` to the same tool
-(git's standard subcommand mechanism).
+It asks about each, per step:
 
-### Optional: auto-requeue hooks
+- **git hooks** (per repo) — a plain `git commit`/`--amend` on a queue branch
+  auto-requeues its descendants and stamps a Stable-Commit-Id. Without them, use
+  `git queue commit` / `git queue amend` explicitly.
+- **merge-order gate** (per repo) — submit/sync post a red/green commit status
+  per PR.
+- **man page** — installs `git-queue.1` to a directory on your `MANPATH`, so
+  `man git-queue` and `git queue --help` work (git routes `--help` to the man
+  page; `git queue help` shows the inline CLI help).
+- **shell completion** — for bash, zsh or fish (detected from `$SHELL`). Or
+  install it by hand: `git queue completions <shell>` prints the script to
+  stdout.
+- **`git q` alias** — adds `alias.q = queue` to your global git config, so the
+  shorter `git q …` works.
+- **agent integrations** — the Claude Code skill and/or an AGENTS.md section
+  when those tools are detected.
 
-To have a plain `git commit`/`git commit --amend` on a queue branch
-automatically requeue its descendants, install the git hooks (per repository):
-
-```sh
-git queue setup             # interactive: hooks, gate, agent skills
-git queue setup --undo      # reverse it all
-```
-
-Without the hooks, use `git queue commit` / `git queue amend` explicitly.
+`--yes` accepts the two repo-local steps (hooks, gate) non-interactively; the
+user-scoped steps (man page, completion, alias, skill) are interactive only.
 
 ### Requirements
 
@@ -267,8 +272,9 @@ post-rewrite hook will call `git queue requeue` for you (the hooks are guarded
 against recursion and no-op off a queue).
 
 > Note: `git queue --help` and `git queue <cmd> --help` are intercepted by git to
-> open a man page (`man git-queue`). Install via `./install.sh` so that page
-> exists; otherwise use `git queue help` or `git-queue --help` for inline help.
+> open a man page (`man git-queue`). Run `git queue setup` (and accept the man
+> page step) so that page exists; otherwise use `git queue help` or
+> `git-queue --help` for inline help.
 
 ## How it works
 

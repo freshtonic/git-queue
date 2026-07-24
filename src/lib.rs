@@ -24,8 +24,8 @@ use std::path::PathBuf;
                   the one before it, and the PRs merge in FIFO order — front of the queue \
                   first. git-queue tracks that order, keeps the queue rebased on its base \
                   branch, and opens numbered, cross-linked pull requests — one per branch. \
-                  Installed as both `git-queue` and `git-q`, so `git queue …` and `git q …` \
-                  are equivalent."
+                  Run `git queue setup` after installing to add man pages, shell completion, \
+                  and an optional `git q` alias."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -224,9 +224,9 @@ enum Command {
         long_about = "Closes every open PR of the current queue without merging — for abandoning or restarting a published queue. Merged PRs, local branches and metadata are all left untouched."
     )]
     Yank,
-    /// Interactive setup: hooks, merge-order gate, and agent-skill install.
+    /// Interactive setup: hooks, gate, man page, completion, `git q` alias, agent skills.
     #[command(
-        long_about = "Walks through git-queue's optional integrations, asking permission for each step: the git hooks (auto-requeue after plain commits, Stable-Commit-Id stamping), the advisory merge-order gate (red/green commit status per PR), the Claude Code skill (when Claude Code is detected), and a git-queue section in AGENTS.md (when other agent CLIs are detected — the cross-agent convention read by Codex, Cursor, Copilot and others). --yes accepts the two repo-local steps non-interactively; --undo reverses everything."
+        long_about = "Walks through git-queue's optional integrations, asking permission for each step: the git hooks (auto-requeue after plain commits, Stable-Commit-Id stamping), the advisory merge-order gate (red/green commit status per PR), the man page (`man git-queue`), shell completion for your shell, a `git q` alias in your global git config, the Claude Code skill (when Claude Code is detected), and a git-queue section in AGENTS.md (when other agent CLIs are detected — the cross-agent convention read by Codex, Cursor, Copilot and others). --yes accepts the two repo-local steps (hooks, gate) non-interactively; the user-scoped steps (man page, completion, alias, skill) are interactive only. --undo reverses everything."
     )]
     Setup {
         /// Accept the hooks and gate steps without asking (integrations still ask).
@@ -259,7 +259,15 @@ enum Command {
         /// Path to the rebase todo file (passed by git).
         file: PathBuf,
     },
-    /// Generate the roff man page (used by install.sh; also enables `git queue --help`).
+    /// Print a shell completion script to stdout.
+    #[command(
+        long_about = "Prints a completion script for the given shell (bash, zsh, fish, elvish, powershell) to stdout. `git queue setup` installs this for you interactively; use this to install it by hand, e.g. `git queue completions zsh > ~/.local/share/zsh/site-functions/_git-queue`."
+    )]
+    Completions {
+        /// The shell to generate completions for.
+        shell: clap_complete::Shell,
+    },
+    /// Generate the roff man page (enables `git queue --help`; installed by `setup`).
     #[command(hide = true)]
     Man {
         /// Directory to write `git-queue.1` into. Prints to stdout if omitted.
@@ -268,13 +276,18 @@ enum Command {
     },
 }
 
-/// Render the man page. clap_mangen produces the top-level page, whose
-/// SUBCOMMANDS section references non-existent per-subcommand pages
-/// (git-queue-init(1)); we replace it with a fully detailed COMMANDS
-/// section — real `git queue <cmd>` names, the long description, and every
-/// argument — generated from the same clap definitions.
-fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
-    use std::io::Write;
+/// The clap command tree — the single source used to render both the man page
+/// and shell completions.
+pub(crate) fn cli_command() -> clap::Command {
+    Cli::command()
+}
+
+/// Render the man page as roff text. clap_mangen produces the top-level page,
+/// whose SUBCOMMANDS section references non-existent per-subcommand pages
+/// (git-queue-init(1)); we replace it with a fully detailed COMMANDS section —
+/// real `git queue <cmd>` names, the long description, and every argument —
+/// generated from the same clap definitions.
+pub(crate) fn man_text() -> anyhow::Result<String> {
     let cmd = Cli::command();
     let man = clap_mangen::Man::new(cmd.clone());
     let mut buffer: Vec<u8> = Vec::new();
@@ -283,7 +296,7 @@ fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
 
     // Drop the auto-generated SUBCOMMANDS section (starts at .SH SUBCOMMANDS,
     // ends at the next .SH) and put the detailed section in its place.
-    let text = match text.find(".SH SUBCOMMANDS") {
+    Ok(match text.find(".SH SUBCOMMANDS") {
         Some(start) => {
             let rest = &text[start + 4..];
             let end = rest
@@ -298,8 +311,13 @@ fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
             )
         }
         None => text + &commands_section(&cmd),
-    };
+    })
+}
 
+/// Write the man page to `dir/git-queue.1`, or to stdout when `dir` is `None`.
+fn generate_man(dir: Option<PathBuf>) -> anyhow::Result<()> {
+    use std::io::Write;
+    let text = man_text()?;
     match dir {
         Some(dir) => {
             std::fs::create_dir_all(&dir)?;
@@ -389,7 +407,7 @@ fn commands_section(cmd: &clap::Command) -> String {
 }
 
 /// Parse the CLI and run the selected subcommand. Exits the process on error.
-/// Called by both binaries (`git-queue` and its alias `git-q`).
+/// Called by the `git-queue` binary.
 pub fn run() {
     let cli = Cli::parse();
     let result = match cli.command {
@@ -428,6 +446,7 @@ pub fn run() {
         Command::AddQueueId { file } => commands::add_queue_id(&file),
         Command::ReorderTodo { file } => commands::reorder_todo(&file),
         Command::Requeue { auto } => commands::requeue(auto),
+        Command::Completions { shell } => commands::completions(shell),
         Command::Man { dir } => generate_man(dir),
     };
     if let Err(e) = result {

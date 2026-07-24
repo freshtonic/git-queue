@@ -75,7 +75,45 @@ so reviewers see which PR merges next)",
         meta::set_gate("status")?;
         println!("Merge-order gate enabled.");
     }
-    // 3. Claude Code skill (only when Claude Code is present; interactive only).
+    // The next three steps are user-scoped (not repo-local), so they only run
+    // interactively — never under a non-interactive `--yes`.
+    // 3. Man page.
+    if tty && confirm("Install the man page? (`man git-queue`, and `git queue --help`)", true) {
+        if let Err(e) = install_man_pages() {
+            eprintln!("note: could not install the man page: {e:#}");
+        }
+    }
+    // 4. Shell completion.
+    if tty {
+        match detect_shell() {
+            Some(shell) => {
+                if confirm(
+                    &format!("Install {shell} completion for the `git queue` commands?"),
+                    true,
+                ) {
+                    if let Err(e) = install_completions(shell) {
+                        eprintln!("note: could not install completion: {e:#}");
+                    }
+                }
+            }
+            None => println!(
+                "note: shell not recognised from $SHELL; skipping completion \
+                 (bash / zsh / fish are supported)."
+            ),
+        }
+    }
+    // 5. `git q` alias.
+    if tty
+        && confirm(
+            "Add a `git q` alias to your global git config (shortcut for `git queue`)?",
+            true,
+        )
+    {
+        if let Err(e) = install_git_alias() {
+            eprintln!("note: could not set the alias: {e:#}");
+        }
+    }
+    // 6. Claude Code skill (only when Claude Code is present; interactive only).
     let home = std::env::var("HOME").unwrap_or_default();
     let claude_dir = std::path::Path::new(&home).join(".claude");
     if tty
@@ -91,7 +129,7 @@ git-queue correctly?",
         std::fs::write(dir.join("SKILL.md"), EMBEDDED_SKILL)?;
         println!("Installed {}.", dir.join("SKILL.md").display());
     }
-    // 4. Other agents -> AGENTS.md (the cross-agent convention).
+    // 7. Other agents -> AGENTS.md (the cross-agent convention).
     let others: Vec<&str> = [
         ("codex", ".codex"),
         ("cursor", ".cursor"),
@@ -127,6 +165,17 @@ fn setup_undo() -> Result<()> {
     hooks_uninstall()?;
     let _ = git::ok(&["config", "--local", "--unset", "queue.gate"]);
     println!("Merge-order gate disabled.");
+    remove_man_pages();
+    remove_completions();
+    // Only remove the alias if it's still the one we set.
+    if git::out(&["config", "--global", "--get", "alias.q"])
+        .ok()
+        .as_deref()
+        == Some("queue")
+    {
+        let _ = git::ok(&["config", "--global", "--unset", "alias.q"]);
+        println!("Removed the `git q` alias.");
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     let skill = std::path::Path::new(&home).join(".claude/skills/using-git-queue/SKILL.md");
     if skill.exists() {
@@ -134,6 +183,156 @@ fn setup_undo() -> Result<()> {
         println!("Removed {}.", skill.display());
     }
     strip_agents_md_section()?;
+    Ok(())
+}
+
+fn home_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+}
+
+/// The candidate `man1` directories, preferring a system-wide location.
+fn man_dirs() -> Vec<std::path::PathBuf> {
+    vec![
+        std::path::PathBuf::from("/usr/local/share/man/man1"),
+        home_dir().join(".local/share/man/man1"),
+    ]
+}
+
+/// True if `dir` accepts a file we write (a real writability probe — a
+/// successful `mkdir` does not guarantee it).
+fn dir_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".git-queue-probe");
+    let ok = std::fs::write(&probe, b"").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// Render and install the man page into a writable man1 directory that's on
+/// the MANPATH, noting how to extend MANPATH when a user-local dir is used.
+fn install_man_pages() -> Result<()> {
+    let text = crate::man_text()?;
+    let dir = man_dirs()
+        .into_iter()
+        .find(|d| std::fs::create_dir_all(d).is_ok() && dir_writable(d))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no writable man directory (tried /usr/local and ~/.local)")
+        })?;
+    let path = dir.join("git-queue.1");
+    std::fs::write(&path, &text)?;
+    println!("Installed man page: {}", path.display());
+
+    let user_base = home_dir().join(".local/share/man");
+    if dir.starts_with(&user_base) && !manpath_contains(&user_base) {
+        println!(
+            "note: add {0} to your MANPATH so `man git-queue` resolves, e.g.:\n      \
+             export MANPATH=\"{0}:$(manpath)\"",
+            user_base.display()
+        );
+    }
+    Ok(())
+}
+
+fn remove_man_pages() {
+    for dir in man_dirs() {
+        for name in ["git-queue.1", "git-q.1"] {
+            let p = dir.join(name);
+            if p.exists() && std::fs::remove_file(&p).is_ok() {
+                println!("Removed {}.", p.display());
+            }
+        }
+    }
+}
+
+fn manpath_contains(dir: &std::path::Path) -> bool {
+    std::process::Command::new("manpath")
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split(':')
+                .any(|p| std::path::Path::new(p.trim()) == dir)
+        })
+        .unwrap_or(false)
+}
+
+/// The user's shell, from `$SHELL`, if it's one we can generate completions for.
+fn detect_shell() -> Option<clap_complete::Shell> {
+    let shell = std::env::var("SHELL").ok()?;
+    match std::path::Path::new(&shell)
+        .file_name()?
+        .to_string_lossy()
+        .as_ref()
+    {
+        "bash" => Some(clap_complete::Shell::Bash),
+        "zsh" => Some(clap_complete::Shell::Zsh),
+        "fish" => Some(clap_complete::Shell::Fish),
+        _ => None,
+    }
+}
+
+/// Where a shell looks for a completion file, and the file's name.
+fn completion_target(shell: clap_complete::Shell) -> Option<(std::path::PathBuf, &'static str)> {
+    use clap_complete::Shell::*;
+    let home = home_dir();
+    match shell {
+        Bash => Some((
+            home.join(".local/share/bash-completion/completions"),
+            "git-queue",
+        )),
+        Zsh => Some((home.join(".local/share/zsh/site-functions"), "_git-queue")),
+        Fish => Some((home.join(".config/fish/completions"), "git-queue.fish")),
+        _ => None,
+    }
+}
+
+/// Generate and install a completion script for the `git-queue` binary. git's
+/// own completion resolves `git queue` / `git q` through it.
+fn install_completions(shell: clap_complete::Shell) -> Result<()> {
+    let (dir, name) = completion_target(shell)
+        .ok_or_else(|| anyhow::anyhow!("no completion location for {shell}"))?;
+    std::fs::create_dir_all(&dir)?;
+    let mut cmd = crate::cli_command();
+    let mut buf: Vec<u8> = Vec::new();
+    clap_complete::generate(shell, &mut cmd, "git-queue", &mut buf);
+    let path = dir.join(name);
+    std::fs::write(&path, &buf)?;
+    println!("Installed {shell} completion: {}", path.display());
+    if let clap_complete::Shell::Zsh = shell {
+        println!(
+            "note: ensure {0} is on your $fpath and compinit runs, e.g. in ~/.zshrc:\n      \
+             fpath=({0} $fpath); autoload -Uz compinit && compinit",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn remove_completions() {
+    for shell in [
+        clap_complete::Shell::Bash,
+        clap_complete::Shell::Zsh,
+        clap_complete::Shell::Fish,
+    ] {
+        if let Some((dir, name)) = completion_target(shell) {
+            let p = dir.join(name);
+            if p.exists() && std::fs::remove_file(&p).is_ok() {
+                println!("Removed {}.", p.display());
+            }
+        }
+    }
+}
+
+/// `git queue completions <shell>` — print a completion script to stdout.
+pub fn completions(shell: clap_complete::Shell) -> Result<()> {
+    let mut cmd = crate::cli_command();
+    clap_complete::generate(shell, &mut cmd, "git-queue", &mut std::io::stdout());
+    Ok(())
+}
+
+/// Add a `git q` → `git queue` alias to the user's global git config.
+fn install_git_alias() -> Result<()> {
+    git::run(&["config", "--global", "alias.q", "queue"])?;
+    println!("Added `git q` alias to your global git config (shortcut for `git queue`).");
     Ok(())
 }
 

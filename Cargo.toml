@@ -5,13 +5,15 @@ edition = "2021"
 description = "Manage queues of dependent branches and their numbered pull requests"
 license = "MIT"
 
-# Two binaries are built from thin wrappers in src/bin/ around the library's
-# `run()`: `git-queue` (so `git queue ...` dispatches to it — git's standard
-# subcommand mechanism) and the alias `git-q` (so `git q ...` works too).
+# One binary, `git-queue`, is built from a thin wrapper in src/bin/ around the
+# library's `run()`, so `git queue ...` dispatches to it via git's standard
+# subcommand mechanism. `git queue setup` can add a `git q` alias to the user's
+# global git config for a shorter form.
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 clap_mangen = "0.2"
 # The interactive `git queue tui` editor (ADR-0001). By far the project's
 # largest dependency; the domain logic lives in the headless `engine`, so the

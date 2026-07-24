@@ -521,6 +521,17 @@ fn tui_without_a_tty_errors_and_points_to_edit() {
 }
 
 #[test]
+fn completions_prints_a_shell_script() {
+    let tmp = new_repo();
+    let dir = tmp.path();
+    let out = queue(dir).args(["completions", "bash"]).output().unwrap();
+    assert!(out.status.success(), "completions exits 0");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("_git-queue"), "bash completion function present");
+    assert!(stdout.contains("COMPREPLY"), "looks like a bash completion");
+}
+
+#[test]
 fn describe_stores_and_clears_description() {
     let tmp = new_repo();
     let dir = tmp.path();
