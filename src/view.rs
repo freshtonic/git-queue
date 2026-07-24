@@ -697,15 +697,26 @@ fn restore_terminal() -> Result<()> {
 fn event_loop(app: &mut App, terminal: &mut Terminal<Backend>) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app))?;
-        match event::read()? {
-            Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key)?,
-            Event::Mouse(m) => handle_mouse(app, m)?,
-            _ => {}
+        // Block for one event, then drain any already-queued ones so a flood of
+        // mouse-wheel / drag events collapses into a single redraw instead of
+        // one redraw per event.
+        handle_event(app, event::read()?)?;
+        while !app.quit && event::poll(std::time::Duration::ZERO)? {
+            handle_event(app, event::read()?)?;
         }
         if app.quit {
             return Ok(());
         }
     }
+}
+
+fn handle_event(app: &mut App, event: Event) -> Result<()> {
+    match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => handle_key(app, key)?,
+        Event::Mouse(m) => handle_mouse(app, m)?,
+        _ => {}
+    }
+    Ok(())
 }
 
 fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {

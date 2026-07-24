@@ -368,6 +368,10 @@ pub struct Engine {
     /// parked here (and a rebase is left in progress) until the caller either
     /// undoes the conflict or suspends to the shell to resolve it.
     pending_conflict: Option<Snapshot>,
+    /// Cached PR number per boundary, aligned with `line.boundaries`. Recomputed
+    /// on load/reload — never per render — so the view can query it every frame
+    /// without shelling out to `git config`.
+    pr_cache: Vec<Option<u64>>,
 }
 
 /// The outcome of applying an operation.
@@ -438,7 +442,9 @@ impl Engine {
 
         let qname = branch_queue_name(&branches).unwrap_or_else(|| branch.replace('/', "-"));
         let namespaced = branches.iter().any(|b| b.starts_with("queue/"));
-        let original = branches.iter().map(|b| (b.clone(), meta::pr(b))).collect();
+        let original: Vec<(String, Option<u64>)> =
+            branches.iter().map(|b| (b.clone(), meta::pr(b))).collect();
+        let pr_cache = line.boundaries.iter().map(|b| meta::pr(&b.name)).collect();
 
         Ok(Engine {
             line,
@@ -451,6 +457,7 @@ impl Engine {
             redo: Vec::new(),
             touched: false,
             pending_conflict: None,
+            pr_cache,
         })
     }
 
@@ -743,9 +750,10 @@ impl Engine {
             .collect()
     }
 
-    /// The cached PR number of the branch at `boundary`, if any.
+    /// The cached PR number of the branch at `boundary`, if any. O(1) — no
+    /// git call — so the view can call it every frame.
     pub fn pr_of(&self, boundary: usize) -> Option<u64> {
-        meta::pr(&self.line.boundaries[boundary].name)
+        self.pr_cache.get(boundary).copied().flatten()
     }
 
     /// The branch name at `boundary`.
@@ -1260,6 +1268,7 @@ impl Engine {
         let branch = git::current_branch()?;
         let (branches, base) = Self::scope(&queue, &branch)?;
         self.line = Self::build_line(base, &branches)?;
+        self.pr_cache = self.line.boundaries.iter().map(|b| meta::pr(&b.name)).collect();
         self.current = branch;
         Ok(())
     }
