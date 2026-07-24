@@ -740,7 +740,9 @@ pub fn rebase_abort() -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.args(["rebase", "--abort"]);
     quiet_git(&mut cmd);
-    let status = cmd.status().context("failed to spawn `git rebase --abort`")?;
+    let status = cmd
+        .status()
+        .context("failed to spawn `git rebase --abort`")?;
     if !status.success() {
         bail!("`git rebase --abort` failed");
     }

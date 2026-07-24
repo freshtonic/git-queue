@@ -14,7 +14,6 @@
 use crate::engine::{Applied, Engine, Operation, Row, SplitKind, SplitLine};
 use crate::git;
 use crate::render::{classify_diff_line, DiffLine};
-use std::collections::HashSet;
 use anyhow::Result;
 use ratatui::crossterm::{
     event::{
@@ -31,6 +30,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Terminal, TerminalOptions, Viewport};
+use std::collections::HashSet;
 use std::io;
 
 /// Which pane has keyboard focus — scrolling and (later) pane-specific actions
@@ -399,7 +399,10 @@ impl App {
         let index = self.selected;
         match self.engine.squash_needs_message(index) {
             Ok(true) => {
-                let buffer = self.engine.squash_default_message(index).unwrap_or_default();
+                let buffer = self
+                    .engine
+                    .squash_default_message(index)
+                    .unwrap_or_default();
                 self.msg_edit = Some(MsgEdit {
                     buffer,
                     target: MsgTarget::Squash { index },
@@ -737,7 +740,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     if app.show_help {
         // Scroll the help; any other key dismisses it.
         match key.code {
-            KeyCode::Char('j') | KeyCode::Down => app.help_scroll = app.help_scroll.saturating_add(1),
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.help_scroll = app.help_scroll.saturating_add(1)
+            }
             KeyCode::Char('k') | KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
             KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
             KeyCode::PageUp => app.help_scroll = app.help_scroll.saturating_sub(10),
@@ -1465,12 +1470,16 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 // The picked-up commit fades out while it's being moved.
                 let dim = move_from == Some(*index);
                 let prefix_style = if dim {
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default().fg(Color::Blue)
                 };
                 let text_style = if dim {
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM)
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM)
                 } else {
                     Style::default()
                 };
@@ -1572,9 +1581,7 @@ fn draw_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
         .lines
         .iter()
         .map(|l| {
-            let selected = l
-                .change_index
-                .is_some_and(|ci| st.selected.contains(&ci));
+            let selected = l.change_index.is_some_and(|ci| st.selected.contains(&ci));
             let (marker, style) = match l.kind {
                 SplitKind::Meta => ("  ", Style::default().fg(Color::DarkGray)),
                 SplitKind::Context => ("  ", Style::default()),
@@ -1727,15 +1734,24 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
             Span::styled(title.to_string(), bold),
         ]));
         // The explanation wraps under a hanging indent.
-        for para in wrap_text(explanation, (area.width as usize).saturating_sub(20).max(20)) {
-            lines.push(Line::from(Span::styled(format!("             {para}"), dim)));
+        for para in wrap_text(
+            explanation,
+            (area.width as usize).saturating_sub(20).max(20),
+        ) {
+            lines.push(Line::from(Span::styled(
+                format!("             {para}"),
+                dim,
+            )));
         }
         lines.push(Line::from(""));
     }
 
     section(&mut lines, "Mouse");
     for (k, desc) in [
-        ("click", "select a commit · focus a pane · open a PR link (#N)"),
+        (
+            "click",
+            "select a commit · focus a pane · open a PR link (#N)",
+        ),
         ("drag", "drag a pane divider to resize"),
         ("wheel", "scroll the pane under the cursor"),
     ] {
@@ -2090,7 +2106,10 @@ mod tests {
                 .map(|c| c.subject.clone())
                 .collect();
             assert_ne!(subjects_before, subjects_after, "the order changed");
-            assert_eq!(subjects_before[0], subjects_after[1], "front commit moved down");
+            assert_eq!(
+                subjects_before[0], subjects_after[1],
+                "front commit moved down"
+            );
         });
     }
 
@@ -2321,13 +2340,20 @@ mod tests {
 
             key(app, KeyCode::Enter); // confirm the selection
             assert!(app.split.is_none());
-            assert!(app.msg_edit.is_some(), "prompts for the peeled commit's message");
+            assert!(
+                app.msg_edit.is_some(),
+                "prompts for the peeled commit's message"
+            );
 
             press(app, 'p'); // type a message
             ctrl(app, 's'); // apply
             assert!(app.msg_edit.is_none());
             assert!(app.status.is_empty(), "no error: {}", app.status);
-            assert_eq!(app.commit_count(), before + 1, "split produced a second commit");
+            assert_eq!(
+                app.commit_count(),
+                before + 1,
+                "split produced a second commit"
+            );
         });
     }
 
@@ -2345,10 +2371,7 @@ mod tests {
             terminal.draw(|f| draw(f, app)).unwrap();
             let text = buffer_text(terminal.backend());
             assert!(text.contains("reorder"), "operation titles are shown");
-            assert!(
-                text.contains("fades"),
-                "longer explanations are shown"
-            );
+            assert!(text.contains("fades"), "longer explanations are shown");
 
             // A non-scroll key closes the help.
             press(app, 'q');
@@ -2361,7 +2384,11 @@ mod tests {
     fn wrap_text_splits_on_word_boundaries() {
         assert_eq!(wrap_text("short", 10), vec!["short"]);
         assert_eq!(wrap_text("one two three", 7), vec!["one two", "three"]);
-        assert_eq!(wrap_text("anything", 0), vec!["anything"], "width 0 → one line");
+        assert_eq!(
+            wrap_text("anything", 0),
+            vec!["anything"],
+            "width 0 → one line"
+        );
     }
 
     #[test]

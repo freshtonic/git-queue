@@ -47,7 +47,12 @@ fn sha(dir: &Path, rev: &str) -> String {
 
 fn branch_exists(dir: &Path, name: &str) -> bool {
     StdCommand::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ])
         .current_dir(dir)
         .status()
         .unwrap()
@@ -174,7 +179,11 @@ fn rename_branch_is_ref_only_and_reparents_children() {
     });
 
     assert!(!branch_exists(dir, "a"), "old name gone");
-    assert_eq!(sha(dir, "api"), a_sha, "api sits at a's old tip (no rewrite)");
+    assert_eq!(
+        sha(dir, "api"),
+        a_sha,
+        "api sits at a's old tip (no rewrite)"
+    );
     assert_eq!(git_out(dir, &["config", "branch.b.queueParent"]), "api");
     assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "main");
 }
@@ -200,12 +209,24 @@ fn add_boundary_splits_a_branch_ref_only() {
         })
         .unwrap();
         assert_eq!(names(e), vec!["feat", "api"]);
-        assert_eq!(e.line().commits_of(0).len(), 1, "feat keeps the front commit");
-        assert_eq!(e.line().commits_of(1).len(), 2, "api owns from the highlight up");
+        assert_eq!(
+            e.line().commits_of(0).len(),
+            1,
+            "feat keeps the front commit"
+        );
+        assert_eq!(
+            e.line().commits_of(1).len(),
+            2,
+            "api owns from the highlight up"
+        );
         assert_eq!(e.line().commits[0].sha, c0, "commit not rewritten");
     });
 
-    assert_eq!(sha(dir, "api"), tip, "api tips at the branch's original tip");
+    assert_eq!(
+        sha(dir, "api"),
+        tip,
+        "api tips at the branch's original tip"
+    );
     assert_eq!(git_out(dir, &["config", "branch.api.queueParent"]), "feat");
     assert_eq!(git_out(dir, &["config", "branch.feat.queueParent"]), "main");
 }
@@ -416,7 +437,11 @@ fn reword_preserves_ids_rebases_descendants_and_is_undoable() {
         assert_ne!(sha(dir, "b"), b_tip_before, "descendant branch b rebased");
 
         e.apply(Operation::Undo).unwrap();
-        assert_eq!(e.line().commits[0].subject, "zero", "undo restores the message");
+        assert_eq!(
+            e.line().commits[0].subject,
+            "zero",
+            "undo restores the message"
+        );
         assert_eq!(ids(e), ids_before);
     });
 
@@ -506,7 +531,11 @@ fn an_empty_description_less_commit_is_auto_dropped() {
         // Any rewrite triggers the auto-drop of the empty, undescribed commit.
         e.apply(Operation::Delete { index: 0 }).unwrap();
         let subjects: Vec<String> = e.line().commits.iter().map(|c| c.subject.clone()).collect();
-        assert_eq!(subjects, vec!["second"], "empty, undescribed commit dropped");
+        assert_eq!(
+            subjects,
+            vec!["second"],
+            "empty, undescribed commit dropped"
+        );
     });
 }
 
@@ -585,7 +614,11 @@ fn cross_boundary_squash_lands_in_the_older_branch_and_empties_the_newer() {
             .unwrap(),
             Applied::Done
         );
-        assert_eq!(e.line().commits_of(0).len(), 1, "a owns the combined commit");
+        assert_eq!(
+            e.line().commits_of(0).len(),
+            1,
+            "a owns the combined commit"
+        );
         assert_eq!(e.line().commits[0].id, a_id, "older branch's id kept");
         assert_eq!(e.empty_branches(), vec![1], "b emptied — dissolve offered");
 
@@ -643,7 +676,10 @@ fn split_divides_a_commit_keeping_the_older_id_and_stamping_the_peeled_piece() {
         let newer = &e.line().commits[1];
         assert_eq!(older.id, c_id, "older piece keeps the original id");
         assert_eq!(older.subject, "both lines", "older keeps the message");
-        assert!(newer.id.is_some() && newer.id != c_id, "peeled piece freshly stamped");
+        assert!(
+            newer.id.is_some() && newer.id != c_id,
+            "peeled piece freshly stamped"
+        );
         assert_eq!(newer.subject, "the B line");
     });
 

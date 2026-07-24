@@ -527,7 +527,10 @@ fn completions_prints_a_shell_script() {
     let out = queue(dir).args(["completions", "bash"]).output().unwrap();
     assert!(out.status.success(), "completions exits 0");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("_git-queue"), "bash completion function present");
+    assert!(
+        stdout.contains("_git-queue"),
+        "bash completion function present"
+    );
     assert!(stdout.contains("COMPREPLY"), "looks like a bash completion");
 }
 

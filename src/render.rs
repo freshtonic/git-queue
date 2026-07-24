@@ -377,7 +377,10 @@ mod tests {
         assert_eq!(classify_diff_line("+added line"), Added);
         assert_eq!(classify_diff_line("-removed line"), Removed);
         assert_eq!(classify_diff_line(" context"), Context);
-        assert_eq!(classify_diff_line("Binary files a/i.png and b/i.png differ"), Binary);
+        assert_eq!(
+            classify_diff_line("Binary files a/i.png and b/i.png differ"),
+            Binary
+        );
     }
 
     #[test]

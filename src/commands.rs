@@ -80,7 +80,10 @@ so reviewers see which PR merges next)",
     // 3. Man page (Unix only — Windows has no `man`).
     if tty
         && !cfg!(windows)
-        && confirm("Install the man page? (`man git-queue`, and `git queue --help`)", true)
+        && confirm(
+            "Install the man page? (`man git-queue`, and `git queue --help`)",
+            true,
+        )
     {
         if let Err(e) = install_man_pages() {
             eprintln!("note: could not install the man page: {e:#}");

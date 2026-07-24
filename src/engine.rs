@@ -246,7 +246,11 @@ fn parse_diff(diff: &str) -> Vec<FileDiff> {
 /// version with the *selected* changes reverted — selected additions removed,
 /// selected removals restored. `selected` holds the `change_index`es peeled
 /// into the second (newer) commit. Pure; unit-tested.
-fn reconstruct_middle(file: &FileDiff, v_content: &str, selected: &HashSet<usize>) -> Option<String> {
+fn reconstruct_middle(
+    file: &FileDiff,
+    v_content: &str,
+    selected: &HashSet<usize>,
+) -> Option<String> {
     if file.binary {
         return None; // binary changes stay whole in the older piece
     }
@@ -555,7 +559,12 @@ impl Engine {
     /// Branches that were present at load but have since been dissolved, and
     /// that carried a cached PR number — the exit summary warns about these.
     pub fn dissolved_with_prs(&self) -> Vec<(String, u64)> {
-        let present: HashSet<&str> = self.line.boundaries.iter().map(|b| b.name.as_str()).collect();
+        let present: HashSet<&str> = self
+            .line
+            .boundaries
+            .iter()
+            .map(|b| b.name.as_str())
+            .collect();
         self.original
             .iter()
             .filter(|(name, _)| !present.contains(name.as_str()))
@@ -1001,7 +1010,12 @@ impl Engine {
     /// After a clean rewriting rebase: refresh each branch's rebase anchor to
     /// its parent's new tip, land HEAD on `land`, snap the worktree, reload.
     fn finish_rewrite(&mut self, land: &str) -> Result<()> {
-        let names: Vec<String> = self.line.boundaries.iter().map(|b| b.name.clone()).collect();
+        let names: Vec<String> = self
+            .line
+            .boundaries
+            .iter()
+            .map(|b| b.name.clone())
+            .collect();
         let mut parent = self.line.base.clone();
         for b in &names {
             meta::set_parent_sha(b, &git::rev_parse(&parent)?)?;
@@ -1268,7 +1282,12 @@ impl Engine {
         let branch = git::current_branch()?;
         let (branches, base) = Self::scope(&queue, &branch)?;
         self.line = Self::build_line(base, &branches)?;
-        self.pr_cache = self.line.boundaries.iter().map(|b| meta::pr(&b.name)).collect();
+        self.pr_cache = self
+            .line
+            .boundaries
+            .iter()
+            .map(|b| meta::pr(&b.name))
+            .collect();
         self.current = branch;
         Ok(())
     }
@@ -1552,10 +1571,7 @@ mod tests {
         let mut drop = HashSet::new();
         drop.insert(1usize);
         let todo = drop_todo(&sample(), &drop);
-        assert_eq!(
-            todo,
-            "pick c0 c0\nupdate-ref refs/heads/a\npick c2 c2\n"
-        );
+        assert_eq!(todo, "pick c0 c0\nupdate-ref refs/heads/a\npick c2 c2\n");
     }
 
     #[test]
