@@ -44,9 +44,17 @@ works immediately (git's standard subcommand mechanism). `git queue setup` then
 walks through the optional extras interactively (see below).
 
 Prefer a prebuilt binary? Each [GitHub
-release](https://github.com/freshtonic/git-queue/releases) ships archives for
-Linux and macOS (x86-64 and arm64) — download, extract, and put `git-queue` on
-your `PATH`.
+release](https://github.com/freshtonic/git-queue/releases) ships archives and a
+shell installer (built by [dist](https://opensource.axo.dev/cargo-dist/)) for
+Linux and macOS (x86-64 and arm64):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.sh | sh
+```
+
+(Windows: the PowerShell installer, `git-queue-installer.ps1`, via `irm … | iex`.)
+Or just download an archive, extract it, and put `git-queue` on your `PATH`.
 
 ### `git queue setup`
 
@@ -340,20 +348,28 @@ cargo build
 ## Releasing (maintainers)
 
 Releases are automated with [release-plz](https://release-plz.dev) off the
-`release` branch (`.github/workflows/release-plz.yml`, `release-plz.toml`):
+`release` branch, with [dist](https://opensource.axo.dev/cargo-dist/) building
+the release artifacts (`.github/workflows/release-plz.yml`, `release.yml`,
+`release-plz.toml`):
 
 1. Promote work onto `release` (e.g. merge `main` → `release`). release-plz
    opens/updates a **"chore: release" PR** that bumps the version in `Cargo.toml`
    and regenerates `CHANGELOG.md` from the [Conventional
    Commits](https://www.conventionalcommits.org) history.
-2. **Merge that release PR** — release-plz then publishes to
-   [crates.io](https://crates.io/crates/git-queue), tags the version, and cuts a
-   GitHub release. That release firing triggers `release-binaries.yml`, which
-   builds `git-queue` for Linux and macOS (x86-64 and arm64) and attaches the
-   archives (with `.sha256` checksums) to the release.
+2. **Merge that release PR** — release-plz publishes to
+   [crates.io](https://crates.io/crates/git-queue) and pushes a `v<version>`
+   tag. That tag triggers **dist**, which builds `git-queue` for Linux and macOS
+   (x86-64 and arm64) and creates the GitHub Release with the archives,
+   checksums, and `curl | sh` / `irm | iex` installers, using the CHANGELOG
+   section as the notes. release-plz itself does not create the release
+   (`git_release_enable = false`), so the two don't collide.
 
 Two repository secrets are needed: `CARGO_REGISTRY_TOKEN` (a crates.io API
 token, required to publish) and, optionally, `RELEASE_PLZ_TOKEN` (a fine-grained
 PAT or GitHub App token so the release PR triggers CI; it falls back to the
 default `GITHUB_TOKEN`). Because versions are derived from commit messages, land
 your commits as `feat:` / `fix:` / `feat!:` etc.
+
+The dist config lives in `Cargo.toml` (`[workspace.metadata.dist]`) and
+`.github/workflows/release.yml`; regenerate the workflow after changing the
+config with `dist generate`.
