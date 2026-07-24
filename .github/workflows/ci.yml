@@ -44,3 +44,19 @@ jobs:
       # they aren't covered here. The rest run against throwaway local repos.
       - name: Test
         run: cargo test --verbose
+
+  # Guard Windows portability: the code must compile and the pure unit tests
+  # (ident / render / engine) must pass. The git-driven integration and view
+  # tests assume a POSIX shell and aren't run here yet.
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --verbose
+      - name: Test (portable unit tests)
+        run: cargo test --lib -- --skip view

@@ -22,6 +22,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.2"
+# Cross-platform OS entropy for minting Stable-Commit-Ids (a thin wrapper over
+# each platform's RNG — getrandom syscall / BCryptGenRandom — no C deps).
+getrandom = "0.3"
 # The interactive `git queue tui` editor (ADR-0001). By far the project's
 # largest dependency; the domain logic lives in the headless `engine`, so the
 # TUI stack is confined to the thin `view` shell. crossterm is re-exported via

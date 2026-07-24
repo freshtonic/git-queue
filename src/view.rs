@@ -573,15 +573,28 @@ impl App {
     }
 }
 
-/// Open `url` in the user's default browser (best-effort).
+/// Open `url` in the user's default browser (best-effort, cross-platform).
 fn open_url(url: &str) {
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        // `start` is a cmd builtin; the empty "" is its (window-title) argument.
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", url]);
+        c
     };
-    let _ = std::process::Command::new(opener)
-        .arg(url)
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    let _ = cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();

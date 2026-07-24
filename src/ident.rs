@@ -23,17 +23,14 @@ pub fn new_id() -> String {
     encode(&random_bytes())
 }
 
-/// 128 bits of randomness: the OS pool when available, else a hash of
-/// high-resolution time, pid and a counter (uniqueness, not secrecy).
+/// 128 bits of randomness: the OS pool (cross-platform via `getrandom`), else a
+/// hash of high-resolution time, pid and a counter (uniqueness, not secrecy).
 fn random_bytes() -> [u8; 16] {
-    use std::io::Read;
     let mut out = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut out).is_ok() {
-            return out;
-        }
+    match getrandom::fill(&mut out) {
+        Ok(()) => out,
+        Err(_) => fallback_random(),
     }
-    fallback_random()
 }
 
 fn fallback_random() -> [u8; 16] {

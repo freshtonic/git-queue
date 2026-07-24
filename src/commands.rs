@@ -77,8 +77,11 @@ so reviewers see which PR merges next)",
     }
     // The next three steps are user-scoped (not repo-local), so they only run
     // interactively — never under a non-interactive `--yes`.
-    // 3. Man page.
-    if tty && confirm("Install the man page? (`man git-queue`, and `git queue --help`)", true) {
+    // 3. Man page (Unix only — Windows has no `man`).
+    if tty
+        && !cfg!(windows)
+        && confirm("Install the man page? (`man git-queue`, and `git queue --help`)", true)
+    {
         if let Err(e) = install_man_pages() {
             eprintln!("note: could not install the man page: {e:#}");
         }
@@ -114,8 +117,8 @@ so reviewers see which PR merges next)",
         }
     }
     // 6. Claude Code skill (only when Claude Code is present; interactive only).
-    let home = std::env::var("HOME").unwrap_or_default();
-    let claude_dir = std::path::Path::new(&home).join(".claude");
+    let home = home_dir();
+    let claude_dir = home.join(".claude");
     if tty
         && claude_dir.exists()
         && confirm(
@@ -138,7 +141,7 @@ git-queue correctly?",
         ("copilot", ".config/github-copilot"),
     ]
     .iter()
-    .filter(|(_, d)| std::path::Path::new(&home).join(d).exists())
+    .filter(|(_, d)| home.join(d).exists())
     .map(|(n, _)| *n)
     .collect();
     if tty
@@ -176,8 +179,7 @@ fn setup_undo() -> Result<()> {
         let _ = git::ok(&["config", "--global", "--unset", "alias.q"]);
         println!("Removed the `git q` alias.");
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let skill = std::path::Path::new(&home).join(".claude/skills/using-git-queue/SKILL.md");
+    let skill = home_dir().join(".claude/skills/using-git-queue/SKILL.md");
     if skill.exists() {
         std::fs::remove_file(&skill).ok();
         println!("Removed {}.", skill.display());
@@ -186,8 +188,13 @@ fn setup_undo() -> Result<()> {
     Ok(())
 }
 
+/// The user's home directory, portably: `HOME` on unix, `USERPROFILE` on
+/// Windows.
 fn home_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default()
 }
 
 /// The candidate `man1` directories, preferring a system-wide location.
