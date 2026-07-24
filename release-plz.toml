@@ -1,0 +1,18 @@
+# release-plz configuration — https://release-plz.dev/docs/config
+#
+# The release PR is opened against whichever branch the workflow runs on
+# (`release`; see .github/workflows/release-plz.yml). Versions are bumped from
+# Conventional Commits (feat → minor, fix → patch, `!`/BREAKING → major while
+# < 1.0 stays a minor bump).
+
+[workspace]
+# Bump the version and regenerate CHANGELOG.md from the commit history.
+changelog_update = true
+# Tag and cut a GitHub release for each published version.
+git_tag_enable = true
+git_release_enable = true
+
+[[package]]
+name = "git-queue"
+# Publish this crate to crates.io on release.
+publish = true

@@ -1,0 +1,72 @@
+name: Release-plz
+
+# Runs on every push to the `release` branch (i.e. every merge into it).
+#
+# Flow (release-plz's standard release-PR model):
+#   1. Promote work onto `release` (e.g. merge `main` → `release`). This run
+#      opens/updates a "chore: release" PR that bumps the version in Cargo.toml
+#      and updates CHANGELOG.md from the Conventional-Commit history.
+#   2. Merge that release PR into `release`. This run sees the new version,
+#      publishes the crate to crates.io, tags it, and cuts a GitHub release.
+#
+# Required repository secrets:
+#   CARGO_REGISTRY_TOKEN  — a crates.io API token (Settings → API Tokens) with
+#                           publish scope for this crate. Required to publish.
+#   RELEASE_PLZ_TOKEN     — optional. A fine-grained PAT (or GitHub App token)
+#                           with contents:write + pull-requests:write. Used to
+#                           open the release PR so that CI runs on it (PRs opened
+#                           with the default GITHUB_TOKEN don't trigger other
+#                           workflows). Falls back to GITHUB_TOKEN if unset.
+
+on:
+  push:
+    branches:
+      - release
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Publish to crates.io + tag + GitHub release when a version is unpublished
+  # (i.e. right after the release PR is merged).
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # Open/update the version-bump + changelog release PR.
+  release-pr:
+    name: Release PR
+    runs-on: ubuntu-latest
+    # Serialise PR updates so concurrent pushes don't race the release PR.
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

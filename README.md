@@ -331,3 +331,22 @@ and worked examples. Copy it into your plugin's `skills/` directory to enable it
 cargo test      # unit tests + integration tests against throwaway repos
 cargo build
 ```
+
+## Releasing (maintainers)
+
+Releases are automated with [release-plz](https://release-plz.dev) off the
+`release` branch (`.github/workflows/release-plz.yml`, `release-plz.toml`):
+
+1. Promote work onto `release` (e.g. merge `main` → `release`). release-plz
+   opens/updates a **"chore: release" PR** that bumps the version in `Cargo.toml`
+   and regenerates `CHANGELOG.md` from the [Conventional
+   Commits](https://www.conventionalcommits.org) history.
+2. **Merge that release PR** — release-plz then publishes to
+   [crates.io](https://crates.io/crates/git-queue), tags the version, and cuts a
+   GitHub release.
+
+Two repository secrets are needed: `CARGO_REGISTRY_TOKEN` (a crates.io API
+token, required to publish) and, optionally, `RELEASE_PLZ_TOKEN` (a fine-grained
+PAT or GitHub App token so the release PR triggers CI; it falls back to the
+default `GITHUB_TOKEN`). Because versions are derived from commit messages, land
+your commits as `feat:` / `fix:` / `feat!:` etc.
