@@ -10,7 +10,7 @@ keywords = ["git", "pull-request", "stacked-diffs", "rebase", "github"]
 categories = ["command-line-utilities", "development-tools"]
 # Ship only what's needed to build and document the crate — keep the marketing
 # site (index.html, fonts/) and internal docs out of the crates.io package.
-include = ["src/**/*", "README.md", "LICENSE", "CHANGELOG.md"]
+include = ["src/**/*", "skills", "README.md", "LICENSE", "CHANGELOG.md"]
 
 # One binary, `git-queue`, is built from a thin wrapper in src/bin/ around the
 # library's `run()`, so `git queue ...` dispatches to it via git's standard
