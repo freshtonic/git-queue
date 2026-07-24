@@ -43,6 +43,11 @@ git queue setup             # optional: man page, completion, alias, hooks, gate
 works immediately (git's standard subcommand mechanism). `git queue setup` then
 walks through the optional extras interactively (see below).
 
+Prefer a prebuilt binary? Each [GitHub
+release](https://github.com/freshtonic/git-queue/releases) ships archives for
+Linux and macOS (x86-64 and arm64) — download, extract, and put `git-queue` on
+your `PATH`.
+
 ### `git queue setup`
 
 ```sh
@@ -343,7 +348,9 @@ Releases are automated with [release-plz](https://release-plz.dev) off the
    Commits](https://www.conventionalcommits.org) history.
 2. **Merge that release PR** — release-plz then publishes to
    [crates.io](https://crates.io/crates/git-queue), tags the version, and cuts a
-   GitHub release.
+   GitHub release. That release firing triggers `release-binaries.yml`, which
+   builds `git-queue` for Linux and macOS (x86-64 and arm64) and attaches the
+   archives (with `.sha256` checksums) to the release.
 
 Two repository secrets are needed: `CARGO_REGISTRY_TOKEN` (a crates.io API
 token, required to publish) and, optionally, `RELEASE_PLZ_TOKEN` (a fine-grained
