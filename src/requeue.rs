@@ -13,7 +13,7 @@ use crate::queue::Queue;
 use anyhow::Result;
 
 #[derive(Default)]
-pub struct Report {
+pub(crate) struct Report {
     /// Branches that were moved.
     pub requeued: Vec<String>,
     /// Branches left holding persisted conflict markers.
@@ -21,14 +21,14 @@ pub struct Report {
 }
 
 impl Report {
-    pub fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.requeued.is_empty()
     }
 }
 
 /// Requeue every descendant of `changed` onto its current tip. Safe to call
 /// when nothing is stale (it becomes a no-op).
-pub fn propagate(queue: &Queue, changed: &str) -> Result<Report> {
+pub(crate) fn propagate(queue: &Queue, changed: &str) -> Result<Report> {
     let new_tip = git::rev_parse(changed)?;
     let mut report = Report::default();
     let mut moved_head = false;
@@ -87,7 +87,7 @@ pub fn propagate(queue: &Queue, changed: &str) -> Result<Report> {
 /// Catches any staleness — a moved trunk, a mid-queue branch that took on
 /// remote commits, etc. Returns without restoring HEAD (the caller does that,
 /// since a fallback rebase may have moved it).
-pub fn requeue_forest(queue: &Queue) -> Result<Report> {
+pub(crate) fn requeue_forest(queue: &Queue) -> Result<Report> {
     let mut report = Report::default();
     for b in queue.topo_order() {
         let parent = match queue.parent_of(&b) {
@@ -126,9 +126,8 @@ pub fn requeue_forest(queue: &Queue) -> Result<Report> {
 /// Processes bottom-up so each branch rebases onto its already-updated parent.
 fn fallback_rebase(queue: &Queue, subtree_topo: &[String]) -> Result<()> {
     for b in subtree_topo {
-        let parent = match queue.parent_of(b) {
-            Some(p) => p,
-            None => continue,
+        let Some(parent) = queue.parent_of(b) else {
+            continue;
         };
         let ptip = git::rev_parse(parent)?;
         let anchor = match meta::parent_sha(b) {
@@ -151,7 +150,7 @@ fn subtree(queue: &Queue, child: &str) -> Vec<String> {
 }
 
 /// Print a loud, hard-to-miss warning that conflict markers were left behind.
-pub fn warn_conflicts(conflicted: &[String]) {
+pub(crate) fn warn_conflicts(conflicted: &[String]) {
     eprintln!("\n\x1b[1;33m╔══════════════════════════════════════════════════════════════╗");
     eprintln!("║  ⚠  CONFLICTS WERE PERSISTED AS MARKERS DURING REQUEUE        ║");
     eprintln!("╚══════════════════════════════════════════════════════════════╝\x1b[0m");

@@ -2,11 +2,11 @@
 //! navigation block injected into every PR body. Kept side-effect-free so they
 //! can be unit-tested without git or the network.
 
-pub const BEGIN: &str = "<!-- git-queue:begin -->";
-pub const END: &str = "<!-- git-queue:end -->";
+pub(crate) const BEGIN: &str = "<!-- git-queue:begin -->";
+pub(crate) const END: &str = "<!-- git-queue:end -->";
 
 /// One entry in a queue line for rendering purposes.
-pub struct Entry {
+pub(crate) struct Entry {
     pub branch: String,
     pub pr: Option<PrRef>,
     /// The branch currently holds persisted conflict markers.
@@ -22,21 +22,21 @@ pub struct Entry {
 }
 
 #[derive(Clone)]
-pub struct PrRef {
+pub(crate) struct PrRef {
     pub number: u64,
     pub url: String,
     pub state: String, // OPEN | CLOSED | MERGED
-    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | None
+    /// APPROVED | `CHANGES_REQUESTED` | `REVIEW_REQUIRED` | None
     pub review: Option<String>,
 }
 
 /// The commit-status context the merge-order gate posts under.
-pub const GATE_CONTEXT: &str = "git-queue/merge-order";
+pub(crate) const GATE_CONTEXT: &str = "git-queue/merge-order";
 
 /// One planned merge-order status (the advisory "status gate"), to be posted
 /// on the head commit of a PR.
-#[derive(Debug, PartialEq)]
-pub struct GateStatus {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct GateStatus {
     /// Head branch of the PR receiving the status.
     pub branch: String,
     /// true -> green ✓ (mergeable now); false -> red ✗ (out of order).
@@ -50,7 +50,7 @@ pub struct GateStatus {
 /// bottom-most OPEN PR gets a success status, every open PR above it gets a
 /// failure status naming the PR that must merge first. Merged/closed PRs and
 /// branches without a PR get nothing.
-pub fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
+pub(crate) fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
     let mut bottom: Option<&PrRef> = None;
     let mut plan = Vec::new();
     for e in entries {
@@ -80,8 +80,8 @@ pub fn gate_plan(entries: &[Entry]) -> Vec<GateStatus> {
 }
 
 /// Emoji for a PR's review decision.
-fn approval_emoji(review: &Option<String>) -> &'static str {
-    match review.as_deref() {
+fn approval_emoji(review: Option<&str>) -> &'static str {
+    match review {
         Some("APPROVED") => "✅",
         Some("CHANGES_REQUESTED") => "♻️",
         _ => "⏳", // REVIEW_REQUIRED / not yet reviewed
@@ -99,7 +99,7 @@ fn state_emoji(state: &str) -> &'static str {
 
 /// Numbered title: `[k/n] <subject>`, stripping any prior `[i/j] ` prefix so
 /// re-submitting doesn't pile up prefixes.
-pub fn numbered_title(subject: &str, index: usize, total: usize) -> String {
+pub(crate) fn numbered_title(subject: &str, index: usize, total: usize) -> String {
     format!("[{}/{}] {}", index + 1, total, strip_prefix(subject))
 }
 
@@ -119,7 +119,7 @@ fn strip_prefix(subject: &str) -> &str {
 /// Build the shared queue-navigation block: a formatted, linked list of every
 /// PR in the line in merge order (bottom first), with the current PR bolded and
 /// marked. Each entry links to the PR's URL when known.
-pub fn nav_block(line: &[Entry], current: &str, base: &str, queue_name: &str) -> String {
+pub(crate) fn nav_block(line: &[Entry], current: &str, base: &str, queue_name: &str) -> String {
     let total = line.len();
     let mut lines = vec![
         format!(
@@ -147,7 +147,11 @@ pub fn nav_block(line: &[Entry], current: &str, base: &str, queue_name: &str) ->
         // (a merged/closed PR's review status is no longer meaningful).
         let status = match &e.pr {
             Some(p) if p.state == "OPEN" => {
-                format!("{}{} ", approval_emoji(&p.review), state_emoji(&p.state))
+                format!(
+                    "{}{} ",
+                    approval_emoji(p.review.as_deref()),
+                    state_emoji(&p.state)
+                )
             }
             Some(p) => format!("{} ", state_emoji(&p.state)),
             None => String::new(),
@@ -187,7 +191,7 @@ fn position_of(line: &[Entry], current: &str) -> usize {
 /// Compose a PR body: the queue map, then optional "About this queue" and
 /// "About this branch" sections, all inside the managed BEGIN..END block —
 /// every part regenerates from config on each submit.
-pub fn compose_body(queue_description: &str, branch_description: &str, nav: &str) -> String {
+pub(crate) fn compose_body(queue_description: &str, branch_description: &str, nav: &str) -> String {
     let mut body = format!("{BEGIN}\n{nav}");
     let qd = queue_description.trim();
     if !qd.is_empty() {
@@ -197,7 +201,7 @@ pub fn compose_body(queue_description: &str, branch_description: &str, nav: &str
     // Legacy bodies kept the description under a bare `---` divider outside
     // the managed block; drop that scaffolding if it survived the strip.
     let bd = bd.trim();
-    let bd = bd.strip_prefix("---").map(str::trim_start).unwrap_or(bd);
+    let bd = bd.strip_prefix("---").map_or(bd, str::trim_start);
     if !bd.is_empty() {
         body.push_str(&format!("\n\n# About this branch\n\n{bd}"));
     }
@@ -206,7 +210,7 @@ pub fn compose_body(queue_description: &str, branch_description: &str, nav: &str
 }
 
 /// Remove a previously injected BEGIN..END block (inclusive) from `body`.
-pub fn strip_block(body: &str) -> String {
+pub(crate) fn strip_block(body: &str) -> String {
     match (body.find(BEGIN), body.find(END)) {
         (Some(start), Some(end)) if end >= start => {
             let after = end + END.len();
@@ -224,7 +228,7 @@ pub fn strip_block(body: &str) -> String {
 /// trunk). The current branch gets a `❯` marker in the left margin. With
 /// `color`: bold branch names, tinted PR states and warnings, and a distinct
 /// colour for commit ids.
-pub fn status_tree(
+pub(crate) fn status_tree(
     entries: &[Entry],
     current: &str,
     base: &str,
@@ -244,7 +248,7 @@ pub fn status_tree(
     let mut out = String::new();
     // Entries arrive top-down (leaves first, base-most branch last); forked
     // subtrees sit directly above their fork parent, one indent level in.
-    for e in entries.iter() {
+    for e in entries {
         let is_current = e.branch == current;
         let margin = if is_current {
             paint("1;32", "❯ ")
@@ -313,7 +317,7 @@ pub fn status_tree(
 /// render binary changes as a placeholder. The mapping to terminal styles
 /// lives in the view; this classification is pure and unit-tested.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum DiffLine {
+pub(crate) enum DiffLine {
     /// An added line (`+…`, but not the `+++` file header).
     Added,
     /// A removed line (`-…`, but not the `---` file header).
@@ -332,7 +336,7 @@ pub enum DiffLine {
 /// Classify one raw line of `git show`/`git diff` output. The `---`/`+++`
 /// file headers are matched before the `+`/`-` content cases, so they never
 /// read as removed/added lines.
-pub fn classify_diff_line(line: &str) -> DiffLine {
+pub(crate) fn classify_diff_line(line: &str) -> DiffLine {
     if line.starts_with("@@") {
         DiffLine::Hunk
     } else if line.starts_with("diff --git")
@@ -362,6 +366,7 @@ pub fn classify_diff_line(line: &str) -> DiffLine {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
@@ -420,7 +425,7 @@ mod tests {
                 number,
                 url: url.to_string(),
                 state: state.to_string(),
-                review: review.map(|s| s.to_string()),
+                review: review.map(std::string::ToString::to_string),
             }),
             conflicted: false,
             conflicts: Vec::new(),

@@ -241,7 +241,7 @@ enum Command {
         long_about = "Read-only diagnosis of merge-order signalling: whether the status gate is enabled, and whether the GitHub CLI is ready. Changes nothing."
     )]
     Doctor,
-    /// Internal: GIT_SEQUENCE_EDITOR for id stamping (marks picks as reword).
+    /// Internal: `GIT_SEQUENCE_EDITOR` for id stamping (marks picks as reword).
     #[command(hide = true, name = "stamp-todo")]
     StampTodo {
         /// Path to the rebase todo file (passed by git).
@@ -253,7 +253,7 @@ enum Command {
         /// Path to the commit-message file (passed by git).
         file: PathBuf,
     },
-    /// Internal: GIT_SEQUENCE_EDITOR for `git queue move` (rewrites a rebase todo).
+    /// Internal: `GIT_SEQUENCE_EDITOR` for `git queue move` (rewrites a rebase todo).
     #[command(hide = true, name = "reorder-todo")]
     ReorderTodo {
         /// Path to the rebase todo file (passed by git).
@@ -282,7 +282,7 @@ pub(crate) fn cli_command() -> clap::Command {
     Cli::command()
 }
 
-/// Render the man page as roff text. clap_mangen produces the top-level page,
+/// Render the man page as roff text. `clap_mangen` produces the top-level page,
 /// whose SUBCOMMANDS section references non-existent per-subcommand pages
 /// (git-queue-init(1)); we replace it with a fully detailed COMMANDS section —
 /// real `git queue <cmd>` names, the long description, and every argument —
@@ -299,10 +299,7 @@ pub(crate) fn man_text() -> anyhow::Result<String> {
     Ok(match text.find(".SH SUBCOMMANDS") {
         Some(start) => {
             let rest = &text[start + 4..];
-            let end = rest
-                .find(".SH ")
-                .map(|i| start + 4 + i)
-                .unwrap_or(text.len());
+            let end = rest.find(".SH ").map_or(text.len(), |i| start + 4 + i);
             format!(
                 "{}{}{}",
                 &text[..start],
@@ -371,7 +368,7 @@ fn commands_section(cmd: &clap::Command) -> String {
         let about = sub
             .get_long_about()
             .or_else(|| sub.get_about())
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_default();
         out.push_str(&format!("{}\n", roff(&about)));
         for a in sub.get_arguments().filter(|a| a.get_id() != "help") {
@@ -393,7 +390,7 @@ fn commands_section(cmd: &clap::Command) -> String {
             let help = a
                 .get_long_help()
                 .or_else(|| a.get_help())
-                .map(|h| h.to_string())
+                .map(std::string::ToString::to_string)
                 .unwrap_or_default();
             out.push_str(&format!(
                 ".TP\n\\fB{}\\fR{}\n{}\n",

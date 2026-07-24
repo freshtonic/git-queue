@@ -43,7 +43,7 @@ fn confirm(question: &str, default_yes: bool) -> bool {
 /// the git hooks, the merge-order gate, the Claude Code skill, and (when
 /// other agents are detected) an AGENTS.md section. `--yes` accepts the two
 /// repo-local steps non-interactively; the integrations always ask.
-pub fn setup(yes: bool, undo: bool) -> Result<()> {
+pub(crate) fn setup(yes: bool, undo: bool) -> Result<()> {
     git::ensure_repo()?;
     if undo {
         return setup_undo();
@@ -257,12 +257,11 @@ fn manpath_contains(dir: &std::path::Path) -> bool {
     std::process::Command::new("manpath")
         .output()
         .ok()
-        .map(|o| {
+        .is_some_and(|o| {
             String::from_utf8_lossy(&o.stdout)
                 .split(':')
                 .any(|p| std::path::Path::new(p.trim()) == dir)
         })
-        .unwrap_or(false)
 }
 
 /// The user's shell, from `$SHELL`, if it's one we can generate completions for.
@@ -282,7 +281,7 @@ fn detect_shell() -> Option<clap_complete::Shell> {
 
 /// Where a shell looks for a completion file, and the file's name.
 fn completion_target(shell: clap_complete::Shell) -> Option<(std::path::PathBuf, &'static str)> {
-    use clap_complete::Shell::*;
+    use clap_complete::Shell::{Bash, Fish, Zsh};
     let home = home_dir();
     match shell {
         Bash => Some((
@@ -307,7 +306,7 @@ fn install_completions(shell: clap_complete::Shell) -> Result<()> {
     let path = dir.join(name);
     std::fs::write(&path, &buf)?;
     println!("Installed {shell} completion: {}", path.display());
-    if let clap_complete::Shell::Zsh = shell {
+    if shell == clap_complete::Shell::Zsh {
         println!(
             "note: ensure {0} is on your $fpath and compinit runs, e.g. in ~/.zshrc:\n      \
              fpath=({0} $fpath); autoload -Uz compinit && compinit",
@@ -333,7 +332,7 @@ fn remove_completions() {
 }
 
 /// `git queue completions <shell>` — print a completion script to stdout.
-pub fn completions(shell: clap_complete::Shell) -> Result<()> {
+pub(crate) fn completions(shell: clap_complete::Shell) -> Result<()> {
     let mut cmd = crate::cli_command();
     clap_complete::generate(shell, &mut cmd, "git-queue", &mut std::io::stdout());
     Ok(())
@@ -408,7 +407,7 @@ fn strip_agents_md_section() -> Result<()> {
 }
 
 /// `git queue doctor` — report-only diagnostics for merge-order enforcement.
-pub fn doctor() -> Result<()> {
+pub(crate) fn doctor() -> Result<()> {
     git::ensure_repo()?;
     println!("git queue doctor — merge-order enforcement\n");
 
@@ -443,7 +442,7 @@ pub fn doctor() -> Result<()> {
 
 /// `git queue create <name> [--base <branch>]` — new branch queued after the
 /// current one (or on an explicit `--base` branch).
-pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Result<()> {
+pub(crate) fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     let trunk = meta::trunk()?;
     let parent = match base {
@@ -469,8 +468,7 @@ pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Resul
                 let ns = line
                     .branches
                     .first()
-                    .map(|b| b.starts_with("queue/"))
-                    .unwrap_or(false);
+                    .is_some_and(|b| b.starts_with("queue/"));
                 (n, ns)
             }
             None => bail!("this queue has no name; run `git queue name <name>` first"),
@@ -514,7 +512,7 @@ pub fn create(name: &str, base: Option<&str>, queue_flag: Option<&str>) -> Resul
 /// assigned to branches — so editing means moving, renaming, adding, or
 /// removing the `[name]` header lines. Branch refs simply move to the new
 /// section boundaries; no commit is rewritten.
-pub fn edit(queue_flag: Option<&str>) -> Result<()> {
+pub(crate) fn edit(queue_flag: Option<&str>) -> Result<()> {
     git::ensure_repo()?;
     if !git::worktree_clean() {
         bail!(
@@ -538,7 +536,7 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
         (line.branches, line.base, qname, explicit)
     } else {
         let (qname, explicit) = require_queue_name(queue_flag, &branch)?;
-        (vec![branch.clone()], queue.trunk.clone(), qname, explicit)
+        (vec![branch.clone()], queue.trunk, qname, explicit)
     };
 
     // Every commit of the line, oldest first (front of the queue at the top
@@ -592,7 +590,7 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
         && segments
             .iter()
             .zip(&line_branches)
-            .all(|((n, tip), b)| n == b && git::rev_parse(b).map(|s| &s == tip).unwrap_or(false));
+            .all(|((n, tip), b)| n == b && git::rev_parse(b).is_ok_and(|s| &s == tip));
     if unchanged {
         println!("Queue unchanged.");
         return Ok(());
@@ -641,14 +639,14 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
     }
 
     let land = if segments.iter().any(|(n, _)| n == &branch) {
-        branch.clone()
+        branch
     } else {
-        segments.last().unwrap().0.clone()
+        segments.last().map_or(branch, |s| s.0.clone())
     };
     git::checkout(&land)?;
 
     println!("Queue `{qname}` now has {} branches:", segments.len());
-    let mut p = base.clone();
+    let mut p = base;
     for (name, _) in &segments {
         println!("  {p} ← {name}");
         p = name.clone();
@@ -663,7 +661,7 @@ pub fn edit(queue_flag: Option<&str>) -> Result<()> {
 /// for a terminal), loads the headless engine — which applies the
 /// clean-worktree, empty-queue and forked-line guards — then hands off to the
 /// ratatui view.
-pub fn tui() -> Result<()> {
+pub(crate) fn tui() -> Result<()> {
     git::ensure_repo()?;
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         bail!(
@@ -748,7 +746,9 @@ fn run_queue_editor(
             section = Some(name.to_string());
             continue;
         }
-        let sha = line.split_whitespace().next().unwrap().to_string();
+        let Some(sha) = line.split_whitespace().next().map(str::to_string) else {
+            continue;
+        };
         match &section {
             Some(s) => out.push((s.clone(), sha)),
             None => bail!("commit `{sha}` appears before any `[branch]` header"),
@@ -808,7 +808,7 @@ fn fold_segments(
 /// `git queue track [--parent <branch>]` — adopt the current branch. Offers
 /// to stamp `Stable-Commit-Id` trailers onto the adopted commits (a history rewrite,
 /// so it asks first; `--stamp-ids`/`--no-stamp-ids` decide non-interactively).
-pub fn track(
+pub(crate) fn track(
     parent: Option<String>,
     stamp_ids: bool,
     no_stamp_ids: bool,
@@ -826,7 +826,7 @@ pub fn track(
     }
     let parent = match parent {
         Some(p) => resolve_branch_arg(&p)?,
-        None => trunk.clone(),
+        None => trunk,
     };
     if !git::branch_exists(&parent) {
         bail!("parent branch `{parent}` does not exist");
@@ -920,7 +920,7 @@ fn edit_if_requested(
 }
 
 /// `git queue untrack` — forget the current branch's queue metadata.
-pub fn untrack() -> Result<()> {
+pub(crate) fn untrack() -> Result<()> {
     git::ensure_repo()?;
     let branch = git::current_branch()?;
     meta::untrack(&branch);
@@ -931,7 +931,7 @@ pub fn untrack() -> Result<()> {
 /// `git queue describe [-m <text>]` — set the description of what the current
 /// branch/PR is about. It becomes the body of the PR (below the queue list) on
 /// the next `submit`. Opens `$EDITOR` when `-m` is omitted.
-pub fn describe(message: Option<String>) -> Result<()> {
+pub(crate) fn describe(message: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let branch = git::current_branch()?;
@@ -963,7 +963,7 @@ pub fn describe(message: Option<String>) -> Result<()> {
 
 /// `git queue describe-branch [-m <text>]` — describe what the current branch
 /// is about; becomes the "About this branch" section of its PR.
-pub fn describe_branch(message: Option<String>) -> Result<()> {
+pub(crate) fn describe_branch(message: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let branch = git::current_branch()?;
@@ -991,7 +991,7 @@ pub fn describe_branch(message: Option<String>) -> Result<()> {
 
 /// `git queue name [<name>]` — show or set the current queue's name. Setting
 /// records membership on every branch of the line.
-pub fn name(new_name: Option<String>) -> Result<()> {
+pub(crate) fn name(new_name: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let branch = git::current_branch()?;
@@ -1017,7 +1017,7 @@ pub fn name(new_name: Option<String>) -> Result<()> {
 }
 
 /// `git queue ls` — every queue in the repo, most recently touched first.
-pub fn ls() -> Result<()> {
+pub(crate) fn ls() -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let current = git::current_branch().ok();
@@ -1055,8 +1055,7 @@ pub fn ls() -> Result<()> {
     for (n, branches) in &ordered {
         let here = current
             .as_deref()
-            .map(|c| branches.iter().any(|b| b == c))
-            .unwrap_or(false);
+            .is_some_and(|c| branches.iter().any(|b| b == c));
         let marker = if here { "  ← current" } else { "" };
         let desc = meta::queue_description(n)
             .map(|d| {
@@ -1112,13 +1111,13 @@ fn edit_description(what: &str, existing: Option<&str>, becomes: &str) -> Result
 }
 
 /// `git queue status`
-pub fn status() -> Result<()> {
+pub(crate) fn status() -> Result<()> {
     show_tree(false)
 }
 
 /// `git queue log` — the status tree, with each branch's commits indented one
 /// level beneath it, newest first, each prefixed by its abbreviated Stable-Commit-Id.
-pub fn log() -> Result<()> {
+pub(crate) fn log() -> Result<()> {
     show_tree(true)
 }
 
@@ -1134,12 +1133,11 @@ fn show_tree(with_commits: bool) -> Result<()> {
     } else if let Some(child) = queue.children(&current).into_iter().next() {
         child
     } else if current == queue.trunk {
-        match queue.roots().into_iter().next() {
-            Some(r) => r,
-            None => {
-                println!("No queues yet. Create one with `git queue create <name>`.");
-                return Ok(());
-            }
+        if let Some(r) = queue.roots().into_iter().next() {
+            r
+        } else {
+            println!("No queues yet. Create one with `git queue create <name>`.");
+            return Ok(());
         }
     } else {
         println!("Branch `{current}` is not tracked. Adopt it with `git queue track`.");
@@ -1153,8 +1151,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
     let root = chain[0].clone();
     let base = queue
         .parent_of(&root)
-        .expect("root is tracked, so it has a parent")
-        .to_string();
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("`{root}` has no parent branch"))?;
     fn topdown(
         queue: &Queue,
         branch: &str,
@@ -1185,8 +1183,8 @@ fn show_tree(with_commits: bool) -> Result<()> {
         e.indent = *indent;
         let parent = queue
             .parent_of(&e.branch)
-            .expect("tracked branch has a parent")
-            .to_string();
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("`{}` has no parent branch", e.branch))?;
         if e.conflicted {
             e.conflicts = git::conflict_files(&e.branch);
         }
@@ -1231,17 +1229,12 @@ fn terminal_renders_hyperlinks() -> bool {
     if !var("KITTY_WINDOW_ID").is_empty() || !var("WT_SESSION").is_empty() {
         return true;
     }
-    if var("VTE_VERSION")
-        .parse::<u32>()
-        .map(|v| v >= 5000)
-        .unwrap_or(false)
-    {
+    if var("VTE_VERSION").parse::<u32>().is_ok_and(|v| v >= 5000) {
         return true;
     }
     if var("KONSOLE_VERSION")
         .parse::<u32>()
-        .map(|v| v >= 201100)
-        .unwrap_or(false)
+        .is_ok_and(|v| v >= 201_100)
     {
         return true;
     }
@@ -1250,7 +1243,7 @@ fn terminal_renders_hyperlinks() -> bool {
 }
 
 /// `git queue prev` / `down` — check out the parent branch.
-pub fn prev() -> Result<()> {
+pub(crate) fn prev() -> Result<()> {
     git::ensure_repo()?;
     let branch = git::current_branch()?;
     match meta::parent(&branch) {
@@ -1263,7 +1256,7 @@ pub fn prev() -> Result<()> {
 }
 
 /// `git queue next` / `up` — check out the child branch.
-pub fn next() -> Result<()> {
+pub(crate) fn next() -> Result<()> {
     git::ensure_repo()?;
     let queue = Queue::load()?;
     let branch = git::current_branch()?;
@@ -1282,7 +1275,7 @@ pub fn next() -> Result<()> {
 /// branches, requeue the whole queue onto the latest trunk, and (by default)
 /// push every branch back with `--force-with-lease` so remote work is never
 /// clobbered.
-pub fn sync(no_push: bool) -> Result<()> {
+pub(crate) fn sync(no_push: bool) -> Result<()> {
     git::ensure_repo()?;
     if git::rebase_in_progress() {
         bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git queue sync`");
@@ -1332,7 +1325,7 @@ pub fn sync(no_push: bool) -> Result<()> {
         let Ok(line) = queue.line_through(&leaf) else {
             continue;
         };
-        let top = line.branches.last().unwrap().clone();
+        let top = line.top().to_string();
         let Ok(ids) = git::queue_ids(&format!("{}..{top}", line.base)) else {
             continue;
         };
@@ -1362,10 +1355,10 @@ pub fn sync(no_push: bool) -> Result<()> {
     for branch in queue.topo_order() {
         match incorporate_remote(&branch, &remote, &original)? {
             Some(RemoteAction::FastForwarded) => {
-                println!("Pulled remote commits into `{branch}` (fast-forward).")
+                println!("Pulled remote commits into `{branch}` (fast-forward).");
             }
             Some(RemoteAction::Pulled(n)) => {
-                println!("Pulled {n} teammate commit(s) into `{branch}`.")
+                println!("Pulled {n} teammate commit(s) into `{branch}`.");
             }
             None => {}
         }
@@ -1427,9 +1420,8 @@ pub fn sync(no_push: bool) -> Result<()> {
     // `git queue submit` publishes those deliberately.
     if !no_push && gh::ready() {
         for leaf in queue.leaves() {
-            let line = match queue.line_through(&leaf) {
-                Ok(l) => l,
-                Err(_) => continue,
+            let Ok(line) = queue.line_through(&leaf) else {
+                continue;
             };
             let published = line
                 .branches
@@ -1450,9 +1442,7 @@ pub fn sync(no_push: bool) -> Result<()> {
         }
     }
 
-    if !report.conflicted.is_empty() {
-        requeue::warn_conflicts(&report.conflicted);
-    } else {
+    if report.conflicted.is_empty() {
         let bases = queue.bases();
         match bases.as_slice() {
             [] => println!("Nothing to sync yet."),
@@ -1465,6 +1455,8 @@ pub fn sync(no_push: bool) -> Result<()> {
                     .join(", ")
             ),
         }
+    } else {
+        requeue::warn_conflicts(&report.conflicted);
     }
     Ok(())
 }
@@ -1512,8 +1504,7 @@ fn push_would_mislabel_child(queue: &Queue, branch: &str) -> bool {
         let open_pr = gh::find(&child)
             .ok()
             .flatten()
-            .map(|pr| pr.state == "OPEN")
-            .unwrap_or(false);
+            .is_some_and(|pr| pr.state == "OPEN");
         if open_pr {
             eprintln!(
                 "warning: not pushing `{branch}` — its tip contains the head of `{child}`'s \
@@ -1551,7 +1542,9 @@ fn prune_landed_by_id(queue: Queue) -> Result<Queue> {
     use std::collections::HashSet;
     let mut landed: HashSet<String> = HashSet::new();
     for b in queue.topo_order() {
-        let parent = queue.parent_of(&b).unwrap().to_string();
+        let Some(parent) = queue.parent_of(&b).map(str::to_string) else {
+            continue;
+        };
         let (Ok(pb), Ok(tb)) = (
             git::merge_base(&parent, &b),
             git::merge_base(&queue.trunk, &b),
@@ -1569,7 +1562,7 @@ fn prune_landed_by_id(queue: Queue) -> Result<Queue> {
         };
         if ids
             .iter()
-            .all(|(_, id)| trunk_text.contains(id.as_deref().unwrap()))
+            .all(|(_, id)| id.as_deref().is_some_and(|s| trunk_text.contains(s)))
         {
             landed.insert(b);
         }
@@ -1595,13 +1588,14 @@ fn drop_from_queue(
         if gone.contains(&b) {
             continue;
         }
-        let current_parent = queue.parent_of(&b).unwrap().to_string();
+        let Some(current_parent) = queue.parent_of(&b).map(str::to_string) else {
+            continue;
+        };
         let mut new_parent = current_parent.clone();
         while gone.contains(&new_parent) {
             new_parent = queue
                 .parent_of(&new_parent)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| queue.trunk.clone());
+                .map_or_else(|| queue.trunk.clone(), std::string::ToString::to_string);
         }
         if new_parent != current_parent {
             meta::set_parent(&b, &new_parent)?;
@@ -1624,9 +1618,8 @@ enum RemoteAction {
 /// unique commits onto the remote tip (patch-id dedup, conflict markers
 /// persisted). Returns what it did, or `None` if there was nothing to pull.
 fn incorporate_remote(branch: &str, remote: &str, current: &str) -> Result<Option<RemoteAction>> {
-    let remote_sha = match git::remote_branch(remote, branch) {
-        Some(sha) => sha,
-        None => return Ok(None), // branch not on the remote yet
+    let Some(remote_sha) = git::remote_branch(remote, branch) else {
+        return Ok(None); // branch not on the remote yet
     };
     let local_sha = git::rev_parse(branch)?;
     if local_sha == remote_sha {
@@ -1825,8 +1818,7 @@ fn reconcile_line_prs(
             let collapsed_child = branches.get(i + 1).is_some_and(|child| {
                 existing[i + 1]
                     .as_ref()
-                    .map(|pr| pr.state == "OPEN")
-                    .unwrap_or(false)
+                    .is_some_and(|pr| pr.state == "OPEN")
                     && match (git::rev_parse(child), git::rev_parse(b)) {
                         (Ok(ct), Ok(bt)) => git::is_ancestor(&ct, &bt),
                         _ => false,
@@ -1909,26 +1901,25 @@ fn reconcile_line_prs(
         };
         let title = render::numbered_title(&subject, i, total);
         let nav = render::nav_block(&entries, b, &line.base, &queue_name);
-        let description = match meta::description(b).filter(|d| !d.trim().is_empty()) {
-            Some(d) => d,
-            None => {
-                // No local description: adopt the PR's existing body (minus any
-                // previous nav block) so updating a PR that predates the queue
-                // never wipes what its author wrote.
-                let adopted = full[i]
-                    .as_ref()
-                    .map(|pr| render::strip_block(&pr.body).trim().to_string())
-                    .unwrap_or_default();
-                let adopted = if adopted == "Opening…" {
-                    String::new()
-                } else {
-                    adopted
-                };
-                if !adopted.is_empty() {
-                    meta::set_description(b, &adopted)?;
-                }
+        let description = if let Some(d) = meta::description(b).filter(|d| !d.trim().is_empty()) {
+            d
+        } else {
+            // No local description: adopt the PR's existing body (minus any
+            // previous nav block) so updating a PR that predates the queue
+            // never wipes what its author wrote.
+            let adopted = full[i]
+                .as_ref()
+                .map(|pr| render::strip_block(&pr.body).trim().to_string())
+                .unwrap_or_default();
+            let adopted = if adopted == "Opening…" {
+                String::new()
+            } else {
                 adopted
+            };
+            if !adopted.is_empty() {
+                meta::set_description(b, &adopted)?;
             }
+            adopted
         };
         let body = render::compose_body(&queue_description, &description, &nav);
         gh::edit(number, &base_of(i), &title, &body)?;
@@ -1962,7 +1953,7 @@ fn report_line(line: &Line, outcome: &LinePrs, heading: &str) -> Result<()> {
 
 /// `git queue submit [--draft]` — push the current queue line and open/update
 /// its numbered PRs.
-pub fn submit(draft: bool) -> Result<()> {
+pub(crate) fn submit(draft: bool) -> Result<()> {
     git::ensure_repo()?;
     if !gh::ready() {
         bail!("`gh` is not installed or not authenticated; run `gh auth login`");
@@ -1996,14 +1987,13 @@ fn pr_ref(pr: &gh::Pr) -> PrRef {
 fn resolve_queue_rev(line: &Line, arg: &str) -> Result<String> {
     let arg = arg.trim();
     if arg.starts_with("q-") {
-        let top = line.branches.last().unwrap();
+        let top = line.top();
         let ids = git::queue_ids(&format!("{}..{top}", line.base))?;
         let matches: Vec<&(String, Option<String>)> = ids
             .iter()
             .filter(|(_, id)| {
                 id.as_deref()
-                    .map(|i| i == arg || i.starts_with(arg))
-                    .unwrap_or(false)
+                    .is_some_and(|i| i == arg || i.starts_with(arg))
             })
             .collect();
         match matches.as_slice() {
@@ -2031,7 +2021,7 @@ fn resolve_queue_rev(line: &Line, arg: &str) -> Result<String> {
 /// place: everything after the removal and insertion points is rebased, branch
 /// refs ride along (`--update-refs`), and conflicts are persisted as markers.
 /// The moved commits join the branch segment that `--new-parent` belongs to.
-pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
+pub(crate) fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
     git::ensure_repo()?;
     if git::rebase_in_progress() {
         bail!("a rebase is already in progress; finish it (`git rebase --continue`/`--abort`) then re-run `git queue move`");
@@ -2049,7 +2039,7 @@ pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
     if let Some(fork) = &line.fork_at {
         eprintln!("warning: `{fork}` has multiple children; moving within this line only (other lines requeue on the next sync).");
     }
-    let top = line.branches.last().unwrap().clone();
+    let top = line.top().to_string();
 
     // The line's commits, front-first, and their positions.
     let commits = git::commits_between(&line.base, &top)?;
@@ -2061,12 +2051,11 @@ pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
     let resolve = |rev: &str| -> Result<String> { resolve_queue_rev(&line, rev) };
 
     // <commit> or an inclusive <first>..<last> range.
-    let (first, last) = match spec.split_once("..") {
-        Some((a, b)) => (resolve(a)?, resolve(b)?),
-        None => {
-            let one = resolve(spec)?;
-            (one.clone(), one)
-        }
+    let (first, last) = if let Some((a, b)) = spec.split_once("..") {
+        (resolve(a)?, resolve(b)?)
+    } else {
+        let one = resolve(spec)?;
+        (one.clone(), one)
     };
     let in_line = |sha: &String, what: &str| -> Result<usize> {
         pos.get(sha.as_str()).copied().ok_or_else(|| {
@@ -2162,11 +2151,11 @@ pub fn move_commits(spec: &str, new_parent: &str) -> Result<()> {
     Ok(())
 }
 
-/// Hidden `stamp-todo` subcommand: GIT_SEQUENCE_EDITOR for id stamping.
-/// Marks the picks named by GIT_QUEUE_REWORD_SHAS as `reword`, so git stops
-/// at each one and our GIT_EDITOR (add-queue-id) appends the trailer.
+/// Hidden `stamp-todo` subcommand: `GIT_SEQUENCE_EDITOR` for id stamping.
+/// Marks the picks named by `GIT_QUEUE_REWORD_SHAS` as `reword`, so git stops
+/// at each one and our `GIT_EDITOR` (add-queue-id) appends the trailer.
 /// Untouched picks keep their SHAs where possible.
-pub fn stamp_todo(path: &std::path::Path) -> Result<()> {
+pub(crate) fn stamp_todo(path: &std::path::Path) -> Result<()> {
     let shas: Vec<String> = std::env::var("GIT_QUEUE_REWORD_SHAS")
         .context("GIT_QUEUE_REWORD_SHAS is not set")?
         .split_whitespace()
@@ -2180,8 +2169,7 @@ pub fn stamp_todo(path: &std::path::Path) -> Result<()> {
         let is_target = it.next() == Some("pick")
             && it
                 .next()
-                .map(|abbrev| shas.iter().any(|f| f.starts_with(abbrev)))
-                .unwrap_or(false);
+                .is_some_and(|abbrev| shas.iter().any(|f| f.starts_with(abbrev)));
         if is_target {
             marked += 1;
             rewritten.push(format!("reword{}", &line[4..]));
@@ -2199,12 +2187,12 @@ pub fn stamp_todo(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Hidden `reorder-todo` subcommand: the GIT_SEQUENCE_EDITOR used by
+/// Hidden `reorder-todo` subcommand: the `GIT_SEQUENCE_EDITOR` used by
 /// [`git::rebase_reorder_persist`]. Relocates the pick lines named by
-/// GIT_QUEUE_MOVE_SHAS to directly follow the pick for GIT_QUEUE_MOVE_AFTER
+/// `GIT_QUEUE_MOVE_SHAS` to directly follow the pick for `GIT_QUEUE_MOVE_AFTER`
 /// (or to the top of the todo when it is empty). `update-ref` lines stay put,
 /// which is what carries branch membership.
-pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
+pub(crate) fn reorder_todo(path: &std::path::Path) -> Result<()> {
     let shas: Vec<String> = std::env::var("GIT_QUEUE_MOVE_SHAS")
         .context("GIT_QUEUE_MOVE_SHAS is not set")?
         .split_whitespace()
@@ -2223,9 +2211,7 @@ pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
     let mut moved = Vec::new();
     let mut rest = Vec::new();
     for line in todo.lines() {
-        let is_moved = pick_sha(line)
-            .map(|a| shas.iter().any(|f| matches(&a, f)))
-            .unwrap_or(false);
+        let is_moved = pick_sha(line).is_some_and(|a| shas.iter().any(|f| matches(&a, f)));
         if is_moved {
             moved.push(line.to_string());
         } else {
@@ -2244,7 +2230,7 @@ pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
     } else {
         match rest
             .iter()
-            .position(|l| pick_sha(l).map(|a| matches(&a, &after)).unwrap_or(false))
+            .position(|l| pick_sha(l).is_some_and(|a| matches(&a, &after)))
         {
             Some(i) => i + 1,
             None => bail!("todo mismatch: --new-parent pick not found"),
@@ -2259,7 +2245,7 @@ pub fn reorder_todo(path: &std::path::Path) -> Result<()> {
 /// `Stable-Commit-Id` trailer on the message being committed, but only on tracked
 /// queue branches and only for non-empty messages. Silent otherwise — it runs
 /// on every commit in a hooked repo.
-pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
+pub(crate) fn add_queue_id(path: &std::path::Path) -> Result<()> {
     if git::ensure_repo().is_err() {
         return Ok(());
     }
@@ -2297,7 +2283,7 @@ pub fn add_queue_id(path: &std::path::Path) -> Result<()> {
 /// plain `git commit` INSERTS a new commit after it and `git commit --amend`
 /// REVISES it (message — and Stable-Commit-Id — carried over); either way the
 /// rest of the queue rebases on top, via the hooks or `git queue requeue`.
-pub fn checkout(arg: &str) -> Result<()> {
+pub(crate) fn checkout(arg: &str) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
     let queue = Queue::load()?;
@@ -2314,7 +2300,7 @@ pub fn checkout(arg: &str) -> Result<()> {
     } else {
         bail!("HEAD is detached outside a queue-editing session; check out a queue branch first");
     };
-    let top = line.branches.last().unwrap().clone();
+    let top = line.top().to_string();
 
     // Checking out a branch of the line reattaches and ends the session
     // (short names resolve inside namespaced queues).
@@ -2412,7 +2398,7 @@ fn reintegrate_detached(auto: bool, original: &str, top: &str) -> Result<()> {
 
 /// `git queue yank` — close every open (non-merged) PR in the current queue.
 /// Merged PRs are left alone; local branches and metadata are untouched.
-pub fn yank() -> Result<()> {
+pub(crate) fn yank() -> Result<()> {
     git::ensure_repo()?;
     if !gh::ready() {
         bail!("`gh` is not installed or not authenticated; run `gh auth login`");
@@ -2443,7 +2429,7 @@ pub fn yank() -> Result<()> {
 /// `git queue commit [-m <msg>]` — make a NEW commit on the current branch,
 /// then requeue all descendants onto the new tip (`git replay`, with a
 /// marker-persisting fallback on conflict).
-pub fn commit(message: Option<String>) -> Result<()> {
+pub(crate) fn commit(message: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     // Suppress our own hooks for the internal git calls; we requeue explicitly.
     std::env::set_var(git::GUARD_ENV, "1");
@@ -2467,7 +2453,7 @@ pub fn commit(message: Option<String>) -> Result<()> {
 
 /// `git queue amend` — fold STAGED changes into the current branch's tip commit
 /// via `git history fixup`, atomically updating every descendant.
-pub fn amend() -> Result<()> {
+pub(crate) fn amend() -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
     let current = git::current_branch()?;
@@ -2496,7 +2482,7 @@ pub fn amend() -> Result<()> {
 
 /// `git queue reword [<commit>]` — rewrite a commit message via
 /// `git history reword`, atomically updating descendants. Defaults to HEAD.
-pub fn reword(commit: Option<String>) -> Result<()> {
+pub(crate) fn reword(commit: Option<String>) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
     let current = git::current_branch()?;
@@ -2523,7 +2509,7 @@ pub fn reword(commit: Option<String>) -> Result<()> {
 /// `git queue requeue` — requeue descendants of the current branch onto its
 /// current tip. `--auto` (used by hooks) stays quiet when there's nothing to do
 /// and on non-queue branches.
-pub fn requeue(auto: bool) -> Result<()> {
+pub(crate) fn requeue(auto: bool) -> Result<()> {
     git::ensure_repo()?;
     std::env::set_var(git::GUARD_ENV, "1");
     // A queue-editing session (git queue checkout) reintegrates instead.
@@ -2646,9 +2632,8 @@ fn install_hook(path: &std::path::Path, snippet: &str) -> Result<()> {
 }
 
 fn remove_hook(path: &std::path::Path) -> Result<()> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(()),
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Ok(());
     };
     let (Some(start), Some(end)) = (contents.find(HOOK_BEGIN), contents.find(HOOK_END)) else {
         return Ok(());

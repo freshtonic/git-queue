@@ -32,23 +32,23 @@ fn config_unset(key: &str) {
     let _ = git::ok(&["config", "--local", "--unset", key]);
 }
 
-pub fn remote() -> String {
+pub(crate) fn remote() -> String {
     config_get("queue.remote").unwrap_or_else(|| "origin".to_string())
 }
 
 /// Merge-order gate mode: `Some("status")` once `git queue protect` has
 /// enabled it; `None` means no gating.
-pub fn gate() -> Option<String> {
+pub(crate) fn gate() -> Option<String> {
     config_get("queue.gate")
 }
 
-pub fn set_gate(mode: &str) -> Result<()> {
+pub(crate) fn set_gate(mode: &str) -> Result<()> {
     config_set("queue.gate", mode)
 }
 
 /// The trunk branch: an explicit `queue.trunk` config wins, then the remote's
 /// default branch (origin/HEAD), then `main`/`master`.
-pub fn trunk() -> Result<String> {
+pub(crate) fn trunk() -> Result<String> {
     if let Some(t) = config_get("queue.trunk") {
         return Ok(t);
     }
@@ -84,36 +84,36 @@ fn description_key(branch: &str) -> String {
     format!("branch.{branch}.queueDescription")
 }
 
-pub fn parent(branch: &str) -> Option<String> {
+pub(crate) fn parent(branch: &str) -> Option<String> {
     config_get(&parent_key(branch))
 }
 
-pub fn set_parent(branch: &str, parent: &str) -> Result<()> {
+pub(crate) fn set_parent(branch: &str, parent: &str) -> Result<()> {
     config_set(&parent_key(branch), parent)
 }
 
-pub fn parent_sha(branch: &str) -> Option<String> {
+pub(crate) fn parent_sha(branch: &str) -> Option<String> {
     config_get(&parent_sha_key(branch))
 }
 
-pub fn set_parent_sha(branch: &str, sha: &str) -> Result<()> {
+pub(crate) fn set_parent_sha(branch: &str, sha: &str) -> Result<()> {
     config_set(&parent_sha_key(branch), sha)
 }
 
-pub fn pr(branch: &str) -> Option<u64> {
+pub(crate) fn pr(branch: &str) -> Option<u64> {
     config_get(&pr_key(branch)).and_then(|s| s.parse().ok())
 }
 
-pub fn set_pr(branch: &str, number: u64) -> Result<()> {
+pub(crate) fn set_pr(branch: &str, number: u64) -> Result<()> {
     config_set(&pr_key(branch), &number.to_string())
 }
 
 /// The user-authored description of what this branch/PR is about.
-pub fn description(branch: &str) -> Option<String> {
+pub(crate) fn description(branch: &str) -> Option<String> {
     config_get(&description_key(branch))
 }
 
-pub fn set_description(branch: &str, text: &str) -> Result<()> {
+pub(crate) fn set_description(branch: &str, text: &str) -> Result<()> {
     if text.trim().is_empty() {
         config_unset(&description_key(branch));
         Ok(())
@@ -122,7 +122,7 @@ pub fn set_description(branch: &str, text: &str) -> Result<()> {
     }
 }
 
-pub fn untrack(branch: &str) {
+pub(crate) fn untrack(branch: &str) {
     config_unset(&parent_key(branch));
     config_unset(&parent_sha_key(branch));
     config_unset(&pr_key(branch));
@@ -132,19 +132,19 @@ pub fn untrack(branch: &str) {
 
 /// Detached queue-editing state, set by `git queue checkout <commit>`:
 /// the commit HEAD was placed on, and the top branch of its line.
-pub fn detached_state() -> Option<(String, String)> {
+pub(crate) fn detached_state() -> Option<(String, String)> {
     Some((
         config_get("queue.detachedoriginal")?,
         config_get("queue.detachedtop")?,
     ))
 }
 
-pub fn set_detached_state(original: &str, top: &str) -> Result<()> {
+pub(crate) fn set_detached_state(original: &str, top: &str) -> Result<()> {
     config_set("queue.detachedoriginal", original)?;
     config_set("queue.detachedtop", top)
 }
 
-pub fn clear_detached_state() {
+pub(crate) fn clear_detached_state() {
     config_unset("queue.detachedoriginal");
     config_unset("queue.detachedtop");
 }
@@ -154,16 +154,16 @@ fn queue_name_key(branch: &str) -> String {
 }
 
 /// The named queue this branch belongs to, if recorded.
-pub fn branch_queue(branch: &str) -> Option<String> {
+pub(crate) fn branch_queue(branch: &str) -> Option<String> {
     config_get(&queue_name_key(branch))
 }
 
-pub fn set_branch_queue(branch: &str, queue: &str) -> Result<()> {
+pub(crate) fn set_branch_queue(branch: &str, queue: &str) -> Result<()> {
     config_set(&queue_name_key(branch), queue)
 }
 
 /// Queue names must be usable inside branch names and config subsections.
-pub fn validate_queue_name(name: &str) -> Result<()> {
+pub(crate) fn validate_queue_name(name: &str) -> Result<()> {
     let ok = !name.is_empty()
         && name
             .chars()
@@ -174,11 +174,11 @@ pub fn validate_queue_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn queue_description(queue: &str) -> Option<String> {
+pub(crate) fn queue_description(queue: &str) -> Option<String> {
     config_get(&format!("queue.{queue}.description"))
 }
 
-pub fn set_queue_description(queue: &str, text: &str) -> Result<()> {
+pub(crate) fn set_queue_description(queue: &str, text: &str) -> Result<()> {
     if text.trim().is_empty() {
         config_unset(&format!("queue.{queue}.description"));
         Ok(())
@@ -190,12 +190,11 @@ pub fn set_queue_description(queue: &str, text: &str) -> Result<()> {
 fn now_epoch() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Record activity on a queue: sets createdAt once, bumps modifiedAt.
-pub fn touch_queue(queue: &str) {
+pub(crate) fn touch_queue(queue: &str) {
     let created = format!("queue.{queue}.createdat");
     if config_get(&created).is_none() {
         let _ = config_set(&created, &now_epoch().to_string());
@@ -207,7 +206,7 @@ pub fn touch_queue(queue: &str) {
 }
 
 /// Last-activity time of a queue (modifiedAt, falling back to createdAt).
-pub fn queue_touched_at(queue: &str) -> u64 {
+pub(crate) fn queue_touched_at(queue: &str) -> u64 {
     config_get(&format!("queue.{queue}.modifiedat"))
         .or_else(|| config_get(&format!("queue.{queue}.createdat")))
         .and_then(|s| s.parse().ok())
@@ -215,7 +214,7 @@ pub fn queue_touched_at(queue: &str) -> u64 {
 }
 
 /// Every queue name that has metadata or a member branch.
-pub fn all_queue_names() -> Vec<String> {
+pub(crate) fn all_queue_names() -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     if let Ok(raw) = git::out(&["config", "--local", "--get-regexp", r"^queue\..+\..+$"]) {
         for line in raw.lines() {
@@ -245,16 +244,15 @@ pub fn all_queue_names() -> Vec<String> {
 }
 
 /// All branches that have a `queueParent` recorded.
-pub fn tracked_branches() -> Vec<String> {
+pub(crate) fn tracked_branches() -> Vec<String> {
     // `--get-regexp` matches against canonical (lower-cased variable) key names.
-    let raw = match git::out(&[
+    let Ok(raw) = git::out(&[
         "config",
         "--local",
         "--get-regexp",
         r"^branch\..*\.queueparent$",
-    ]) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    ]) else {
+        return Vec::new();
     };
     raw.lines()
         .filter_map(|line| {

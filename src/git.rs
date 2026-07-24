@@ -11,10 +11,10 @@ use std::process::{Command, Stdio};
 
 /// Env var set on child git processes while git-queue is requeueing, so our
 /// own hooks can detect the reentry and skip (avoiding infinite recursion).
-pub const GUARD_ENV: &str = "GIT_QUEUE_IN_REQUEUE";
+pub(crate) const GUARD_ENV: &str = "GIT_QUEUE_IN_REQUEUE";
 
 /// Run `git <args>` and capture trimmed stdout. Errors if git exits non-zero.
-pub fn out(args: &[&str]) -> Result<String> {
+pub(crate) fn out(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -31,7 +31,7 @@ pub fn out(args: &[&str]) -> Result<String> {
 
 /// Run `git <args>` inheriting stdio, so progress (rebase, push) is visible.
 /// Errors if git exits non-zero.
-pub fn run(args: &[&str]) -> Result<()> {
+pub(crate) fn run(args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .args(args)
         .status()
@@ -44,23 +44,22 @@ pub fn run(args: &[&str]) -> Result<()> {
 
 /// Run `git <args>`, returning whether it exited zero. Never errors on
 /// non-zero (used for boolean probes like `merge-base --is-ancestor`).
-pub fn ok(args: &[&str]) -> bool {
+pub(crate) fn ok(args: &[&str]) -> bool {
     Command::new("git")
         .args(args)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Fail early with a friendly message if we are not inside a git work tree.
-pub fn ensure_repo() -> Result<()> {
+pub(crate) fn ensure_repo() -> Result<()> {
     if !ok(&["rev-parse", "--git-dir"]) {
         bail!("not inside a git repository (run this from within your repo)");
     }
     Ok(())
 }
 
-pub fn current_branch() -> Result<String> {
+pub(crate) fn current_branch() -> Result<String> {
     let b = out(&["rev-parse", "--abbrev-ref", "HEAD"])?;
     if b == "HEAD" {
         bail!("you are in a detached HEAD state; check out a branch first");
@@ -68,12 +67,12 @@ pub fn current_branch() -> Result<String> {
     Ok(b)
 }
 
-pub fn rev_parse(rev: &str) -> Result<String> {
+pub(crate) fn rev_parse(rev: &str) -> Result<String> {
     out(&["rev-parse", "--verify", "--quiet", rev])
         .map_err(|_| anyhow!("cannot resolve revision `{rev}`"))
 }
 
-pub fn branch_exists(name: &str) -> bool {
+pub(crate) fn branch_exists(name: &str) -> bool {
     ok(&[
         "show-ref",
         "--verify",
@@ -83,47 +82,47 @@ pub fn branch_exists(name: &str) -> bool {
 }
 
 /// Is `ancestor` an ancestor of `descendant`?
-pub fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
+pub(crate) fn is_ancestor(ancestor: &str, descendant: &str) -> bool {
     ok(&["merge-base", "--is-ancestor", ancestor, descendant])
 }
 
-pub fn merge_base(a: &str, b: &str) -> Result<String> {
+pub(crate) fn merge_base(a: &str, b: &str) -> Result<String> {
     out(&["merge-base", a, b])
 }
 
-pub fn checkout(branch: &str) -> Result<()> {
+pub(crate) fn checkout(branch: &str) -> Result<()> {
     run(&["checkout", branch])
 }
 
-pub fn checkout_quiet(branch: &str) -> Result<()> {
+pub(crate) fn checkout_quiet(branch: &str) -> Result<()> {
     run(&["checkout", "-q", branch])
 }
 
 /// Snap index and worktree to HEAD. Discards local changes — callers must
 /// ensure the worktree was clean before the refs moved under it.
-pub fn reset_hard_head() -> Result<()> {
+pub(crate) fn reset_hard_head() -> Result<()> {
     run(&["reset", "-q", "--hard"])
 }
 
 /// Create `name` at `start_point` without checking it out.
-pub fn create_branch(name: &str, start_point: &str) -> Result<()> {
+pub(crate) fn create_branch(name: &str, start_point: &str) -> Result<()> {
     run(&["branch", name, start_point])
 }
 
 /// Subject line of the tip commit of `branch`.
-pub fn tip_subject(branch: &str) -> Result<String> {
+pub(crate) fn tip_subject(branch: &str) -> Result<String> {
     out(&["log", "-1", "--format=%s", branch])
 }
 
 /// Number of commits in `base..branch` (i.e. unique to `branch`).
-pub fn ahead_count(base: &str, branch: &str) -> Result<usize> {
+pub(crate) fn ahead_count(base: &str, branch: &str) -> Result<usize> {
     let s = out(&["rev-list", "--count", &format!("{base}..{branch}")])?;
     Ok(s.parse().unwrap_or(0))
 }
 
 /// Commits in `base..tip`, oldest first, as `(full_sha, subject)` pairs.
 /// Commits in `base..tip`, oldest first: `(full sha, Stable-Commit-Id?, subject)`.
-pub fn commits_between_with_ids(
+pub(crate) fn commits_between_with_ids(
     base: &str,
     tip: &str,
 ) -> Result<Vec<(String, Option<String>, String)>> {
@@ -160,13 +159,13 @@ pub fn commits_between_with_ids(
 /// The patch a single commit introduces — its own diff against its parent,
 /// with no colour and no message header. Handles a root commit (no parent).
 /// Used by the TUI diff pane.
-pub fn commit_diff(rev: &str) -> Result<String> {
+pub(crate) fn commit_diff(rev: &str) -> Result<String> {
     out(&["show", "--no-color", "--format=", "--patch", rev])
 }
 
 /// The full commit message of `rev` (subject + body + trailers). Used by the
 /// TUI message pane.
-pub fn commit_message(rev: &str) -> Result<String> {
+pub(crate) fn commit_message(rev: &str) -> Result<String> {
     out(&["show", "--no-patch", "--format=%B", rev])
 }
 
@@ -174,13 +173,13 @@ pub fn commit_message(rev: &str) -> Result<String> {
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// A commit's tree object sha.
-pub fn tree_of(rev: &str) -> Result<String> {
+pub(crate) fn tree_of(rev: &str) -> Result<String> {
     out(&["rev-parse", "--verify", &format!("{rev}^{{tree}}")])
 }
 
 /// The content of `path` at `rev`, or an empty string if it does not exist
 /// there (e.g. a file added by `rev`, read at its parent).
-pub fn file_at(rev: &str, path: &str) -> String {
+pub(crate) fn file_at(rev: &str, path: &str) -> String {
     out(&["show", &format!("{rev}:{path}")]).unwrap_or_default()
 }
 
@@ -195,7 +194,7 @@ fn hash_object(content: &str) -> Result<String> {
         .context("failed to spawn `git hash-object`")?;
     cmd.stdin
         .take()
-        .unwrap()
+        .ok_or_else(|| anyhow!("no stdin pipe for `git hash-object`"))?
         .write_all(content.as_bytes())
         .context("failed to write blob content")?;
     let out = cmd.wait_with_output()?;
@@ -208,7 +207,7 @@ fn hash_object(content: &str) -> Result<String> {
 /// Build a new tree from `base_tree`, applying `changes`: `Some(content)` sets
 /// a regular file (mode 100644), `None` removes it. Uses a temporary index so
 /// the real index is untouched.
-pub fn build_tree(base_tree: &str, changes: &[(String, Option<String>)]) -> Result<String> {
+pub(crate) fn build_tree(base_tree: &str, changes: &[(String, Option<String>)]) -> Result<String> {
     let git_dir = out(&["rev-parse", "--git-dir"])?;
     let index_path = std::path::Path::new(&git_dir).join("git-queue-split-index");
     let index = index_path.to_string_lossy().to_string();
@@ -258,7 +257,7 @@ pub fn build_tree(base_tree: &str, changes: &[(String, Option<String>)]) -> Resu
 
 /// Create a commit object from `tree` with parent `parent` and message
 /// `message`, returning its sha. No ref is moved.
-pub fn commit_tree(tree: &str, parent: &str, message: &str) -> Result<String> {
+pub(crate) fn commit_tree(tree: &str, parent: &str, message: &str) -> Result<String> {
     let mut cmd = Command::new("git")
         .args(["commit-tree", tree, "-p", parent])
         .env(GUARD_ENV, "1")
@@ -269,7 +268,7 @@ pub fn commit_tree(tree: &str, parent: &str, message: &str) -> Result<String> {
         .context("failed to spawn `git commit-tree`")?;
     cmd.stdin
         .take()
-        .unwrap()
+        .ok_or_else(|| anyhow!("no stdin pipe for `git commit-tree`"))?
         .write_all(message.as_bytes())
         .context("failed to write commit message")?;
     let out = cmd.wait_with_output()?;
@@ -283,7 +282,7 @@ pub fn commit_tree(tree: &str, parent: &str, message: &str) -> Result<String> {
 /// new commit's sha. Used to replay a split commit's descendants — which apply
 /// cleanly because the new tip has the same tree. Aborts and errors on the
 /// unexpected conflict.
-pub fn cherry_pick_onto(base: &str, sha: &str) -> Result<String> {
+pub(crate) fn cherry_pick_onto(base: &str, sha: &str) -> Result<String> {
     run(&["checkout", "-q", "--detach", base])?;
     let mut pick = Command::new("git");
     pick.args(["cherry-pick", "--allow-empty", sha]);
@@ -304,13 +303,13 @@ pub fn cherry_pick_onto(base: &str, sha: &str) -> Result<String> {
 
 /// True if `rev` introduces no change: its tree equals its (first) parent's,
 /// or — for a root commit — the empty tree.
-pub fn commit_is_empty(rev: &str) -> bool {
+pub(crate) fn commit_is_empty(rev: &str) -> bool {
     let parent = out(&["rev-parse", "--verify", "--quiet", &format!("{rev}^")])
         .unwrap_or_else(|_| EMPTY_TREE.to_string());
     ok(&["diff", "--quiet", &parent, rev])
 }
 
-pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
+pub(crate) fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
     let raw = out(&[
         "log",
         "--reverse",
@@ -328,26 +327,22 @@ pub fn commits_between(base: &str, tip: &str) -> Result<Vec<(String, String)>> {
 
 /// True if the index has no staged changes and no tracked file is modified
 /// (untracked files are allowed).
-pub fn tracked_clean() -> bool {
-    out(&["status", "--porcelain", "--untracked-files=no"])
-        .map(|s| s.is_empty())
-        .unwrap_or(false)
+pub(crate) fn tracked_clean() -> bool {
+    out(&["status", "--porcelain", "--untracked-files=no"]).is_ok_and(|s| s.is_empty())
 }
 
 /// True if the work tree and index are clean.
-pub fn worktree_clean() -> bool {
-    out(&["status", "--porcelain"])
-        .map(|s| s.is_empty())
-        .unwrap_or(false)
+pub(crate) fn worktree_clean() -> bool {
+    out(&["status", "--porcelain"]).is_ok_and(|s| s.is_empty())
 }
 
 /// Detach HEAD at its current commit (so no branch ref is "checked out").
-pub fn detach_head() -> Result<()> {
+pub(crate) fn detach_head() -> Result<()> {
     run(&["checkout", "-q", "--detach"])
 }
 
 /// True if a rebase (merge or apply backend) is currently in progress.
-pub fn rebase_in_progress() -> bool {
+pub(crate) fn rebase_in_progress() -> bool {
     let dir = match out(&["rev-parse", "--git-dir"]) {
         Ok(d) => PathBuf::from(d),
         Err(_) => return false,
@@ -358,12 +353,12 @@ pub fn rebase_in_progress() -> bool {
 /// Fetch with `--prune`: stale remote-tracking refs for branches deleted on
 /// the remote (e.g. auto-deleted when their PR merged) must not survive, or
 /// sync would "pull" from ghost branches and push with dead leases.
-pub fn fetch(remote: &str) -> Result<()> {
+pub(crate) fn fetch(remote: &str) -> Result<()> {
     run(&["fetch", "--prune", remote])
 }
 
 /// SHA of a remote-tracking branch `<remote>/<branch>`, if it exists.
-pub fn remote_branch(remote: &str, branch: &str) -> Option<String> {
+pub(crate) fn remote_branch(remote: &str, branch: &str) -> Option<String> {
     let r = format!("{remote}/{branch}");
     out(&["rev-parse", "--verify", "--quiet", &r])
         .ok()
@@ -372,29 +367,29 @@ pub fn remote_branch(remote: &str, branch: &str) -> Option<String> {
 
 /// Fast-forward the *currently checked-out* branch to `target` (updates the
 /// work tree). Fails if it isn't a fast-forward.
-pub fn merge_ff_only(target: &str) -> Result<()> {
+pub(crate) fn merge_ff_only(target: &str) -> Result<()> {
     run(&["merge", "--ff-only", target])
 }
 
 /// Force-with-lease push, setting upstream. Shows git's own progress output.
-pub fn push(remote: &str, branch: &str) -> Result<()> {
+pub(crate) fn push(remote: &str, branch: &str) -> Result<()> {
     run(&["push", "--force-with-lease", "-u", remote, branch])
 }
 
 /// Move a branch ref to `sha` without checking it out.
-pub fn force_ref(branch: &str, sha: &str) -> Result<()> {
+pub(crate) fn force_ref(branch: &str, sha: &str) -> Result<()> {
     run(&["update-ref", &format!("refs/heads/{branch}"), sha])
 }
 
 /// True if there are staged changes in the index.
-pub fn staged_changes() -> bool {
+pub(crate) fn staged_changes() -> bool {
     // `git diff --cached --quiet` exits 1 when there is something staged.
     !ok(&["diff", "--cached", "--quiet"])
 }
 
 /// The https URL of the GitHub repo behind `remote`, parsed from its URL
 /// (ssh or https form), if it is a GitHub remote.
-pub fn github_repo_url(remote: &str) -> Option<String> {
+pub(crate) fn github_repo_url(remote: &str) -> Option<String> {
     let url = out(&["remote", "get-url", remote]).ok()?;
     let path = url
         .strip_prefix("git@github.com:")
@@ -408,7 +403,7 @@ pub fn github_repo_url(remote: &str) -> Option<String> {
 }
 
 /// Paths in `rev`'s tree that contain conflict markers.
-pub fn conflict_files(rev: &str) -> Vec<String> {
+pub(crate) fn conflict_files(rev: &str) -> Vec<String> {
     out(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])
         .map(|raw| {
             raw.lines()
@@ -419,12 +414,12 @@ pub fn conflict_files(rev: &str) -> Vec<String> {
 }
 
 /// True if the tree at `rev` contains textual conflict markers.
-pub fn has_conflict_markers(rev: &str) -> bool {
+pub(crate) fn has_conflict_markers(rev: &str) -> bool {
     ok(&["grep", "-I", "-l", "-e", "^<<<<<<< ", rev])
 }
 
 /// Make a normal commit on the current branch.
-pub fn commit(message: Option<&str>) -> Result<()> {
+pub(crate) fn commit(message: Option<&str>) -> Result<()> {
     // Suppress our own hooks during the internal commit; git-queue does the
     // requeue itself right after.
     let mut cmd = Command::new("git");
@@ -444,7 +439,7 @@ pub fn commit(message: Option<&str>) -> Result<()> {
 /// updating every descendant branch. Returns `true` if it aborted because the
 /// rewrite would conflict with a descendant (git history is atomic and cannot
 /// persist markers). Any other failure is an error.
-pub fn history_fixup(commit: &str) -> Result<bool> {
+pub(crate) fn history_fixup(commit: &str) -> Result<bool> {
     let out = Command::new("git")
         .args(["history", "fixup", commit])
         .env(GUARD_ENV, "1")
@@ -462,7 +457,7 @@ pub fn history_fixup(commit: &str) -> Result<bool> {
 
 /// `git history reword <commit>` — rewrite a commit message (opens the editor),
 /// atomically updating descendants. Returns `true` on conflict abort.
-pub fn history_reword(commit: &str) -> Result<bool> {
+pub(crate) fn history_reword(commit: &str) -> Result<bool> {
     let status = Command::new("git")
         .args(["history", "reword", commit])
         .env(GUARD_ENV, "1")
@@ -474,7 +469,7 @@ pub fn history_reword(commit: &str) -> Result<bool> {
 }
 
 /// Outcome of a `git replay` requeue attempt.
-pub enum Replayed {
+pub(crate) enum Replayed {
     Applied,
     /// Replay could not apply cleanly (typically a conflict); message is stderr.
     Failed(String),
@@ -483,7 +478,7 @@ pub enum Replayed {
 /// Requeue every branch contained in `ranges` onto `onto` in one operation via
 /// `git replay --contained`, applying the emitted ref updates atomically with
 /// `git update-ref --stdin`. No worktree is touched.
-pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
+pub(crate) fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
     let mut args: Vec<String> = vec![
         "replay".into(),
         "--onto".into(),
@@ -491,7 +486,7 @@ pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
         "--contained".into(),
     ];
     args.extend(ranges.iter().cloned());
-    let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let argrefs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
 
     let out = Command::new("git")
         .args(&argrefs)
@@ -503,7 +498,7 @@ pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
-    if out.stdout.iter().all(|b| b.is_ascii_whitespace()) {
+    if out.stdout.iter().all(u8::is_ascii_whitespace) {
         return Ok(Replayed::Applied); // nothing to update
     }
 
@@ -516,7 +511,7 @@ pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
     child
         .stdin
         .take()
-        .expect("piped stdin")
+        .ok_or_else(|| anyhow!("no stdin pipe for `git update-ref --stdin`"))?
         .write_all(&out.stdout)
         .context("writing replay plan to update-ref")?;
     if !child.wait()?.success() {
@@ -530,7 +525,7 @@ pub fn replay_requeue(onto: &str, ranges: &[String]) -> Result<Replayed> {
 /// and continues, so it always finishes. `--update-refs` moves any intermediate
 /// branch refs in the rebased range. Detect persisted markers afterwards with
 /// [`has_conflict_markers`].
-pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
+pub(crate) fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
     let mut initial = Command::new("git");
     initial.args([
         "-c",
@@ -552,7 +547,7 @@ pub fn rebase_persist(onto: &str, upstream: &str, branch: &str) -> Result<()> {
 /// relocated to directly follow `after` (or to the very front when `None`).
 /// `--update-refs` carries every intermediate branch ref along, and conflicts
 /// are persisted as markers exactly like [`rebase_persist`].
-pub fn rebase_reorder_persist(
+pub(crate) fn rebase_reorder_persist(
     base: &str,
     top_branch: &str,
     move_shas: &[String],
@@ -587,7 +582,7 @@ pub fn rebase_reorder_persist(
 
 /// The outcome of a TUI history-rewriting rebase.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Rewrite {
+pub(crate) enum Rewrite {
     /// The rebase finished; the line was rewritten.
     Clean,
     /// The rebase stopped at a conflict, leaving the standard mid-rebase state
@@ -602,7 +597,7 @@ pub enum Rewrite {
 /// `reorder-todo` path, which re-invokes git-queue). Unlike
 /// [`rebase_reorder_persist`] it **stops** at the first conflict (ADR-0002: the
 /// TUI leaves the standard mid-rebase state rather than persisting markers).
-pub fn rebase_with_todo_stop(base: &str, top_branch: &str, todo: &str) -> Result<Rewrite> {
+pub(crate) fn rebase_with_todo_stop(base: &str, top_branch: &str, todo: &str) -> Result<Rewrite> {
     let git_dir = out(&["rev-parse", "--git-dir"])?;
     let todo_path = std::path::Path::new(&git_dir).join("git-queue-todo");
     std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
@@ -647,7 +642,7 @@ fn shell_single_quote(s: &str) -> String {
 /// `reword`) and supply the new commit message from `message`. Both are
 /// installed via `cp`-based editors, so no helper binary is needed. A reword is
 /// message-only and cannot conflict; a stop is treated as an error and aborted.
-pub fn rebase_with_todo_message(
+pub(crate) fn rebase_with_todo_message(
     base: &str,
     top_branch: &str,
     todo: &str,
@@ -692,7 +687,7 @@ pub fn rebase_with_todo_message(
 /// Like [`rebase_with_todo_stop`] but also supplies the combined commit message
 /// (for a todo containing a `squash`). Stops at a conflict (ADR-0002): on the
 /// resolve path the user's own git supplies the message when they continue.
-pub fn rebase_squash_stop(
+pub(crate) fn rebase_squash_stop(
     base: &str,
     top_branch: &str,
     todo: &str,
@@ -736,7 +731,7 @@ pub fn rebase_squash_stop(
 }
 
 /// Abort an in-progress rebase, returning refs to their pre-rebase state.
-pub fn rebase_abort() -> Result<()> {
+pub(crate) fn rebase_abort() -> Result<()> {
     let mut cmd = Command::new("git");
     cmd.args(["rebase", "--abort"]);
     quiet_git(&mut cmd);
@@ -752,7 +747,7 @@ pub fn rebase_abort() -> Result<()> {
 /// Apply `shas` (front-first) on top of `branch` with conflict markers
 /// persisted, leaving HEAD on `branch`. The cherry-pick analogue of
 /// [`rebase_persist`].
-pub fn cherry_pick_persist(branch: &str, shas: &[String]) -> Result<()> {
+pub(crate) fn cherry_pick_persist(branch: &str, shas: &[String]) -> Result<()> {
     run(&["checkout", "-q", branch])?;
     for sha in shas {
         let mut pick = Command::new("git");
@@ -766,8 +761,7 @@ pub fn cherry_pick_persist(branch: &str, shas: &[String]) -> Result<()> {
 
 fn cherry_pick_in_progress() -> bool {
     out(&["rev-parse", "--git-path", "CHERRY_PICK_HEAD"])
-        .map(|p| std::path::Path::new(&p).exists())
-        .unwrap_or(false)
+        .is_ok_and(|p| std::path::Path::new(&p).exists())
 }
 
 fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
@@ -803,7 +797,7 @@ fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
 /// the commits in `shas`: an interactive rebase whose todo marks those picks
 /// as `reword`, with our own binary as the message editor (it appends the
 /// trailer and exits). Content is untouched, so no conflicts can arise.
-pub fn rebase_stamp_ids(upstream: &str, branch: &str, shas: &[String]) -> Result<()> {
+pub(crate) fn rebase_stamp_ids(upstream: &str, branch: &str, shas: &[String]) -> Result<()> {
     let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
     let exe = exe.display();
     let mut initial = Command::new("git");
@@ -864,13 +858,13 @@ fn drive_rebase_to_completion(what: &str) -> Result<()> {
 
 /// Concatenated commit messages (`%B`) of `range` — used to find Stable-Commit-Ids
 /// embedded in squash-merge bodies.
-pub fn log_messages(range: &str) -> Result<String> {
+pub(crate) fn log_messages(range: &str) -> Result<String> {
     out(&["log", "--format=%B", range])
 }
 
 /// Append a `Stable-Commit-Id` trailer to the commit-message file at `path`, unless
 /// one is already present. `git interpret-trailers` handles placement.
-pub fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
+pub(crate) fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
     run(&[
         "interpret-trailers",
         "--if-exists",
@@ -883,7 +877,7 @@ pub fn add_trailer_to_file(path: &std::path::Path, id: &str) -> Result<()> {
 }
 
 /// The `Stable-Commit-Id` of each commit in `range`, front-first: `(sha, id?)`.
-pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
+pub(crate) fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
     let raw = out(&[
         "log",
         "--reverse",
@@ -904,7 +898,7 @@ pub fn queue_ids(range: &str) -> Result<Vec<(String, Option<String>)>> {
 }
 
 /// Commits in `range`, NEWEST first, as `(Stable-Commit-Id?, subject)` pairs.
-pub fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
+pub(crate) fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
     // The leading `|` anchors each record: `out()` trims the whole capture,
     // which would otherwise eat the leading tab of an id-less first commit.
     let raw = out(&[
@@ -926,7 +920,7 @@ pub fn commits_with_ids(range: &str) -> Result<Vec<(Option<String>, String)>> {
 }
 
 /// The `Stable-Commit-Id` of `rev`'s commit message, if any.
-pub fn queue_id_of(rev: &str) -> Option<String> {
+pub(crate) fn queue_id_of(rev: &str) -> Option<String> {
     out(&[
         "log",
         "-1",
@@ -941,7 +935,7 @@ pub fn queue_id_of(rev: &str) -> Option<String> {
 }
 
 /// Rewrite HEAD's message to add a `Stable-Commit-Id` trailer (content untouched).
-pub fn amend_head_add_queue_id(id: &str) -> Result<()> {
+pub(crate) fn amend_head_add_queue_id(id: &str) -> Result<()> {
     let msg = out(&["log", "-1", "--format=%B", "HEAD"])?;
     let tmp = std::env::temp_dir().join(format!("git-queue-msg-{}", std::process::id()));
     std::fs::write(&tmp, msg + "\n").context("writing temp commit message")?;
@@ -962,7 +956,7 @@ pub fn amend_head_add_queue_id(id: &str) -> Result<()> {
 /// Patch-equivalence of `head` commits against `upstream`, via `git cherry`:
 /// the SHAs (front-first) of commits in `head` whose patch is NOT already
 /// present in `upstream`.
-pub fn cherry_fresh(upstream: &str, head: &str) -> Result<Vec<String>> {
+pub(crate) fn cherry_fresh(upstream: &str, head: &str) -> Result<Vec<String>> {
     let raw = out(&["cherry", upstream, head])?;
     Ok(raw
         .lines()
@@ -973,19 +967,18 @@ pub fn cherry_fresh(upstream: &str, head: &str) -> Result<Vec<String>> {
 /// True if `sha` is a position `branch` has previously been at, per the
 /// branch's reflog. Used to tell "the remote has new work" apart from "the
 /// remote is just our own stale, pre-rewrite state".
-pub fn was_previous_position(branch: &str, sha: &str) -> bool {
+pub(crate) fn was_previous_position(branch: &str, sha: &str) -> bool {
     out(&[
         "reflog",
         "show",
         "--format=%H",
         &format!("refs/heads/{branch}"),
     ])
-    .map(|log| log.lines().any(|l| l == sha))
-    .unwrap_or(false)
+    .is_ok_and(|log| log.lines().any(|l| l == sha))
 }
 
 /// The remote-tracking ref for the trunk, e.g. `origin/main`, if it exists.
-pub fn remote_trunk(remote: &str, trunk: &str) -> Option<String> {
+pub(crate) fn remote_trunk(remote: &str, trunk: &str) -> Option<String> {
     let r = format!("{remote}/{trunk}");
     if ok(&[
         "show-ref",
@@ -1001,6 +994,7 @@ pub fn remote_trunk(remote: &str, trunk: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     #[test]
     fn github_urls_parse_from_both_remote_forms() {
         // Pure parsing check via the same logic, exercised on literals.

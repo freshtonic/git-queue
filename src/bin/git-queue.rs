@@ -1,3 +1,3 @@
 fn main() {
-    git_queue::run()
+    git_queue::run();
 }

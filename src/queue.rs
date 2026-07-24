@@ -12,14 +12,14 @@ use std::collections::HashMap;
 
 const MAX_DEPTH: usize = 1000; // cycle guard
 
-pub struct Queue {
+pub(crate) struct Queue {
     pub trunk: String,
     /// branch -> parent branch
     parents: HashMap<String, String>,
 }
 
 impl Queue {
-    pub fn load() -> Result<Queue> {
+    pub(crate) fn load() -> Result<Self> {
         let trunk = meta::trunk()?;
         let mut parents = HashMap::new();
         for b in meta::tracked_branches() {
@@ -27,19 +27,19 @@ impl Queue {
                 parents.insert(b, p);
             }
         }
-        Ok(Queue { trunk, parents })
+        Ok(Self { trunk, parents })
     }
 
-    pub fn is_tracked(&self, branch: &str) -> bool {
+    pub(crate) fn is_tracked(&self, branch: &str) -> bool {
         self.parents.contains_key(branch)
     }
 
-    pub fn parent_of(&self, branch: &str) -> Option<&str> {
-        self.parents.get(branch).map(|s| s.as_str())
+    pub(crate) fn parent_of(&self, branch: &str) -> Option<&str> {
+        self.parents.get(branch).map(std::string::String::as_str)
     }
 
     /// Direct children of `branch`, sorted for deterministic output.
-    pub fn children(&self, branch: &str) -> Vec<String> {
+    pub(crate) fn children(&self, branch: &str) -> Vec<String> {
         let mut kids: Vec<String> = self
             .parents
             .iter()
@@ -52,7 +52,7 @@ impl Queue {
 
     /// Bottoms of all queues: tracked branches whose parent is untracked
     /// (i.e. sits directly on a base — trunk or otherwise), sorted.
-    pub fn roots(&self) -> Vec<String> {
+    pub(crate) fn roots(&self) -> Vec<String> {
         let mut roots: Vec<String> = self
             .parents
             .iter()
@@ -64,7 +64,7 @@ impl Queue {
     }
 
     /// Tracked branches with no tracked children (tops of lines), sorted.
-    pub fn leaves(&self) -> Vec<String> {
+    pub(crate) fn leaves(&self) -> Vec<String> {
         let mut leaves: Vec<String> = self
             .parents
             .keys()
@@ -77,7 +77,7 @@ impl Queue {
 
     /// Every distinct base branch (untracked parents of tracked branches),
     /// sorted and deduplicated.
-    pub fn bases(&self) -> Vec<String> {
+    pub(crate) fn bases(&self) -> Vec<String> {
         let mut bases: Vec<String> = self
             .parents
             .values()
@@ -92,7 +92,7 @@ impl Queue {
     /// Chain from just-above-the-base up to and including `branch`,
     /// bottom-first. The base is the first untracked ancestor. Errors on a
     /// cycle.
-    pub fn chain_to_base(&self, branch: &str) -> Result<Vec<String>> {
+    pub(crate) fn chain_to_base(&self, branch: &str) -> Result<Vec<String>> {
         let mut chain = vec![branch.to_string()];
         let mut cur = branch.to_string();
         for _ in 0..MAX_DEPTH {
@@ -116,19 +116,20 @@ impl Queue {
     /// The full linear queue line through `branch`, bottom-first, extending
     /// upward while each branch has exactly one child. Stops (without error) at
     /// the first fork; `fork_at` reports where, so callers can warn.
-    pub fn line_through(&self, branch: &str) -> Result<Line> {
+    pub(crate) fn line_through(&self, branch: &str) -> Result<Line> {
         let mut branches = self.chain_to_base(branch)?;
         let base = self
             .parent_of(&branches[0])
-            .expect("bottom branch is tracked, so it has a parent")
-            .to_string();
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("`{}` has no parent branch", branches[0]))?;
         let mut fork_at = None;
-        loop {
-            let top = branches.last().unwrap().clone();
+        // `branches` is never empty (chain_to_base returns at least one), so the
+        // `while let` always enters; it breaks at a leaf or a fork.
+        while let Some(top) = branches.last().cloned() {
             let kids = self.children(&top);
             match kids.len() {
                 0 => break,
-                1 => branches.push(kids.into_iter().next().unwrap()),
+                1 => branches.extend(kids), // exactly one child
                 _ => {
                     fork_at = Some(top);
                     break;
@@ -144,7 +145,7 @@ impl Queue {
 
     /// All descendants of `branch` (children, grandchildren, ...), topologically
     /// ordered (parents before children). Excludes `branch` itself.
-    pub fn descendants_topo(&self, branch: &str) -> Vec<String> {
+    pub(crate) fn descendants_topo(&self, branch: &str) -> Vec<String> {
         let mut out = Vec::new();
         let mut frontier = self.children(branch);
         while let Some(b) = frontier.pop() {
@@ -158,7 +159,7 @@ impl Queue {
 
     /// Leaf branches at or under `branch` (no tracked children). If `branch`
     /// itself has no children, returns just `[branch]`.
-    pub fn leaves_under(&self, branch: &str) -> Vec<String> {
+    pub(crate) fn leaves_under(&self, branch: &str) -> Vec<String> {
         let mut leaves = Vec::new();
         let mut frontier = vec![branch.to_string()];
         while let Some(b) = frontier.pop() {
@@ -176,13 +177,11 @@ impl Queue {
 
     /// Depth of `branch` below trunk (trunk's direct children are depth 1).
     fn depth(&self, branch: &str) -> usize {
-        self.chain_to_base(branch)
-            .map(|c| c.len())
-            .unwrap_or(usize::MAX)
+        self.chain_to_base(branch).map_or(usize::MAX, |c| c.len())
     }
 
     /// All tracked branches in topological order (parents before children).
-    pub fn topo_order(&self) -> Vec<String> {
+    pub(crate) fn topo_order(&self) -> Vec<String> {
         let mut branches: Vec<String> = self.parents.keys().cloned().collect();
         branches.sort_by_key(|b| (self.depth(b), b.clone()));
         branches
@@ -190,7 +189,7 @@ impl Queue {
 }
 
 /// A linear queue line.
-pub struct Line {
+pub(crate) struct Line {
     /// Bottom-first branch names (excludes the base).
     pub branches: Vec<String>,
     /// The branch this line merges into: the bottom branch's (untracked)
@@ -198,4 +197,13 @@ pub struct Line {
     pub base: String,
     /// Set if the line stopped early because a branch had multiple children.
     pub fork_at: Option<String>,
+}
+
+impl Line {
+    /// The tip branch (last in the line). A line always has at least one
+    /// branch, so this never panics.
+    #[allow(clippy::unwrap_used)] // invariant: line_through returns ≥1 branch
+    pub(crate) fn top(&self) -> &str {
+        self.branches.last().unwrap()
+    }
 }

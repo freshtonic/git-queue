@@ -61,10 +61,10 @@ enum Prompt {
 }
 
 impl Prompt {
-    fn label(&self) -> &'static str {
+    const fn label(&self) -> &'static str {
         match self {
-            Prompt::Rename { .. } => "rename branch to",
-            Prompt::AddBoundary { .. } => "new branch name",
+            Self::Rename { .. } => "rename branch to",
+            Self::AddBoundary { .. } => "new branch name",
         }
     }
 }
@@ -177,8 +177,8 @@ struct App {
 }
 
 impl App {
-    fn new(engine: Engine) -> Result<App> {
-        let mut app = App {
+    fn new(engine: Engine) -> Result<Self> {
+        let mut app = Self {
             engine,
             selected: 0,
             focus: Pane::Queue,
@@ -271,7 +271,7 @@ impl App {
         self.move_cursor = next as usize;
     }
 
-    fn cancel_move(&mut self) {
+    const fn cancel_move(&mut self) {
         self.move_from = None;
     }
 
@@ -457,7 +457,7 @@ impl App {
         Ok(())
     }
 
-    fn commit_count(&self) -> usize {
+    const fn commit_count(&self) -> usize {
         self.engine.line().commits.len()
     }
 
@@ -482,7 +482,7 @@ impl App {
     }
 
     /// Whether a pane is currently visible.
-    fn pane_visible(&self, pane: Pane) -> bool {
+    const fn pane_visible(&self, pane: Pane) -> bool {
         match pane {
             Pane::Queue => true,
             Pane::Message => self.show_message,
@@ -503,14 +503,14 @@ impl App {
         }
     }
 
-    fn toggle_message_pane(&mut self) {
+    const fn toggle_message_pane(&mut self) {
         self.show_message = !self.show_message;
         if !self.pane_visible(self.focus) {
             self.focus = Pane::Queue;
         }
     }
 
-    fn toggle_diff_pane(&mut self) {
+    const fn toggle_diff_pane(&mut self) {
         self.show_diff = !self.show_diff;
         if !self.pane_visible(self.focus) {
             self.focus = Pane::Queue;
@@ -518,7 +518,7 @@ impl App {
     }
 
     /// The pane divider (if any) the cursor is on, for a resize drag.
-    fn divider_at(&self, col: u16, row: u16) -> Option<Divider> {
+    const fn divider_at(&self, col: u16, row: u16) -> Option<Divider> {
         // Vertical divider: the shared border between the queue and the right
         // column (only when a right pane is shown).
         if self.right_area.width > 0 {
@@ -543,13 +543,13 @@ impl App {
     fn resize_to(&mut self, col: u16, row: u16) {
         match self.drag {
             Some(Divider::Vertical) if self.body_area.width > 0 => {
-                let rel = (col.saturating_sub(self.body_area.x)) as u32 * 100
-                    / self.body_area.width as u32;
+                let rel = u32::from(col.saturating_sub(self.body_area.x)) * 100
+                    / u32::from(self.body_area.width);
                 self.h_split = (rel as u16).clamp(15, 80);
             }
             Some(Divider::Horizontal) if self.right_area.height > 0 => {
-                let rel = (row.saturating_sub(self.right_area.y)) as u32 * 100
-                    / self.right_area.height as u32;
+                let rel = u32::from(row.saturating_sub(self.right_area.y)) * 100
+                    / u32::from(self.right_area.height);
                 self.v_split = (rel as u16).clamp(15, 85);
             }
             _ => {}
@@ -606,7 +606,7 @@ fn open_url(url: &str) {
 /// Run the interactive editor over a loaded engine. Sets up the terminal,
 /// drives the event loop, and restores the terminal on the way out (even on
 /// panic, via the guard and the chained panic hook).
-pub fn run(engine: Engine) -> Result<()> {
+pub(crate) fn run(engine: Engine) -> Result<()> {
     let mut app = App::new(engine)?;
     let mut term = TerminalGuard::new()?;
     let res = event_loop(&mut app, &mut term.terminal);
@@ -673,7 +673,7 @@ struct TerminalGuard {
 }
 
 impl TerminalGuard {
-    fn new() -> Result<TerminalGuard> {
+    fn new() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -693,7 +693,7 @@ impl TerminalGuard {
             default_hook(info);
         }));
 
-        Ok(TerminalGuard { terminal })
+        Ok(Self { terminal })
     }
 }
 
@@ -741,7 +741,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         // Scroll the help; any other key dismisses it.
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                app.help_scroll = app.help_scroll.saturating_add(1)
+                app.help_scroll = app.help_scroll.saturating_add(1);
             }
             KeyCode::Char('k') | KeyCode::Up => app.help_scroll = app.help_scroll.saturating_sub(1),
             KeyCode::PageDown => app.help_scroll = app.help_scroll.saturating_add(10),
@@ -817,8 +817,8 @@ fn handle_msg_edit_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 /// edits.
 fn handle_msg_prompt_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Char('a') | KeyCode::Char('y') => app.apply_message_edit(),
-        KeyCode::Char('d') | KeyCode::Char('n') => {
+        KeyCode::Char('a' | 'y') => app.apply_message_edit(),
+        KeyCode::Char('d' | 'n') => {
             app.msg_edit = None;
             app.msg_apply_discard = false;
         }
@@ -930,9 +930,9 @@ fn handle_input_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     Ok(())
 }
 
-fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
+const fn handle_quit_confirm_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.quit = true,
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => app.quit = true,
         _ => app.confirm_quit = false,
     }
     Ok(())
@@ -1019,7 +1019,7 @@ fn handle_dissolve_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
         return Ok(());
     };
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+        KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
             app.dissolve_prompt = None;
             match app.engine.apply(Operation::RemoveBoundary { boundary }) {
                 Ok(_) => {
@@ -1038,13 +1038,13 @@ fn handle_dissolve_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
 fn handle_conflict_key(app: &mut App, key: event::KeyEvent) -> Result<()> {
     match key.code {
         // Resolve: suspend to the shell in the mid-rebase state.
-        KeyCode::Char('r') | KeyCode::Char('R') => {
+        KeyCode::Char('r' | 'R') => {
             app.conflict_prompt = false;
             app.suspend = true;
             app.quit = true;
         }
         // Undo: back the operation out cleanly.
-        KeyCode::Char('u') | KeyCode::Char('U') | KeyCode::Esc => {
+        KeyCode::Char('u' | 'U') | KeyCode::Esc => {
             app.conflict_prompt = false;
             match app.engine.undo_conflict() {
                 Ok(()) => app.after_change(),
@@ -1078,7 +1078,7 @@ fn handle_mouse(app: &mut App, m: event::MouseEvent) -> Result<()> {
 
     // In the split selector, a left-click toggles the line under the cursor.
     if let Some(st) = app.split.as_mut() {
-        if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
             let inner_top = app.diff_area.y + 1;
             if m.row >= inner_top {
                 // Add the list's scroll offset so clicks hit-test correctly
@@ -1163,10 +1163,10 @@ fn scroll_focused(app: &mut App, delta: i32) {
 }
 
 fn apply_scroll(current: u16, delta: i32) -> u16 {
-    (current as i32 + delta).max(0) as u16
+    (i32::from(current) + delta).max(0) as u16
 }
 
-fn intersects(area: Rect, col: u16, row: u16) -> bool {
+const fn intersects(area: Rect, col: u16, row: u16) -> bool {
     col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
 }
 
@@ -1215,7 +1215,7 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn draw(f: &mut ratatui::Frame, app: &mut App) {
+fn draw(f: &mut ratatui::Frame<'_>, app: &mut App) {
     // A full-width header, the body, and a one-row footer.
     let outer = Layout::default()
         .direction(Direction::Vertical)
@@ -1287,7 +1287,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 }
 
 /// The diff pane, or the interactive line-selector when a split is in progress.
-fn draw_diff_or_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_diff_or_split(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     if app.split.is_some() {
         draw_split(f, app, area);
     } else {
@@ -1296,7 +1296,7 @@ fn draw_diff_or_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
 }
 
 /// The full-width header bar.
-fn draw_header(f: &mut ratatui::Frame, area: Rect) {
+fn draw_header(f: &mut ratatui::Frame<'_>, area: Rect) {
     let text = format!(" git-queue-tui v{}", env!("CARGO_PKG_VERSION"));
     let header = Paragraph::new(text).style(
         Style::default()
@@ -1309,15 +1309,14 @@ fn draw_header(f: &mut ratatui::Frame, area: Rect) {
 
 /// The footer line: an active prompt, the quit-guard, a status/error message,
 /// or the default key hint — in that priority.
-fn draw_footer(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn draw_footer(f: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let (text, style) = if let Some(from) = app.move_from {
         let subject = app
             .engine
             .line()
             .commits
             .get(from)
-            .map(|c| c.subject.as_str())
-            .unwrap_or("commit");
+            .map_or("commit", |c| c.subject.as_str());
         (
             format!("moving `{subject}` — j/k position · Enter place · Esc cancel"),
             Style::default()
@@ -1406,7 +1405,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'_> {
         ))
 }
 
-fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+fn draw_queue(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
     let move_from = app.move_from;
     let move_cursor = app.move_cursor;
     let commit_count = app.commit_count();
@@ -1424,7 +1423,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     let subject_width = content_width.saturating_sub(PREFIX_WIDTH).max(8);
     let indent = " ".repeat(PREFIX_WIDTH);
 
-    let mut items: Vec<ListItem> = Vec::new();
+    let mut items: Vec<ListItem<'_>> = Vec::new();
     // The list row of the insertion cursor while moving (for scroll/highlight).
     let mut cursor_row: Option<usize> = None;
     for r in &rows {
@@ -1485,7 +1484,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
                 };
                 // Soft-wrap the subject; continuation lines keep the indent.
                 let wrapped = wrap_text(&subject, subject_width);
-                let mut lines: Vec<Line> = Vec::new();
+                let mut lines: Vec<Line<'_>> = Vec::new();
                 for (i, chunk) in wrapped.into_iter().enumerate() {
                     if i == 0 {
                         lines.push(Line::from(vec![
@@ -1531,7 +1530,7 @@ fn draw_queue(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
 
-fn draw_message(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn draw_message(f: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let (title, body, scroll) = match &app.msg_edit {
         // A block cursor marks the edit point (buffer end).
         Some(edit) => {
@@ -1551,8 +1550,8 @@ fn draw_message(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
-fn draw_diff(f: &mut ratatui::Frame, app: &App, area: Rect) {
-    let lines: Vec<Line> = app
+fn draw_diff(f: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    let lines: Vec<Line<'_>> = app
         .diff
         .lines()
         .map(|l| {
@@ -1575,9 +1574,11 @@ fn draw_diff(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
 /// Render the interactive split selector into the diff pane: each `+`/`-` line
 /// gets a ○/◉ marker for its piece, the cursor line is highlighted.
-fn draw_split(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
-    let st = app.split.as_mut().expect("split active");
-    let items: Vec<ListItem> = st
+fn draw_split(f: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
+    let Some(st) = app.split.as_mut() else {
+        return;
+    };
+    let items: Vec<ListItem<'_>> = st
         .lines
         .iter()
         .map(|l| {
@@ -1698,13 +1699,13 @@ const HELP_OPS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
+fn draw_help(f: &mut ratatui::Frame<'_>, area: Rect, scroll: u16) {
     let cyan = Style::default().fg(Color::Cyan);
     let bold = Style::default().add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(Color::DarkGray);
 
-    let mut lines: Vec<Line> = Vec::new();
-    let section = |lines: &mut Vec<Line>, title: &str| {
+    let mut lines: Vec<Line<'_>> = Vec::new();
+    let section = |lines: &mut Vec<Line<'_>>, title: &str| {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             title.to_string(),
@@ -1722,7 +1723,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
     section(&mut lines, "Navigate & view");
     for (k, desc) in HELP_KEYS {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<26} ", k), cyan),
+            Span::styled(format!("  {k:<26} "), cyan),
             Span::raw(*desc),
         ]));
     }
@@ -1730,7 +1731,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
     section(&mut lines, "Operations");
     for (k, title, explanation) in HELP_OPS {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10} ", k), cyan),
+            Span::styled(format!("  {k:<10} "), cyan),
             Span::styled(title.to_string(), bold),
         ]));
         // The explanation wraps under a hanging indent.
@@ -1756,7 +1757,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, scroll: u16) {
         ("wheel", "scroll the pane under the cursor"),
     ] {
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<10} ", k), cyan),
+            Span::styled(format!("  {k:<10} "), cyan),
             Span::raw(desc),
         ]));
     }
@@ -1803,6 +1804,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
@@ -1928,7 +1930,9 @@ mod tests {
     }
 
     fn with_app_over<T>(tmp: tempfile::TempDir, f: impl FnOnce(&mut App) -> T) -> T {
-        let _g = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_current_dir(tmp.path()).unwrap();
         let mut app = App::new(Engine::load().expect("engine loads")).expect("app builds");
         f(&mut app)
@@ -1953,7 +1957,7 @@ mod tests {
             .buffer()
             .content()
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect()
     }
 

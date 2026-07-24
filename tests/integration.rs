@@ -1,3 +1,8 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::used_underscore_binding
+)]
 //! End-to-end tests exercising the `git-queue` binary against throwaway repos.
 //!
 //! These cover the git-only commands (init, create, status, track, sync).

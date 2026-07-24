@@ -6,14 +6,14 @@ use std::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)] // title/base are fetched for completeness; not all are read yet
-pub struct Pr {
+pub(crate) struct Pr {
     pub number: u64,
     pub title: String,
     pub url: String,
     pub state: String, // OPEN | CLOSED | MERGED
     #[serde(rename = "baseRefName")]
     pub base: String,
-    /// APPROVED | CHANGES_REQUESTED | REVIEW_REQUIRED | null
+    /// APPROVED | `CHANGES_REQUESTED` | `REVIEW_REQUIRED` | null
     #[serde(rename = "reviewDecision", default)]
     pub review_decision: Option<String>,
     #[serde(default)]
@@ -38,16 +38,15 @@ fn gh(args: &[&str]) -> Result<String> {
 }
 
 /// True if `gh` is installed and authenticated.
-pub fn ready() -> bool {
+pub(crate) fn ready() -> bool {
     Command::new("gh")
         .args(["auth", "status"])
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Find an existing PR whose head is `branch` (any state), if any.
-pub fn find(branch: &str) -> Result<Option<Pr>> {
+pub(crate) fn find(branch: &str) -> Result<Option<Pr>> {
     let json = gh(&[
         "pr",
         "list",
@@ -65,7 +64,7 @@ pub fn find(branch: &str) -> Result<Option<Pr>> {
 }
 
 /// Create a PR for `head` targeting `base`. Returns the new PR's number.
-pub fn create(head: &str, base: &str, title: &str, body: &str, draft: bool) -> Result<u64> {
+pub(crate) fn create(head: &str, base: &str, title: &str, body: &str, draft: bool) -> Result<u64> {
     let mut args = vec![
         "pr", "create", "--head", head, "--base", base, "--title", title, "--body", body,
     ];
@@ -81,19 +80,19 @@ pub fn create(head: &str, base: &str, title: &str, body: &str, draft: bool) -> R
 }
 
 /// Close a PR without merging it.
-pub fn close(number: u64) -> Result<()> {
+pub(crate) fn close(number: u64) -> Result<()> {
     gh(&["pr", "close", &number.to_string()])?;
     Ok(())
 }
 
 /// Reopen a closed PR. Fails if it can't be reopened (e.g. its base was deleted).
-pub fn reopen(number: u64) -> Result<()> {
+pub(crate) fn reopen(number: u64) -> Result<()> {
     gh(&["pr", "reopen", &number.to_string()])?;
     Ok(())
 }
 
 /// Update an existing PR's base, title and body.
-pub fn edit(number: u64, base: &str, title: &str, body: &str) -> Result<()> {
+pub(crate) fn edit(number: u64, base: &str, title: &str, body: &str) -> Result<()> {
     let num = number.to_string();
     gh(&[
         "pr", "edit", &num, "--base", base, "--title", title, "--body", body,
@@ -103,7 +102,7 @@ pub fn edit(number: u64, base: &str, title: &str, body: &str) -> Result<()> {
 
 /// Post a commit status on `sha` (the merge-order gate). `gh api` resolves the
 /// `{owner}/{repo}` placeholders from the current repository's remote.
-pub fn set_commit_status(
+pub(crate) fn set_commit_status(
     sha: &str,
     context: &str,
     success: bool,

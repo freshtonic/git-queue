@@ -47,10 +47,12 @@ impl Commit {
     }
 }
 
-/// A branch [boundary](crate::queue) over the commit sequence: `name` owns the
-/// contiguous run of commits ending just before index `end` (its exclusive
-/// upper bound into [`EditableLine::commits`]). Boundaries are front → tip, their
-/// `end`s strictly increase, and the last one's `end` equals the commit count.
+/// A branch [boundary](crate::queue) over the commit sequence.
+///
+/// `name` owns the contiguous run of commits ending just before index `end`
+/// (its exclusive upper bound into [`EditableLine::commits`]). Boundaries are
+/// front → tip, their `end`s strictly increase, and the last one's `end` equals
+/// the commit count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boundary {
     /// The branch's full ref name (e.g. `queue/feature/api`).
@@ -74,6 +76,13 @@ pub struct EditableLine {
 }
 
 impl EditableLine {
+    /// The tip (last) branch's name. A loaded line always has at least one
+    /// branch, so this never panics.
+    #[allow(clippy::unwrap_used)] // invariant: a loaded line has ≥1 boundary
+    pub(crate) fn tip_branch(&self) -> &str {
+        &self.boundaries.last().unwrap().name
+    }
+
     /// The run of commits owned by the boundary at `index`, front → tip.
     pub fn commits_of(&self, index: usize) -> &[Commit] {
         let start = if index == 0 {
@@ -89,7 +98,7 @@ impl EditableLine {
         self.boundaries
             .iter()
             .position(|b| commit_index < b.end)
-            .unwrap_or(self.boundaries.len().saturating_sub(1))
+            .unwrap_or_else(|| self.boundaries.len().saturating_sub(1))
     }
 
     /// The queue pane's rows, front (top) → tip (bottom): each branch header
@@ -185,8 +194,7 @@ fn parse_diff(diff: &str) -> Vec<FileDiff> {
             // `a/<path> b/<path>` — take the b-side path.
             let path = rest
                 .split_once(" b/")
-                .map(|(_, b)| b.to_string())
-                .unwrap_or_else(|| rest.to_string());
+                .map_or_else(|| rest.to_string(), |(_, b)| b.to_string());
             files.push(FileDiff {
                 path,
                 hunks: Vec::new(),
@@ -202,8 +210,7 @@ fn parse_diff(diff: &str) -> Vec<FileDiff> {
                 .split_once('+')
                 .and_then(|(_, r)| r.split([',', ' ']).next())
                 .and_then(|n| n.parse::<usize>().ok())
-                .map(|n| n.saturating_sub(1))
-                .unwrap_or(0);
+                .map_or(0, |n| n.saturating_sub(1));
             if let Some(f) = files.last_mut() {
                 f.hunks.push(Hunk {
                     v_start,
@@ -290,8 +297,10 @@ fn reconstruct_middle(
     Some(result)
 }
 
-/// An edit expressed as data. The view produces these from user input; the
-/// engine applies them. Every variant the TUI will ever perform is named here
+/// An edit expressed as data.
+///
+/// The view produces these from user input; the engine applies them. Every
+/// variant the TUI will ever perform is named here
 /// so undo becomes a snapshot↔operation pair and the engine stays directly
 /// testable — but this scaffolding ticket does not yet *apply* any of them
 /// (see [`Engine::apply`]). Later tickets fill the variants in, roughly in the
@@ -421,7 +430,7 @@ impl Engine {
     /// This is headless — it never checks for a TTY. The non-TTY guard lives
     /// in the command layer (`commands::tui`) so that tests can drive `load`
     /// in-process without a terminal.
-    pub fn load() -> Result<Engine> {
+    pub fn load() -> Result<Self> {
         git::ensure_repo()?;
         if git::rebase_in_progress() {
             bail!(
@@ -450,7 +459,7 @@ impl Engine {
             branches.iter().map(|b| (b.clone(), meta::pr(b))).collect();
         let pr_cache = line.boundaries.iter().map(|b| meta::pr(&b.name)).collect();
 
-        Ok(Engine {
+        Ok(Self {
             line,
             qname,
             namespaced,
@@ -516,7 +525,7 @@ impl Engine {
     }
 
     /// The loaded queue line: commit sequence and boundaries.
-    pub fn line(&self) -> &EditableLine {
+    pub const fn line(&self) -> &EditableLine {
         &self.line
     }
 
@@ -536,12 +545,12 @@ impl Engine {
     }
 
     /// Whether any operation is on the undo stack (drives the quit-guard).
-    pub fn has_pending(&self) -> bool {
+    pub const fn has_pending(&self) -> bool {
         !self.undo.is_empty()
     }
 
     /// Whether any operation has mutated git this session.
-    pub fn changed(&self) -> bool {
+    pub const fn changed(&self) -> bool {
         self.touched
     }
 
@@ -623,7 +632,7 @@ impl Engine {
     }
 
     /// Whether a conflicted operation is awaiting resolution.
-    pub fn conflicted(&self) -> bool {
+    pub const fn conflicted(&self) -> bool {
         self.pending_conflict.is_some()
     }
 
@@ -658,7 +667,7 @@ impl Engine {
         let todo = reorder_todo(&self.line, from, to);
         let snap = self.snapshot()?;
         let base = self.line.base.clone();
-        let top = self.line.boundaries.last().unwrap().name.clone();
+        let top = self.line.tip_branch().to_string();
         let land = self.current.clone();
         match git::rebase_with_todo_stop(&base, &top, &todo)? {
             git::Rewrite::Clean => {
@@ -698,7 +707,7 @@ impl Engine {
         let todo = drop_todo(&self.line, &drop);
         let snap = self.snapshot()?;
         let base = self.line.base.clone();
-        let top = self.line.boundaries.last().unwrap().name.clone();
+        let top = self.line.tip_branch().to_string();
         let land = self.current.clone();
         match git::rebase_with_todo_stop(&base, &top, &todo)? {
             git::Rewrite::Clean => {
@@ -737,7 +746,7 @@ impl Engine {
             }
             let todo = drop_todo(&self.line, &drop);
             let base = self.line.base.clone();
-            let top = self.line.boundaries.last().unwrap().name.clone();
+            let top = self.line.tip_branch().to_string();
             match git::rebase_with_todo_stop(&base, &top, &todo)? {
                 git::Rewrite::Clean => self.finish_rewrite(land)?,
                 git::Rewrite::Conflict => {
@@ -965,7 +974,7 @@ impl Engine {
         let todo = squash_todo(&self.line, index);
         let snap = self.snapshot()?;
         let base = self.line.base.clone();
-        let top = self.line.boundaries.last().unwrap().name.clone();
+        let top = self.line.tip_branch().to_string();
         let land = self.current.clone();
         match git::rebase_squash_stop(&base, &top, &todo, &final_message)? {
             git::Rewrite::Clean => {
@@ -997,7 +1006,7 @@ impl Engine {
         let todo = reword_todo(&self.line, index);
         let snap = self.snapshot()?;
         let base = self.line.base.clone();
-        let top = self.line.boundaries.last().unwrap().name.clone();
+        let top = self.line.tip_branch().to_string();
         let land = self.current.clone();
         git::rebase_with_todo_message(&base, &top, &todo, &message)?;
         self.finish_rewrite(&land)?;
@@ -1105,7 +1114,9 @@ impl Engine {
         segs.remove(boundary);
         // Removing the tip boundary would leave its commits unowned; extend the
         // new last branch to cover them.
-        segs.last_mut().unwrap().end = self.line.commits.len();
+        if let Some(last) = segs.last_mut() {
+            last.end = self.line.commits.len();
+        }
         let land = if self.current == removed {
             survivor
         } else {
@@ -1238,13 +1249,7 @@ impl Engine {
     fn restore(&mut self, snap: &Snapshot) -> Result<()> {
         git::detach_head()?;
         let keep: HashSet<&str> = snap.branches.iter().map(|b| b.name.as_str()).collect();
-        for b in self
-            .line
-            .boundaries
-            .iter()
-            .map(|x| x.name.clone())
-            .collect::<Vec<_>>()
-        {
+        for b in self.line.boundaries.iter().map(|x| x.name.clone()) {
             if !keep.contains(b.as_str()) {
                 meta::untrack(&b);
                 git::run(&["branch", "-q", "-D", &b])?;
@@ -1335,11 +1340,7 @@ fn reorder_todo(line: &EditableLine, from: usize, to: usize) -> String {
         0
     } else {
         let anchor = pick(order[to - 1]);
-        lines
-            .iter()
-            .position(|l| *l == anchor)
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        lines.iter().position(|l| *l == anchor).map_or(0, |i| i + 1)
     };
     lines.insert(idx, moved_line);
     lines.join("\n") + "\n"
@@ -1491,6 +1492,7 @@ fn branch_queue_name(branches: &[String]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn commit(subject: &str) -> Commit {

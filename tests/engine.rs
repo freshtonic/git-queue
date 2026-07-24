@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integration tests for the headless `git queue tui` engine, driven
 //! **in-process** against throwaway tempdir repos.
 //!
@@ -134,7 +135,9 @@ fn rebase_continue(dir: &Path) {
 /// Load the engine with the process cwd pointed at `dir`, serialised so
 /// parallel tests don't race the global cwd.
 fn load_in(dir: &Path) -> anyhow::Result<Engine> {
-    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_current_dir(dir).unwrap();
     Engine::load()
 }
@@ -143,7 +146,9 @@ fn load_in(dir: &Path) -> anyhow::Result<Engine> {
 /// call — every `apply` mutates git in the process cwd, so the lock must span
 /// them all.
 fn with_engine<T>(dir: &Path, f: impl FnOnce(&mut Engine) -> T) -> T {
-    let _guard = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_current_dir(dir).unwrap();
     let mut engine = Engine::load().expect("engine loads");
     f(&mut engine)

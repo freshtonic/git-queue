@@ -11,7 +11,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The trailer key, as it appears in commit messages: `Stable-Commit-Id: q-...`.
-pub const TRAILER: &str = "Stable-Commit-Id";
+pub(crate) const TRAILER: &str = "Stable-Commit-Id";
 
 const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
@@ -19,7 +19,7 @@ const CROCKFORD: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 /// Uniform from the first character, so prefix abbreviations (as shown by
 /// `git queue log`) are high-entropy, like git's own hash abbreviations.
 /// Identity is the only job — git already records when a commit was made.
-pub fn new_id() -> String {
+pub(crate) fn new_id() -> String {
     encode(&random_bytes())
 }
 
@@ -40,8 +40,7 @@ fn fallback_random() -> [u8; 16] {
     let mut h = DefaultHasher::new();
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_nanos())
         .hash(&mut h);
     std::process::id().hash(&mut h);
     COUNTER
@@ -60,18 +59,20 @@ fn fallback_random() -> [u8; 16] {
 fn encode(bytes: &[u8]) -> String {
     let mut acc: u128 = 0;
     for b in bytes {
-        acc = (acc << 8) | *b as u128;
+        acc = (acc << 8) | u128::from(*b);
     }
     let mut chars = [b'0'; 26];
     for i in (0..26).rev() {
         chars[i] = CROCKFORD[(acc & 31) as usize];
         acc >>= 5;
     }
-    format!("q-{}", std::str::from_utf8(&chars).unwrap())
+    // `chars` is always valid ASCII base32, so the lossy decode is exact.
+    format!("q-{}", String::from_utf8_lossy(&chars))
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
