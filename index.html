@@ -524,6 +524,10 @@
           <pre class="gs-scroll" style="margin:0; padding:18px 20px; overflow-x:auto; font-family:'JetBrains Mono',monospace; font-size:13px; line-height:1.9; color:var(--text);"><span style="color:var(--green);">$</span> curl --proto '=https' --tlsv1.2 -LsSf \
     https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.sh | sh</pre>
         </div>
+        <div data-os-panel="windows" style="background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden;">
+          <div style="display:flex; align-items:center; justify-content:space-between; padding:11px 16px; border-bottom:1px solid var(--line2); font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--faint); text-transform:uppercase; letter-spacing:0.1em;"><span>install script&nbsp;·&nbsp;recommended</span><button id="btn-cp-ps" style="cursor:pointer; border:none; background:transparent; color:var(--dim); font-family:inherit; font-size:11px;">copy</button></div>
+          <pre class="gs-scroll" style="margin:0; padding:18px 20px; overflow-x:auto; font-family:'JetBrains Mono',monospace; font-size:13px; line-height:1.9; color:var(--text);"><span style="color:var(--green);">&gt;</span> powershell -ExecutionPolicy ByPass -c "irm https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.ps1 | iex"</pre>
+        </div>
         <div data-os-panel="macos linux" style="background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden;">
           <div style="display:flex; align-items:center; justify-content:space-between; padding:11px 16px; border-bottom:1px solid var(--line2); font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--faint); text-transform:uppercase; letter-spacing:0.1em;"><span>homebrew</span><button id="btn-cp-brew" style="cursor:pointer; border:none; background:transparent; color:var(--dim); font-family:inherit; font-size:11px;">copy</button></div>
           <pre class="gs-scroll" style="margin:0; padding:16px 20px; overflow-x:auto; font-family:'JetBrains Mono',monospace; font-size:13.5px; color:var(--text);"><span style="color:var(--green);">$</span> brew install freshtonic/git-queue/git-queue</pre>
@@ -532,12 +536,9 @@
           <div style="display:flex; align-items:center; justify-content:space-between; padding:11px 16px; border-bottom:1px solid var(--line2); font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--faint); text-transform:uppercase; letter-spacing:0.1em;"><span>cargo&nbsp;·&nbsp;from crates.io</span><button id="btn-cp-cargo" style="cursor:pointer; border:none; background:transparent; color:var(--dim); font-family:inherit; font-size:11px;">copy</button></div>
           <pre style="margin:0; padding:16px 20px; font-family:'JetBrains Mono',monospace; font-size:13.5px; color:var(--text);"><span style="color:var(--green);">$</span> cargo install git-queue</pre>
         </div>
-        <div data-os-panel="macos linux" style="background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden;">
+        <div data-os-panel="macos linux windows" style="background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden;">
           <div style="padding:11px 16px; border-bottom:1px solid var(--line2); font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--faint); text-transform:uppercase; letter-spacing:0.1em;">prebuilt binary</div>
-          <p style="margin:0; padding:16px 20px; font-size:14px; color:var(--muted);">Grab an archive for your platform (x86-64 or arm64) from the <a href="https://github.com/freshtonic/git-queue/releases/latest" style="color:var(--green);">latest GitHub release</a>, extract it, and put <code style="color:var(--text);">git-queue</code> on your <code>PATH</code>. Archives and the install script are built by <a href="https://opensource.axo.dev/cargo-dist/" style="color:var(--dim);">dist</a>.</p>
-        </div>
-        <div data-os-panel="windows" style="border:1px solid var(--amber); border-radius:12px; padding:16px 20px; background:color-mix(in srgb, var(--amber) 8%, var(--surface));">
-          <p style="margin:0; font-size:14px; color:var(--muted);">Windows support is still in progress (<a href="https://github.com/freshtonic/git-queue/issues/11" style="color:var(--amber);">#11</a>) — no prebuilt Windows binary or install script yet. <code style="color:var(--text);">cargo install git-queue</code> above builds it from source.</p>
+          <p style="margin:0; padding:16px 20px; font-size:14px; color:var(--muted);">Grab an archive for your platform from the <a href="https://github.com/freshtonic/git-queue/releases/latest" style="color:var(--green);">latest GitHub release</a> (macOS/Linux x86-64 &amp; arm64 <code>.tar.xz</code>, Windows x86-64 <code>.zip</code>), extract it, and put <code style="color:var(--text);">git-queue</code> on your <code>PATH</code>. Archives and install scripts are built by <a href="https://opensource.axo.dev/cargo-dist/" style="color:var(--dim);">dist</a>.</p>
         </div>
         <p style="margin:0; font-size:14.5px; color:var(--dim);">Because the binary is named <code style="color:var(--text);">git-queue</code>, Git runs <code style="color:var(--text);">git queue …</code> for you via its standard subcommand mechanism. Then <code style="color:var(--text);">git queue setup</code> installs the man page — afterwards both <code style="color:var(--text);">man git-queue</code> and <code style="color:var(--text);">git queue --help</code> work (Git routes <code>--help</code> to the man page; use <code style="color:var(--text);">git queue help</code> for inline output).</p>
       </div>
@@ -764,6 +765,7 @@ $ git queue submit               # opens PRs #1/3, #2/3, #3/3, cross-linked</pre
   copyBtn('btn-cp-install', 'cargo install git-queue');
   copyBtn('btn-cp-sh', "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.sh | sh");
   copyBtn('btn-cp-brew', 'brew install freshtonic/git-queue/git-queue');
+  copyBtn('btn-cp-ps', 'powershell -ExecutionPolicy ByPass -c "irm https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.ps1 | iex"');
   copyBtn('btn-cp-cargo', 'cargo install git-queue');
 
   // install: detect the visitor's OS and show its install options (with a manual toggle)
