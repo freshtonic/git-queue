@@ -9,7 +9,12 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app.
 # PowerShell/Windows are omitted until git-queue is Windows-portable (issue #11).
-installers = ["shell"]
+installers = ["homebrew", "shell"]
+# Homebrew tap to publish the generated formula to. dist pushes the formula on
+# release using a token in the HOMEBREW_TAP_TOKEN secret (write access to the tap).
+tap = "freshtonic/homebrew-git-queue"
+# Actually run the formula-publishing job (not just generate the formula locally).
+publish-jobs = ["homebrew"]
 # Target platforms to build apps for (Rust target-triple syntax).
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Path that installers should place binaries in
