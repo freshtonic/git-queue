@@ -3,6 +3,8 @@
 Manage **PR queues**: ordered series of dependent branches and their
 **numbered pull requests**.
 
+**Website:** <https://freshtonic.github.io/git-queue/>
+
 > ⚠️ **Alpha software — run at your own risk.** git-queue is young and moving
 > fast. It rewrites branches and force-pushes (with lease) as part of normal
 > operation. Expect rough edges, keep backups of work you can't afford to
@@ -32,11 +34,17 @@ with a shared queue map.
 ## Install
 
 ```sh
-git clone git@github.com:freshtonic/git-queue.git
-cd git-queue
-cargo install --path .      # installs the `git-queue` binary
+cargo install git-queue     # from crates.io — installs the `git-queue` binary
 git queue --version
 git queue setup             # optional: man page, completion, alias, hooks, gate
+```
+
+Or from a clone (`cargo install --path .`):
+
+```sh
+git clone git@github.com:freshtonic/git-queue.git
+cd git-queue
+cargo install --path .
 ```
 
 `cargo install` puts the `git-queue` binary on your `PATH`, so `git queue …`
@@ -53,8 +61,15 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.sh | sh
 ```
 
-(Windows: the PowerShell installer, `git-queue-installer.ps1`, via `irm … | iex`.)
+On macOS or Linux you can also use Homebrew:
+
+```sh
+brew install freshtonic/git-queue/git-queue
+```
+
 Or just download an archive, extract it, and put `git-queue` on your `PATH`.
+(Windows isn't packaged as a prebuilt binary yet — build it with `cargo install
+git-queue`. Windows support is still in progress; see issue #11.)
 
 ### `git queue setup`
 

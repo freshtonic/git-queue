@@ -2604,7 +2604,7 @@ fn hooks_install() -> Result<()> {
     Ok(())
 }
 
-/// `git queue hooks uninstall` — remove the git-queue hook blocks.
+/// Remove the git-queue hook blocks (invoked by `git queue setup --undo`).
 fn hooks_uninstall() -> Result<()> {
     git::ensure_repo()?;
     let dir = std::path::PathBuf::from(git::out(&["rev-parse", "--git-path", "hooks"])?);

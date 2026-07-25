@@ -5,6 +5,7 @@ edition = "2021"
 description = "Manage queues of dependent branches and their numbered pull requests"
 license = "MIT"
 repository = "https://github.com/freshtonic/git-queue"
+homepage = "https://freshtonic.github.io/git-queue/"
 readme = "README.md"
 keywords = ["git", "pull-request", "stacked-diffs", "rebase", "github"]
 categories = ["command-line-utilities", "development-tools"]
