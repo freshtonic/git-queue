@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 From the next release onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional-Commit history.
 
+## [0.1.3](https://github.com/freshtonic/git-queue/compare/v0.1.2...v0.1.3) - 2026-07-25
+
+### Added
+
+- *(dist)* ship Windows binaries + PowerShell installer
+
+### Other
+
+- *(windows)* run full suite on CI; normalise editor paths for git's shell
+
+## [0.1.2](https://github.com/freshtonic/git-queue/compare/v0.1.1...v0.1.2) - 2026-07-25
+
+### Other
+
+- promote main to release (0.1.2 release plumbing + docs)
+- OS-aware install on the site, homepage link, document git queue tui
+
+## [0.1.1](https://github.com/freshtonic/git-queue/compare/v0.1.0...v0.1.1) - 2026-07-25
+
+### Added
+
+- Windows portability — cross-platform RNG, HOME lookup, browser open ([#11](https://github.com/freshtonic/git-queue/pull/11))
+
+### Other
+
+- crates.io trusted publishing (OIDC) + bump pinned actions to latest
+- adopt strict clippy/rust lints and clean the tree to pass them
+- cargo fmt
+- complete dist setup (v0.32) — shell installer + release workflow
+- hand binary releases to dist (curl|sh installers)
+- seed CHANGELOG and ship prebuilt binaries on each GitHub release
+
 ## [0.1.0] - 2026-07-24
 
 Initial release.
