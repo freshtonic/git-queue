@@ -1614,7 +1614,7 @@ fn checkout_amend_preserves_id_and_rebases_the_rest() {
 
     // Checkout the first commit by its Stable-Commit-Id and amend it.
     queue(dir).args(["checkout", &id1]).assert().success();
-    assert!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]) == "HEAD");
+    assert_eq!(git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]), "HEAD");
     std::fs::write(dir.join("f1.txt"), "v2\n").unwrap();
     git(dir, &["add", "f1.txt"]);
     git(dir, &["commit", "-q", "--amend", "--no-edit"]);
