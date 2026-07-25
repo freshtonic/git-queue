@@ -59,6 +59,11 @@ fn new_repo() -> TempDir {
     // with a key that isn't loaded.
     git(dir, &["config", "commit.gpgsign", "false"]);
     git(dir, &["config", "tag.gpgsign", "false"]);
+    // Pin line endings so working-tree byte assertions hold cross-platform
+    // (git-for-windows defaults core.autocrlf=true, which would rewrite LF→CRLF
+    // on checkout).
+    git(dir, &["config", "core.autocrlf", "false"]);
+    git(dir, &["config", "core.eol", "lf"]);
     commit(dir, "seed.txt");
     tmp
 }
