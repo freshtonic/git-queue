@@ -52,9 +52,9 @@ works immediately (git's standard subcommand mechanism). `git queue setup` then
 walks through the optional extras interactively (see below).
 
 Prefer a prebuilt binary? Each [GitHub
-release](https://github.com/freshtonic/git-queue/releases) ships archives and a
-shell installer (built by [dist](https://opensource.axo.dev/cargo-dist/)) for
-Linux and macOS (x86-64 and arm64):
+release](https://github.com/freshtonic/git-queue/releases) ships archives and
+install scripts (built by [dist](https://opensource.axo.dev/cargo-dist/)) for
+macOS, Linux, and Windows. On macOS/Linux:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -67,9 +67,14 @@ On macOS or Linux you can also use Homebrew:
 brew install freshtonic/git-queue/git-queue
 ```
 
-Or just download an archive, extract it, and put `git-queue` on your `PATH`.
-(Windows isn't packaged as a prebuilt binary yet — build it with `cargo install
-git-queue`. Windows support is still in progress; see issue #11.)
+On Windows, use the PowerShell installer:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/freshtonic/git-queue/releases/latest/download/git-queue-installer.ps1 | iex"
+```
+
+Or just download an archive for your platform (macOS/Linux `.tar.xz`, Windows
+`.zip`), extract it, and put `git-queue` on your `PATH`.
 
 ### `git queue setup`
 
