@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 From the next release onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional-Commit history.
 
+## [0.1.2](https://github.com/freshtonic/git-queue/compare/v0.1.1...v0.1.2) - 2026-07-25
+
+### Other
+
+- promote main to release (0.1.2 release plumbing + docs)
+- OS-aware install on the site, homepage link, document git queue tui
+
 ## [0.1.1](https://github.com/freshtonic/git-queue/compare/v0.1.0...v0.1.1) - 2026-07-25
 
 ### Added
