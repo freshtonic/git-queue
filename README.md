@@ -364,11 +364,12 @@ the release artifacts (`.github/workflows/release-plz.yml`, `release.yml`,
    section as the notes. release-plz itself does not create the release
    (`git_release_enable = false`), so the two don't collide.
 
-Two repository secrets are needed: `CARGO_REGISTRY_TOKEN` (a crates.io API
-token, required to publish) and, optionally, `RELEASE_PLZ_TOKEN` (a fine-grained
-PAT or GitHub App token so the release PR triggers CI; it falls back to the
-default `GITHUB_TOKEN`). Because versions are derived from commit messages, land
-your commits as `feat:` / `fix:` / `feat!:` etc.
+Publishing uses crates.io **Trusted Publishing** (OIDC) — no `CARGO_REGISTRY_TOKEN`
+secret. The crate's trusted publisher on crates.io must be configured for this
+repo and the `release-plz.yml` workflow. Optionally set `RELEASE_PLZ_TOKEN` (a
+fine-grained PAT or GitHub App token) so the release PR triggers CI; it falls
+back to the default `GITHUB_TOKEN`. Because versions are derived from commit
+messages, land your commits as `feat:` / `fix:` / `feat!:` etc.
 
 The dist config lives in `Cargo.toml` (`[workspace.metadata.dist]`) and
 `.github/workflows/release.yml`; regenerate the workflow after changing the
