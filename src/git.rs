@@ -554,6 +554,7 @@ pub(crate) fn rebase_reorder_persist(
     after: Option<&str>,
 ) -> Result<()> {
     let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
+    let exe = shell_path(&exe);
     let mut initial = Command::new("git");
     initial.args([
         "-c",
@@ -570,10 +571,7 @@ pub(crate) fn rebase_reorder_persist(
     quiet_git(&mut initial);
     // Our own binary rewrites the todo; the spec travels via the environment.
     initial
-        .env(
-            "GIT_SEQUENCE_EDITOR",
-            format!("\"{}\" reorder-todo", exe.display()),
-        )
+        .env("GIT_SEQUENCE_EDITOR", format!("\"{exe}\" reorder-todo"))
         .env("GIT_QUEUE_MOVE_SHAS", move_shas.join(" "))
         .env("GIT_QUEUE_MOVE_AFTER", after.unwrap_or(""));
     let _ = initial.status().context("failed to spawn `git rebase`")?;
@@ -604,7 +602,7 @@ pub(crate) fn rebase_with_todo_stop(base: &str, top_branch: &str, todo: &str) ->
 
     // git invokes `$GIT_SEQUENCE_EDITOR <todofile>`, so `cp <our-todo>` becomes
     // `cp <our-todo> <todofile>` — overwriting git's generated todo with ours.
-    let editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
+    let editor = format!("cp {}", shell_single_quote(&shell_path(&todo_path)));
     let mut cmd = Command::new("git");
     cmd.args([
         "rebase",
@@ -638,6 +636,14 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Render a filesystem path for embedding in a shell command that git will run.
+/// git executes `GIT_SEQUENCE_EDITOR`/`GIT_EDITOR` through a POSIX shell — its
+/// bundled `sh` on Windows — which accepts forward slashes but mishandles
+/// backslash separators, so normalise them. On Unix this is a no-op.
+fn shell_path(p: &std::path::Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
 /// Rewrite `base..top_branch` with a caller-supplied todo (one commit marked
 /// `reword`) and supply the new commit message from `message`. Both are
 /// installed via `cp`-based editors, so no helper binary is needed. A reword is
@@ -655,8 +661,8 @@ pub(crate) fn rebase_with_todo_message(
     std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
     std::fs::write(&msg_path, message).context("failed to stage the commit message")?;
 
-    let seq_editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
-    let msg_editor = format!("cp {}", shell_single_quote(&msg_path.to_string_lossy()));
+    let seq_editor = format!("cp {}", shell_single_quote(&shell_path(&todo_path)));
+    let msg_editor = format!("cp {}", shell_single_quote(&shell_path(&msg_path)));
     let mut cmd = Command::new("git");
     cmd.args([
         "rebase",
@@ -700,8 +706,8 @@ pub(crate) fn rebase_squash_stop(
     std::fs::write(&todo_path, todo).context("failed to stage the rebase todo")?;
     std::fs::write(&msg_path, message).context("failed to stage the commit message")?;
 
-    let seq_editor = format!("cp {}", shell_single_quote(&todo_path.to_string_lossy()));
-    let msg_editor = format!("cp {}", shell_single_quote(&msg_path.to_string_lossy()));
+    let seq_editor = format!("cp {}", shell_single_quote(&shell_path(&todo_path)));
+    let msg_editor = format!("cp {}", shell_single_quote(&shell_path(&msg_path)));
     let mut cmd = Command::new("git");
     cmd.args([
         "rebase",
@@ -799,7 +805,7 @@ fn drive_cherry_pick_to_completion(what: &str) -> Result<()> {
 /// trailer and exits). Content is untouched, so no conflicts can arise.
 pub(crate) fn rebase_stamp_ids(upstream: &str, branch: &str, shas: &[String]) -> Result<()> {
     let exe = std::env::current_exe().context("cannot locate the git-queue executable")?;
-    let exe = exe.display();
+    let exe = shell_path(&exe);
     let mut initial = Command::new("git");
     initial.args(["rebase", "-i", "--update-refs", upstream, branch]);
     initial
