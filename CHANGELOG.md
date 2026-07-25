@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 From the next release onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional-Commit history.
 
+## [0.1.3](https://github.com/freshtonic/git-queue/compare/v0.1.2...v0.1.3) - 2026-07-25
+
+### Added
+
+- *(dist)* ship Windows binaries + PowerShell installer
+
+### Other
+
+- *(windows)* run full suite on CI; normalise editor paths for git's shell
+
 ## [0.1.2](https://github.com/freshtonic/git-queue/compare/v0.1.1...v0.1.2) - 2026-07-25
 
 ### Other
